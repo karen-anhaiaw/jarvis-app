@@ -33,6 +33,7 @@ import type { ChatPiece } from "../input/chat-piece.js";
 import { log } from "../logger/index.js";
 import { load as loadSettings } from "../core/settings.js";
 import { loadRouteState, saveRouteState } from "../core/conversation-store.js";
+import { getProviderForModel, getCurrentProvider } from "../config/index.js";
 
 // Anthropic public list price per 1M tokens.
 // Used ONLY for cost estimates in banners — actual billing is whatever

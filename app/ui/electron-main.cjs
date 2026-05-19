@@ -35,29 +35,35 @@ app.whenReady().then(() => {
     ? displays[displayIndex]
     : displays.find(d => d.id !== primary.id) ?? primary;
 
-  win = new BrowserWindow({
-    x: target.bounds.x,
-    y: target.bounds.y,
-    width: target.bounds.width,
-    height: target.bounds.height,
-    frame: false,
-    transparent: true,
-    alwaysOnTop: false,
-    resizable: true,
-    titleBarStyle: 'hidden',
-    backgroundColor: '#00000000',
-    webPreferences: { nodeIntegration: false, contextIsolation: true },
-  });
-
-  win.loadURL('http://localhost:50052');
-
   // Size: 1920x1080 centered on target display
   const winWidth = Math.min(1920, target.bounds.width);
   const winHeight = Math.min(1080, target.bounds.height);
   const winX = target.bounds.x + Math.floor((target.bounds.width - winWidth) / 2);
   const winY = target.bounds.y + Math.floor((target.bounds.height - winHeight) / 2);
-  win.setBounds({ x: winX, y: winY, width: winWidth, height: winHeight });
-  // Temporary: capture ALL console messages for debugging
+
+  win = new BrowserWindow({
+    x: winX,
+    y: winY,
+    width: winWidth,
+    height: winHeight,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: false,
+    resizable: true,
+    show: false,               // hidden until ready-to-show — prevents transparent flash
+    titleBarStyle: 'hidden',
+    backgroundColor: '#0c1020', // matches --bg-body; fallback while CSS loads
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  });
+
+  // Show only when fully painted — eliminates the transparent-window flash on startup
+  win.once('ready-to-show', () => {
+    win.show();
+  });
+
+  win.loadURL('http://localhost:50052');
+
+  // Capture ALL console messages for debugging
   win.webContents.on('console-message', (event, level, message) => {
     console.log('[E' + level + ']', message.slice(0, 300));
   });

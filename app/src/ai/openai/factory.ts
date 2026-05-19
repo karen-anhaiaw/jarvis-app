@@ -1,6 +1,7 @@
 // src/ai/openai/factory.ts
 import OpenAI from "openai";
 import type { AISession, AISessionFactory, CreateWithPromptOptions } from "../types.js";
+import type { EventBus } from "../../core/bus.js";
 import { OpenAISession } from "./session.js";
 import { config } from "../../config/index.js";
 import { log } from "../../logger/index.js";
@@ -13,6 +14,7 @@ export class OpenAISessionFactory implements AISessionFactory {
   private getTools: CapabilityProvider;
   private getSystemPrompt: () => string;
   private sessionCounter = 0;
+  private bus?: EventBus;
 
   constructor(
     getTools: CapabilityProvider,
@@ -28,7 +30,12 @@ export class OpenAISessionFactory implements AISessionFactory {
     log.info({ model: config.model, baseURL: clientOptions?.baseURL ?? "default" }, "OpenAISessionFactory: initialized");
   }
 
-  /** Create a session with custom system prompt overrides */
+  setBus(bus: EventBus): void {
+    this.bus = bus;
+    log.info("OpenAISessionFactory: bus wired");
+  }
+
+  /** Create a session with custom system prompt overrides (actor mode) */
   createWithPrompt(options: CreateWithPromptOptions): AISession {
     const { label, basePromptOverride, roleContext } = options;
     const basePrompt = this.getSystemPrompt();
@@ -49,6 +56,7 @@ export class OpenAISessionFactory implements AISessionFactory {
       systemPrompt: () => fullPrompt,
       getTools: this.getTools,
       label,
+      bus: this.bus,
     });
   }
 
@@ -60,6 +68,7 @@ export class OpenAISessionFactory implements AISessionFactory {
       systemPrompt: this.getSystemPrompt,
       getTools: this.getTools,
       label,
+      bus: this.bus,
     });
 
     if (options?.restoreMessages && options.restoreMessages.length > 0) {
@@ -72,5 +81,14 @@ export class OpenAISessionFactory implements AISessionFactory {
 
   getToolDefinitions(): CapabilityDef[] {
     return this.getTools();
+  }
+
+  getTokenBreakdown(): { systemTokens: number; toolsTokens: number } {
+    // OpenAI doesn't expose token counts pre-call — return rough estimate
+    const systemPrompt = this.getSystemPrompt();
+    const tools = this.getTools();
+    const systemTokens = Math.round(systemPrompt.length / 4);
+    const toolsTokens = Math.round(JSON.stringify(tools).length / 4);
+    return { systemTokens, toolsTokens };
   }
 }

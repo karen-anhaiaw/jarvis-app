@@ -205,6 +205,11 @@ export class HttpServer {
       return;
     }
 
+    if (req.url?.startsWith("/chat/session-info") && req.method === "GET") {
+      this.chatPiece.handleSessionInfo(req, res);
+      return;
+    }
+
     if (req.url === "/hud/hide" && req.method === "POST") {
       let body = "";
       req.on("data", (chunk) => { body += chunk; });

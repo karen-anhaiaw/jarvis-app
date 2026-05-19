@@ -362,6 +362,23 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
     });
   }
 
+  /** GET /chat/session-info?sessionId=X — model and provider for the session. */
+  handleSessionInfo(req: IncomingMessage, res: ServerResponse): void {
+    const sid = this.parseQuerySessionId(req);
+    if (!sid) { this.send400(res, "sessionId query param is required"); return; }
+    try {
+      const managed = this.sessions?.get(sid);
+      const session = managed?.session as any;
+      const model = session?.peekModel?.() ?? session?.stickyModelOverride ?? null;
+      const provider = session?.constructor?.name?.replace("Session", "").toLowerCase() ?? null;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ model, provider }));
+    } catch {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ model: null, provider: null }));
+    }
+  }
+
   /** GET /chat/history?sessionId=X — parsed session messages. */
   handleHistory(req: IncomingMessage, res: ServerResponse): void {
     const sid = this.parseQuerySessionId(req);

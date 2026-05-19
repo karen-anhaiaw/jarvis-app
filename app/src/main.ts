@@ -307,6 +307,15 @@ async function main() {
       const aliases = { opus: "claude-opus-4-7", sonnet: "claude-sonnet-4-6", haiku: "claude-haiku-4-5", ...(cfg.aliases ?? {}) };
       const target = aliases[arg.toLowerCase()] ?? arg;
 
+      // If the target model belongs to a different provider, switch it first
+      const switchResult = setModel(target);
+      if (switchResult.providerChanged) {
+        await providerRouter.switchTo(switchResult.provider, bus);
+        sessions.updateFactory(providerRouter.getFactory());
+        sessions.setProvider(switchResult.provider);
+        jarvisCore.abortSession(sessionId);
+      }
+
       const newRoute = modelRouter.setStickyModel(sessionId, target, "slash:/model");
       return {
         message: `🔧 Sticky model for ${sessionId}: \`${newRoute.sticky}\` (was \`${route?.sticky ?? "(default)"}\`)`,
@@ -331,6 +340,7 @@ async function main() {
   // Uses the active provider's factory and the global capability registry.
   const delegateTaskPiece = new DelegateTaskPiece({
     getFactory: () => providerRouter.getFactory(),
+    getFactoryForModel: (model) => providerRouter.getFactoryForModel(model),
     registry: capabilityRegistry,
   });
   pieces.push(delegateTaskPiece);
@@ -348,6 +358,7 @@ async function main() {
   await providerRouter.switchTo(getCurrentProvider(), bus);
   sessions.updateFactory(providerRouter.getFactory());
   sessions.setProvider(getCurrentProvider());
+  sessions.setProviderRouter(providerRouter);
   sessions.startAutoSave();
   pluginManager.setFactory(providerRouter.getFactory());
   pluginManager.setSessionManager(sessions);
