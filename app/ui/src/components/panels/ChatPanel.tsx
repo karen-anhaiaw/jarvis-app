@@ -3,6 +3,7 @@ import { ChatTimeline, type ChatEntry } from './ChatTimeline'
 import { ChatAnchorSlot } from './ChatAnchorSlot'
 import { chatAnchorRegistry, useAnchors } from '../../hooks/useChatAnchors'
 import { SlashMenu } from './SlashMenu'
+import { ModelPicker } from './ModelPicker'
 
 interface PendingImage {
   label: string
@@ -15,6 +16,7 @@ interface ChatPanelFeatures {
   slashMenu?: boolean
   images?: boolean
   compaction?: boolean
+  modelPicker?: boolean
 }
 
 /**
@@ -39,6 +41,7 @@ const defaultFeatures: ChatPanelFeatures = {
   slashMenu: true,
   images: true,
   compaction: true,
+  modelPicker: true,
 }
 
 const defaultUserLabel = (source?: string) => {
@@ -750,6 +753,9 @@ export function ChatPanel({
       />
 
       <div className="chatDockedInput">
+        {features.modelPicker && (
+          <ModelPicker sessionId={sessionId} sendUrl={sendUrl} />
+        )}
         <div style={{ display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {features.slashMenu && (
             <SlashMenu

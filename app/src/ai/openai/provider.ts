@@ -2,8 +2,14 @@
 import type { Provider, ProviderConfig } from "../provider.js";
 import { OpenAISessionFactory } from "./factory.js";
 import { OpenAIMetricsHud } from "./metrics-hud.js";
+import { load as loadSettings } from "../../core/settings.js";
 
 export function createOpenAIProvider(config: ProviderConfig): Provider {
+  const providerCfg = loadSettings().providers?.["openai"] ?? {};
+  // Priority: settings.user.json > env vars. No cross-provider fallback.
+  const baseURL = providerCfg.baseUrl ?? process.env.OPENAI_BASE_URL;
+  const apiKey = providerCfg.apiKey ?? process.env.OPENAI_API_KEY;
+
   const factory = new OpenAISessionFactory(
     config.getTools,
     () => {
@@ -15,8 +21,9 @@ export function createOpenAIProvider(config: ProviderConfig): Provider {
       if (instructions) parts.push(instructions);
       return parts.filter(Boolean).join("\n\n---\n\n");
     },
+    { apiKey, baseURL },
   );
-  const metricsPiece = new OpenAIMetricsHud();
+  const metricsPiece = new OpenAIMetricsHud(factory);
 
   return {
     name: "openai",

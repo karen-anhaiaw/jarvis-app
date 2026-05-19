@@ -1,6 +1,18 @@
 import { useRef, useEffect, useState } from 'react'
 import type { HudComponentState } from '../../types/hud'
 
+const MODEL_NOTES: Record<string, string> = {
+  'claude-opus-4-7':   'Max',
+  'claude-opus-4-6':   'Max',
+  'claude-sonnet-4-6': 'High',
+  'claude-haiku-4-5':  'Fast',
+  'gpt-4o':            'OpenAI',
+  'gpt-4o-mini':       'Fast',
+  'gpt-4.1':           'OpenAI',
+  'o3':                'Reason',
+  'o4-mini':           'Fast',
+}
+
 interface RequestSnapshot {
   seq: number
   timestamp: number
@@ -227,27 +239,43 @@ export function TokenCounterRenderer({ state }: { state: HudComponentState }) {
     ctx.font = '10px "JetBrains Mono", monospace'
     ctx.fillText(`IN ${fmt(sessionInputTotal)}  OUT ${fmt(sessionOutputTokens)}  REQ ${requestCount}`, cx, sy + 12)
 
-    // ─── Streaming status or Model ───
+    // ─── Model + effort (always visible) ───
+    const modelNote = MODEL_NOTES[model]
+    ctx.font = '10px "Orbitron", monospace'
+    if (modelNote) {
+      const modelText = model
+      const noteText = ` · ${modelNote}`
+      const modelW = ctx.measureText(modelText).width
+      const noteW = ctx.measureText(noteText).width
+      const totalW = modelW + noteW
+      const startX = cx - totalW / 2
+      ctx.textAlign = 'left'
+      ctx.fillStyle = '#4af'
+      ctx.fillText(modelText, startX, sy + 26)
+      ctx.fillStyle = '#6a8a5a'
+      ctx.fillText(noteText, startX + modelW, sy + 26)
+      ctx.textAlign = 'center'
+    } else {
+      ctx.fillStyle = '#4af'
+      ctx.fillText(model, cx, sy + 26)
+    }
+
+    // ─── Streaming status (only when streaming, line below model) ───
     if (streaming) {
       const elapsedSec = Math.floor(elapsedMs / 1000)
       const estOutputTokens = Math.round(streamingOutputChars / 4) // rough char→token estimate
       const statusText = `${streamingVerb}… ${elapsedSec}s · ↑ ${fmt(estOutputTokens)} tok`
-      // Pulsing effect
       const pulseAlpha = 0.6 + 0.4 * Math.sin(Date.now() / 400)
       ctx.globalAlpha = pulseAlpha
       ctx.fillStyle = '#f1fa8c'
       ctx.font = '500 10px "JetBrains Mono", monospace'
-      ctx.fillText(statusText, cx, sy + 24)
+      ctx.fillText(statusText, cx, sy + 40)
       ctx.globalAlpha = 1
-    } else {
-      ctx.fillStyle = '#4af'
-      ctx.font = '9px "Orbitron", monospace'
-      ctx.fillText(model, cx, sy + 24)
     }
 
     // ─── Request History Sparkline (stacked bars) ───
     if (requestHistory.length > 0) {
-      const sparkTopY = sy + 40
+      const sparkTopY = sy + 56
       const chartPadL = 12
       const labelAreaR = 44
       const chartX0 = chartPadL
@@ -459,7 +487,7 @@ export function TokenCounterRenderer({ state }: { state: HudComponentState }) {
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
-        <canvas ref={canvasRef} width={300} height={420} />
+        <canvas ref={canvasRef} width={300} height={396} />
       </div>
     </div>
   )

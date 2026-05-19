@@ -3,6 +3,7 @@ import type { EventBus } from "../core/bus.js";
 import type { AISessionFactory } from "./types.js";
 import type { Piece } from "../core/piece.js";
 import { log } from "../logger/index.js";
+import { getProviderForModel } from "../config/index.js";
 
 export interface Provider {
   readonly name: string;
@@ -27,6 +28,8 @@ export class ProviderRouter {
   private bus: EventBus | undefined;
   private providerConfig: ProviderConfig;
   private providerFactories = new Map<string, (config: ProviderConfig) => Provider>();
+  /** Cached shadow factories for cross-provider sessions (created on demand, reused). */
+  private shadowFactories = new Map<string, AISessionFactory>();
 
   constructor(providerConfig: ProviderConfig) {
     this.providerConfig = providerConfig;
@@ -43,6 +46,34 @@ export class ProviderRouter {
   getFactory(): AISessionFactory {
     if (!this.active) throw new Error("No active provider");
     return this.active.factory;
+  }
+
+  /**
+   * Returns the factory for the provider that owns `model`.
+   * Falls back to the active factory if the provider isn't registered
+   * or no provider is active yet.
+   */
+  getFactoryForModel(model: string): AISessionFactory {
+    const providerName = getProviderForModel(model);
+    const createProvider = this.providerFactories.get(providerName);
+    // If the requested provider IS already active, just return it (no new instance)
+    if (this.active?.name === providerName) {
+      return this.active.factory;
+    }
+    // Create a lightweight provider instance just for its factory (cached).
+    // Note: this doesn't start its metricsPiece — it's factory-only.
+    if (createProvider && this.bus) {
+      const cached = this.shadowFactories.get(providerName);
+      if (cached) return cached;
+      const p = createProvider(this.providerConfig);
+      p.factory.setBus?.(this.bus);
+      this.shadowFactories.set(providerName, p.factory);
+      log.info({ model, providerName }, "ProviderRouter: shadow factory created for cross-provider session");
+      return p.factory;
+    }
+    // Fallback: active factory
+    log.warn({ model, providerName }, "ProviderRouter: no factory for model, falling back to active");
+    return this.getFactory();
   }
 
   async switchTo(providerName: string, bus: EventBus): Promise<string> {

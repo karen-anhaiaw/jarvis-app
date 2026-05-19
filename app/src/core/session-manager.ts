@@ -1,6 +1,7 @@
 // src/core/session-manager.ts
 import type { AISession, AISessionFactory, CreateWithPromptOptions } from "../ai/types.js";
 import type { EventBus } from "./bus.js";
+import type { ProviderRouter } from "../ai/provider.js";
 import { log } from "../logger/index.js";
 import {
   saveConversation,
@@ -29,6 +30,7 @@ interface SessionCreationOptions {
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   private factory: AISessionFactory;
+  private providerRouter?: ProviderRouter;
   private currentProvider: string = "anthropic";
   private autoSaveTimer?: ReturnType<typeof setInterval>;
   private ephemeralSessions = new Set<string>();
@@ -57,6 +59,26 @@ export class SessionManager {
   /** Set current provider name (needed for save/restore compatibility checks) */
   setProvider(provider: string): void {
     this.currentProvider = provider;
+  }
+
+  /**
+   * Wire the ProviderRouter so sessions can be created with the correct
+   * factory for their target model (cross-provider actors).
+   */
+  setProviderRouter(router: ProviderRouter): void {
+    this.providerRouter = router;
+  }
+
+  /**
+   * Resolve the factory to use for a given model.
+   * If a ProviderRouter is wired and the model belongs to a different provider,
+   * returns that provider's factory instead of the active one.
+   */
+  private factoryFor(model?: string): AISessionFactory {
+    if (model && this.providerRouter) {
+      return this.providerRouter.getFactoryForModel(model);
+    }
+    return this.factory;
   }
 
   /** Start auto-saving conversation state periodically */
@@ -169,8 +191,11 @@ export class SessionManager {
    * Get or create a session with custom prompt options.
    * If the session already exists, returns it (prompt options are ignored — they're set at creation).
    * If new, creates with createWithPrompt and optionally restores saved conversation.
+   *
+   * Pass `model` to use the correct provider factory for cross-provider actors
+   * (e.g. an actor with preferred_model: "gpt-4o" when the active provider is Anthropic).
    */
-  getWithPrompt(sessionId: string, options: CreateWithPromptOptions): ManagedSession {
+  getWithPrompt(sessionId: string, options: CreateWithPromptOptions & { model?: string }): ManagedSession {
     let managed = this.sessions.get(sessionId);
     if (managed) return managed;
 
@@ -182,8 +207,9 @@ export class SessionManager {
     const saved = loadConversation(sessionId, this.currentProvider);
     const restoredSessionId = saved?.instanceId ?? (saved as any)?.apiSessionId; // migrate old field
 
-    // Create with custom prompt + stable session id
-    const session = this.factory.createWithPrompt({ ...options, restoredSessionId });
+    // Resolve the factory for the target model (cross-provider actor support)
+    const factory = this.factoryFor(options.model);
+    const session = factory.createWithPrompt({ ...options, restoredSessionId });
 
     if (saved && saved.messages.length > 0) {
       session.setMessages?.(saved.messages);
@@ -199,7 +225,7 @@ export class SessionManager {
       createdAt: Date.now(),
     };
     this.sessions.set(sessionId, managed);
-    log.info({ sessionId, hasRestore: !!(saved && saved.messages.length > 0) }, "SessionManager: created session with custom prompt");
+    log.info({ sessionId, model: options.model, hasRestore: !!(saved && saved.messages.length > 0) }, "SessionManager: created session with custom prompt");
     this.fireCreated(sessionId, managed);
     return managed;
   }

@@ -1,10 +1,18 @@
 // src/ai/openai/session.ts
 import OpenAI from "openai";
 import type { AISession, AIStreamEvent, CapabilityCall, CapabilityResult, ImageBlock } from "../types.js";
+import type { EventBus } from "../../core/bus.js";
 import { log } from "../../logger/index.js";
 
 type CapabilityDef = { name: string; description: string; input_schema: Record<string, unknown> };
 type Message = OpenAI.Chat.ChatCompletionMessageParam;
+
+const STREAMING_VERBS = [
+  "Analyzing", "Bloviating", "Cogitating", "Deliberating", "Elaborating",
+  "Formulating", "Generating", "Hypothesizing", "Inferring", "Juggling",
+  "Kernelizing", "Lucubrating", "Musing", "Noodling", "Orchestrating",
+  "Pontificating", "Quantifying", "Reasoning", "Synthesizing", "Transmuting",
+];
 
 export class OpenAISession implements AISession {
   readonly sessionId: string;
@@ -16,12 +24,26 @@ export class OpenAISession implements AISession {
   private label: string;
   private abortController?: AbortController;
 
+  // ── Model routing (ModelRouter support) ──────────────────────────────
+  private nextModelOverride?: string;
+  private stickyModelOverride?: string;
+
+  // ── Tool filtering (actor support) ───────────────────────────────────
+  private toolFilter?: (toolName: string) => boolean;
+
+  // ── Context injector (Mnemosyne support) ─────────────────────────────
+  private contextInjector?: (sessionId: string) => string[];
+
+  // ── Bus (telemetry) ───────────────────────────────────────────────────
+  private bus?: EventBus;
+
   constructor(opts: {
     client: OpenAI;
     model: string | (() => string);
     systemPrompt: string | (() => string);
     getTools: () => CapabilityDef[];
     label: string;
+    bus?: EventBus;
   }) {
     this.sessionId = crypto.randomUUID();
     this.client = opts.client;
@@ -31,7 +53,59 @@ export class OpenAISession implements AISession {
     this.getSystemPrompt = typeof sp === "function" ? sp : () => sp;
     this.getTools = opts.getTools;
     this.label = opts.label;
+    this.bus = opts.bus;
     log.info({ label: this.label, sessionId: this.sessionId }, "OpenAISession: created");
+  }
+
+  // ── Model routing ─────────────────────────────────────────────────────
+
+  setNextModelOverride(model: string | undefined): void {
+    this.nextModelOverride = model;
+  }
+
+  setStickyModelOverride(model: string | undefined): void {
+    this.stickyModelOverride = model;
+  }
+
+  peekModel(): string {
+    return this.nextModelOverride ?? this.stickyModelOverride ?? this.getModel();
+  }
+
+  // ── Tool filtering ────────────────────────────────────────────────────
+
+  setToolFilter(filter: ((toolName: string) => boolean) | undefined): void {
+    this.toolFilter = filter;
+  }
+
+  // ── Context injector ──────────────────────────────────────────────────
+
+  setContextInjector(injector: (sessionId: string) => string[]): void {
+    this.contextInjector = injector;
+  }
+
+  // ── Cleanup aborted tools ─────────────────────────────────────────────
+
+  cleanupAbortedTools(pendingCalls: CapabilityCall[]): void {
+    if (pendingCalls.length === 0) return;
+    // Remove trailing assistant messages that contain unresolved tool calls
+    const pendingIds = new Set(pendingCalls.map(c => c.id));
+    // Walk backwards and remove incomplete tool sequences
+    while (this.messages.length > 0) {
+      const last = this.messages[this.messages.length - 1];
+      if (last.role === "tool") {
+        this.messages.pop();
+        continue;
+      }
+      if (last.role === "assistant" && last.tool_calls) {
+        const hasPending = last.tool_calls.some((tc: any) => pendingIds.has(tc.id));
+        if (hasPending) {
+          this.messages.pop();
+          break;
+        }
+      }
+      break;
+    }
+    log.info({ label: this.label, cleaned: pendingCalls.length }, "OpenAISession: aborted tools cleaned up");
   }
 
   abort(): void {
@@ -43,6 +117,17 @@ export class OpenAISession implements AISession {
   }
 
   async *sendAndStream(prompt: string, images?: ImageBlock[]): AsyncGenerator<AIStreamEvent, void> {
+    // Inject context (Mnemosyne, etc.) as system additions
+    if (this.contextInjector) {
+      const injections = this.contextInjector(this.label);
+      if (injections.length > 0) {
+        // Prepend injections as a user message that looks like system context
+        const injectionText = injections.join("\n\n");
+        this.messages.push({ role: "user", content: `<context>\n${injectionText}\n</context>` });
+        this.messages.push({ role: "assistant", content: "Understood. I have the context." });
+      }
+    }
+
     if (images && images.length > 0) {
       const content: OpenAI.Chat.ChatCompletionContentPart[] = [];
       for (const img of images) {
@@ -98,8 +183,19 @@ export class OpenAISession implements AISession {
     log.info({ label: this.label, restored: messages.length }, "OpenAISession: messages restored");
   }
 
+  private getEffectiveModel(): string {
+    const model = this.nextModelOverride ?? this.stickyModelOverride ?? this.getModel();
+    // Consume next override after first use
+    if (this.nextModelOverride) {
+      this.nextModelOverride = undefined;
+    }
+    return model;
+  }
+
   private toOpenAITools(): OpenAI.Chat.ChatCompletionTool[] {
-    return this.getTools().map(t => ({
+    const tools = this.getTools();
+    const filtered = this.toolFilter ? tools.filter(t => this.toolFilter!(t.name)) : tools;
+    return filtered.map(t => ({
       type: "function" as const,
       function: {
         name: t.name,
@@ -115,9 +211,22 @@ export class OpenAISession implements AISession {
 
     const systemPrompt = this.getSystemPrompt();
     const tools = this.toOpenAITools();
-    const model = this.getModel();
+    const model = this.getEffectiveModel();
+
+    // Pick a streaming verb for this request
+    const streamingVerb = STREAMING_VERBS[Math.floor(Math.random() * STREAMING_VERBS.length)];
 
     log.info({ label: this.label, model, messageCount: this.messages.length, toolCount: tools.length }, "OpenAISession: calling API");
+
+    // Emit streaming start
+    this.bus?.publish({
+      channel: "ai.stream",
+      source: this.label,
+      target: this.label,
+      type: "delta",
+      text: "",
+      data: { streamingVerb, model },
+    } as any);
 
     try {
       const allMessages: Message[] = [
@@ -184,6 +293,22 @@ export class OpenAISession implements AISession {
       // If no tool calls, save assistant message
       if (toolCalls.length === 0 && fullText) {
         this.messages.push({ role: "assistant", content: fullText });
+      }
+
+      // Emit usage telemetry to bus
+      if (usage && this.bus) {
+        this.bus.publish({
+          channel: "system.event",
+          source: this.label,
+          event: "api.openai.usage",
+          data: {
+            sessionId: this.label,
+            model,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            durationMs: Date.now() - t0,
+          },
+        } as any);
       }
 
       yield {

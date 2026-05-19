@@ -39,11 +39,14 @@ import type { EventBus } from "../core/bus.js";
 import type { CapabilityRegistry } from "../capabilities/registry.js";
 import type { AISessionFactory, AIStreamEvent, CapabilityCall, CapabilityResult } from "../ai/types.js";
 import { AnthropicSessionFactory } from "../ai/anthropic/factory.js";
+import { getProviderForModel } from "../config/index.js";
 import { log } from "../logger/index.js";
 
 export interface DelegateTaskOptions {
   /** Provides the AI factory — re-resolved on each call so model swaps stick. */
   getFactory: () => AISessionFactory;
+  /** Provides the factory for a specific model (cross-provider delegates). */
+  getFactoryForModel?: (model: string) => AISessionFactory;
   /** Capability registry — used to execute tools the worker calls. */
   registry: CapabilityRegistry;
   /** Roles directory — defaults to ~/.jarvis/roles */
@@ -198,14 +201,12 @@ export class DelegateTaskPiece implements Piece {
       "DelegateTask: spawning worker",
     );
 
-    const factory = this.opts.getFactory();
-    if (!(factory instanceof AnthropicSessionFactory)) {
-      return { error: "delegate_read_task currently requires the Anthropic provider." };
-    }
+    // Resolve factory: use model-specific factory if available (cross-provider)
+    const factory = this.opts.getFactoryForModel
+      ? this.opts.getFactoryForModel(effectiveModel)
+      : this.opts.getFactory();
 
     // Build the worker's system prompt = role body (as the base override).
-    // We don't pass roleContext separately — the role body already IS the
-    // full custom system prompt for this isolated worker.
     const session = factory.createWithPrompt({
       label: workerLabel,
       basePromptOverride: role.body,
