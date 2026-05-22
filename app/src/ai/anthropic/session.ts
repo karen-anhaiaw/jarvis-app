@@ -235,11 +235,17 @@ export class AnthropicSession implements AISession {
     return raw.filter((t) => this.toolFilter!(t.name));
   }
 
-  async *sendAndStream(prompt: string, images?: ImageBlock[]): AsyncGenerator<AIStreamEvent, void> {
+  async *sendAndStream(prompt: string | import("../types.js").PromptBlock[], images?: ImageBlock[]): AsyncGenerator<AIStreamEvent, void> {
+    const promptBlocks: Array<{ type: "text"; text: string }> = Array.isArray(prompt)
+      ? prompt
+      : [{ type: "text", text: prompt }];
+    const promptPreviewText = promptBlocks.map(b => b.text).join(" ").slice(0, 120);
+
     log.info({
       label: this.label,
-      promptLength: prompt.length,
-      promptPreview: prompt.slice(0, 120),
+      promptLength: promptBlocks.reduce((n, b) => n + b.text.length, 0),
+      promptPreview: promptPreviewText,
+      promptBlocks: promptBlocks.length,
       images: images?.length ?? 0,
       messageCountBefore: this.messages.length,
       lastMessageRole: this.messages[this.messages.length - 1]?.role,
@@ -266,6 +272,10 @@ export class AnthropicSession implements AISession {
       if (memoryText) {
         content.push({ type: "text", text: memoryText, cache_control: { type: "ephemeral" } } as any);
       }
+      // Prompt blocks (may be multiple for inter-session context separation)
+      for (const block of promptBlocks) {
+        content.push({ type: "text", text: block.text });
+      }
       for (const img of images) {
         content.push({
           type: "image" as any,
@@ -273,18 +283,24 @@ export class AnthropicSession implements AISession {
         } as any);
         content.push({ type: "text", text: `[${img.label}]` });
       }
-      content.push({ type: "text", text: prompt });
       this.messages.push({ role: "user", content });
     } else if (memoryText) {
       this.messages.push({
         role: "user",
         content: [
           { type: "text", text: memoryText, cache_control: { type: "ephemeral" } } as any,
-          { type: "text", text: prompt },
+          ...promptBlocks.map(b => ({ type: "text" as const, text: b.text })),
         ],
       });
+    } else if (promptBlocks.length === 1) {
+      // Single block — keep the simple string form (no array wrapping needed)
+      this.messages.push({ role: "user", content: promptBlocks[0].text });
     } else {
-      this.messages.push({ role: "user", content: prompt });
+      // Multiple blocks (e.g. [SYSTEM] context + actual prompt)
+      this.messages.push({
+        role: "user",
+        content: promptBlocks.map(b => ({ type: "text" as const, text: b.text })),
+      });
     }
 
     // Detect alternation violations — Anthropic API rejects two consecutive
