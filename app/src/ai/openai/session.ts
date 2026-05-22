@@ -116,7 +116,7 @@ export class OpenAISession implements AISession {
     }
   }
 
-  async *sendAndStream(prompt: string, images?: ImageBlock[]): AsyncGenerator<AIStreamEvent, void> {
+  async *sendAndStream(prompt: string | import("../types.js").PromptBlock[], images?: ImageBlock[]): AsyncGenerator<AIStreamEvent, void> {
     // Inject context (Mnemosyne, etc.) as system additions
     if (this.contextInjector) {
       const injections = this.contextInjector(this.label);
@@ -128,6 +128,12 @@ export class OpenAISession implements AISession {
       }
     }
 
+    // Normalize prompt to text — OpenAI doesn't need granular block separation
+    const promptText = Array.isArray(prompt)
+      ? prompt.map(b => b.text).join("\n")
+      : prompt;
+
+
     if (images && images.length > 0) {
       const content: OpenAI.Chat.ChatCompletionContentPart[] = [];
       for (const img of images) {
@@ -137,10 +143,10 @@ export class OpenAISession implements AISession {
         });
         content.push({ type: "text", text: `[${img.label}]` });
       }
-      content.push({ type: "text", text: prompt });
+      content.push({ type: "text", text: promptText });
       this.messages.push({ role: "user", content });
     } else {
-      this.messages.push({ role: "user", content: prompt });
+      this.messages.push({ role: "user", content: promptText });
     }
     yield* this.streamFromAPI();
   }

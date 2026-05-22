@@ -80,7 +80,7 @@ export default function CronRenderer({ state }: { state: any }) {
 
   const jobList: JobData[] = data.jobList ?? [];
   const [now, setNow] = useState(Date.now());
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState({} as Record<string, boolean>);
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 10_000);

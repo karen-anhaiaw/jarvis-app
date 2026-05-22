@@ -63,9 +63,19 @@ export interface ImageBlock {
  */
 export type ContextInjectorFn = (sessionId: string) => string[];
 
+/**
+ * A single text block for structured prompts (e.g. inter-session messages
+ * where the [SYSTEM] context and the actual user text should be separate
+ * content blocks rather than one concatenated string).
+ */
+export interface PromptBlock {
+  type: "text";
+  text: string;
+}
+
 export interface AISession {
   readonly sessionId: string;
-  sendAndStream(prompt: string, images?: ImageBlock[]): AsyncGenerator<AIStreamEvent, void>;
+  sendAndStream(prompt: string | PromptBlock[], images?: ImageBlock[]): AsyncGenerator<AIStreamEvent, void>;
   addToolResults(toolCalls: CapabilityCall[], results: CapabilityResult[]): void;
   continueAndStream(): AsyncGenerator<AIStreamEvent, void>;
   abort(): void;

@@ -120,6 +120,11 @@ export class JarvisCore implements Piece {
   async start(bus: EventBus): Promise<void> {
     this.bus = bus;
 
+    // Register actor-* sessions as owned — JarvisCore is the sole stream
+    // processor for ALL sessions. The actor-runner plugin only manages
+    // lifecycle (create/destroy/configure); it does not intercept ai.request.
+    this.registerSessionPattern(/^actor-/);
+
     this.bus.subscribe<AIRequestMessage>("ai.request", (msg) => {
       if (msg.target && this.isOwnedSession(msg.target)) {
         return this.handlePrompt(msg);
@@ -295,6 +300,36 @@ export class JarvisCore implements Piece {
 
     this.currentTrace.set(sessionId, traceId);
 
+    // When a message arrives from another session (not the human chat input)
+    // and carries a replyTo, deliver it as TWO separate content blocks:
+    //   [0] [SYSTEM] preamble — origin + reply routing instruction
+    //   [1] the actual message text
+    // This keeps context and content structurally distinct in the message history.
+    // Inter-session: message from another session (not user input, not jarvis-core
+    // routing its own result back) AND has a replyTo target.
+    // Excludes jarvis-core as source to avoid injecting preamble on task dispatches
+    // (actor_dispatch flows through JarvisCore with source="jarvis-core", replyTo="main").
+    const isInterSession = msg.source !== "chat-input"
+      && msg.source !== "jarvis-core"
+      && !!msg.replyTo;
+    const dispatchText: string | import("../ai/types.js").PromptBlock[] = isInterSession
+      ? [
+          {
+            type: "text" as const,
+            text: [
+              `[SYSTEM] This message was sent by session "${msg.source}" (not the user).`,
+              `It expects your response to be delivered via bus_publish to session "${msg.replyTo}".`,
+              `Do NOT address the user directly. Publish your answer using:`,
+              `  bus_publish({ channel: "ai.request", target: "${msg.replyTo}", text: "<your answer>" })`,
+            ].join("\n"),
+          },
+          {
+            type: "text" as const,
+            text: msg.text ?? "",
+          },
+        ]
+      : text;
+
     // Session is idle — this prompt is about to be sent to the API.
     // Emit prompt_dispatched so the timeline renders it as a user entry
     // NOW (not when the request first arrived). Single message → single event.
@@ -304,7 +339,7 @@ export class JarvisCore implements Piece {
       images: msg.images,
     }]);
 
-    await this.dispatchToSession(sessionId, text, msg.images);
+    await this.dispatchToSession(sessionId, dispatchText, msg.images);
   }
 
   /**
@@ -315,7 +350,7 @@ export class JarvisCore implements Piece {
    */
   private async dispatchToSession(
     sessionId: string,
-    text: string,
+    text: string | import("../ai/types.js").PromptBlock[],
     msgImages?: AIRequestMessage["images"],
   ): Promise<void> {
     const managed = this.sessions.get(sessionId);
@@ -324,11 +359,15 @@ export class JarvisCore implements Piece {
     this.setSessionState(sessionId, "processing");
     this.updateHud();
     const t0 = Date.now();
+    const textForLog = Array.isArray(text)
+      ? text.map(b => b.text).join(" ")
+      : text;
     log.info({
       traceId,
       sessionId,
-      promptLength: text.length,
-      promptPreview: preview(text, 120),
+      promptLength: textForLog.length,
+      promptPreview: preview(textForLog, 120),
+      promptBlocks: Array.isArray(text) ? text.length : 1,
       images: msgImages?.length ?? 0,
       messageCountBefore: (managed.session as any)?.messages?.length,
     }, "JarvisCore: dispatchToSession → calling provider");
@@ -695,7 +734,7 @@ export class JarvisCore implements Piece {
           channel: "ai.request",
           source: "jarvis-core",
           target: replyTo,
-          text: `[JARVIS] ${fullText}`,
+          text: `[${sessionId}] ${fullText}`,
           traceId,
         } as Parameters<EventBus["publish"]>[0]);
       }
