@@ -133,6 +133,7 @@ export class OpenAISession implements AISession {
       ? prompt.map(b => b.text).join("\n")
       : prompt;
 
+
     if (images && images.length > 0) {
       const content: OpenAI.Chat.ChatCompletionContentPart[] = [];
       for (const img of images) {
