@@ -43,15 +43,19 @@ export class AnthropicSessionFactory implements AISessionFactory {
 
   /**
    * Build system blocks for actor sessions.
-   * Actors get a clean, focused prompt: actor-system.md + role only.
-   * No jarvis-system.md, no CLAUDE.md instructions, no core contexts, no plugin instructions.
-   * This prevents actors from inheriting the JARVIS identity and persona.
+   * Actors get: jarvis.md (CLAUDE.md) instructions + actor-system.md + role.
+   * No jarvis-system.md, no core contexts, no plugin instructions (those are JARVIS-specific).
    */
   private buildCustomSystemBlocks(basePromptOverride?: string, roleContext?: string, sessionId?: string): TextBlockParam[] {
     const blocks: TextBlockParam[] = [];
 
-    // Block 0: actor identity (actor-system.md) + role
+    // Block 0: jarvis.md (CLAUDE.md) + actor-system.md + role
     const parts: string[] = [];
+
+    const instructions = this.getInstructions();
+    if (instructions) {
+      parts.push(`<system-reminder>\n${instructions}\n</system-reminder>`);
+    }
 
     if (basePromptOverride) {
       parts.push(basePromptOverride);

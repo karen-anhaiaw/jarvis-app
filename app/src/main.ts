@@ -57,6 +57,7 @@ import { ModelRouterPiece } from "./pieces/model-router.js";
 import { DelegateTaskPiece } from "./pieces/delegate-task.js";
 import { load as loadSettingsForSlash } from "./core/settings.js";
 import { ensureUiBuildIntegrity } from "./server.js";
+import { installDeathWatch } from "./core/death-watch.js";
 import type { IncomingMessage } from "node:http";
 
 /** Read the full request body and JSON-parse it. Rejects on malformed JSON. */
@@ -71,6 +72,12 @@ function readJsonBody(req: IncomingMessage): Promise<any> {
     req.on("error", reject);
   });
 }
+
+// Install death-watch as the very first thing — before any other module work
+// so we catch bootstrap failures (UI build errors, missing config, plugin load
+// crashes). Snapshot/graceful-shutdown are wired later once runtime refs exist
+// (see installDeathWatch() at the bottom of main()).
+installDeathWatch();
 
 async function main() {
   // Verify UI build integrity before anything else — if assets are stale, rebuild
@@ -507,16 +514,70 @@ async function main() {
   jarvisCore.ready();
   console.log("JARVIS online\n");
 
+  // ─── Graceful shutdown — shared by SIGINT, SIGTERM, SIGHUP ─────────
+  // Pulled into a named function so death-watch can reuse it for SIGTERM/SIGHUP.
+  let shuttingDown = false;
+  const gracefulShutdown = async (reason: string) => {
+    if (shuttingDown) return; // idempotent — multiple signals during shutdown
+    shuttingDown = true;
+    log.info({ reason }, "Shutting down...");
+    try {
+      sessions.stopAutoSave();
+      // Stop pieces FIRST — actor-runner cleans up ephemeral sessions before we save
+      await pieceManager.stopAll();
+      // Now save remaining sessions (ephemeral ones already cleaned by actor-runner)
+      sessions.saveAll();
+      const activeProvider = providerRouter.getActiveProvider();
+      if (activeProvider) await activeProvider.metricsPiece.stop();
+      server.stop();
+    } catch (err) {
+      log.error({ err, reason }, "error during graceful shutdown");
+    }
+  };
+
+  // Now that runtime refs exist, re-install death-watch with the rich snapshot
+  // + graceful-shutdown wiring. installDeathWatch is idempotent for the handlers
+  // it already attached at module load — this call only enriches the closure
+  // for memory pressure + signals.
+  installDeathWatch({
+    snapshot: () => {
+      try {
+        const ids = sessions.listActive();
+        return {
+          model: config.model,
+          provider: getCurrentProvider(),
+          sessionCount: ids.length,
+          sessions: ids.map((id) => {
+            const managed: any = sessions.peek(id);
+            return {
+              id,
+              state: sessions.getState(id),
+              ephemeral: sessions.isEphemeral(id),
+              messages: managed?.session?.messageCount?.() ?? managed?.messages?.length ?? undefined,
+            };
+          }),
+          activePieces: pieces.map((p) => p.id),
+        };
+      } catch (err: any) {
+        return { snapshotError: String(err?.message ?? err) };
+      }
+    },
+    onGracefulShutdown: gracefulShutdown,
+    onMemoryCritical: ({ rssMb }) => {
+      // Surface to HUD via the bus so the user sees a warning before macOS kills us.
+      try {
+        bus.publish({
+          channel: "system.event",
+          source: "death-watch",
+          event: "memory-critical",
+          data: { rssMb: Math.round(rssMb) },
+        } as any);
+      } catch { /* best effort */ }
+    },
+  });
+
   process.on("SIGINT", async () => {
-    log.info("Shutting down...");
-    sessions.stopAutoSave();
-    // Stop pieces FIRST — actor-runner cleans up ephemeral sessions before we save
-    await pieceManager.stopAll();
-    // Now save remaining sessions (ephemeral ones already cleaned by actor-runner)
-    sessions.saveAll();
-    const activeProvider = providerRouter.getActiveProvider();
-    if (activeProvider) await activeProvider.metricsPiece.stop();
-    server.stop();
+    await gracefulShutdown("SIGINT");
     process.exit(0);
   });
 }
