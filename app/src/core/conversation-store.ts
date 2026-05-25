@@ -216,14 +216,46 @@ export function saveStartupPrompt(text: string): void {
   }
 }
 
+// In-memory flag: set on boot, cleared after first history request.
+// Tells handleHistory to prepend a greeting to the returned messages.
+let pendingGreeting: string | null = null;
+
+/** Returns and clears the pending greeting (consumed once by handleHistory). */
+export function consumePendingGreeting(): string | null {
+  const g = pendingGreeting;
+  pendingGreeting = null;
+  return g;
+}
+
 /** Load and consume (delete) the startup prompt. Returns null if none. */
 export function consumeStartupPrompt(): string | null {
+  // Set the in-memory greeting flag so handleHistory appends it on the
+  // next call — no file I/O, no race with autosave.
+  pendingGreeting = "Back online, Sir.";
+
+  log.info({ path: STARTUP_PROMPT_PATH }, "ConversationStore: consumeStartupPrompt called");
+
   try {
-    if (!existsSync(STARTUP_PROMPT_PATH)) return null;
+    const exists = existsSync(STARTUP_PROMPT_PATH);
+    log.info({ exists, path: STARTUP_PROMPT_PATH }, "ConversationStore: startup prompt file check");
+
+    if (!exists) {
+      log.info("ConversationStore: no startup prompt file found — returning null");
+      return null;
+    }
+
     const text = readFileSync(STARTUP_PROMPT_PATH, "utf-8").trim();
+    log.info({ length: text.length, preview: text.slice(0, 80) }, "ConversationStore: startup prompt read");
+
     unlinkSync(STARTUP_PROMPT_PATH);
-    if (!text) return null;
-    log.info({ length: text.length }, "ConversationStore: startup prompt consumed");
+    log.info("ConversationStore: startup prompt file deleted");
+
+    if (!text) {
+      log.warn("ConversationStore: startup prompt file was empty");
+      return null;
+    }
+
+    log.info({ length: text.length }, "ConversationStore: startup prompt consumed successfully");
     return text;
   } catch (err) {
     log.error({ err }, "ConversationStore: startup prompt consume failed");

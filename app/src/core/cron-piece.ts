@@ -140,7 +140,7 @@ export function hasMissedSlot(parsed: ParsedCron, lastRun?: number, createdAt?: 
   if (parsed.type !== "daily" && parsed.type !== "weekly") return false;
 
   const now = Date.now();
-  const hours = parsed.hours ?? (parsed.hour != null ? [parsed.hour] : [0]);
+  const hours = parsed.hour != null ? [parsed.hour] : [0];
   const minute = parsed.minute ?? 0;
   const dow = parsed.dow ?? [0, 1, 2, 3, 4, 5, 6];
 

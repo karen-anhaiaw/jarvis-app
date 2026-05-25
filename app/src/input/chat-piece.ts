@@ -7,6 +7,7 @@ import type { CapabilityRegistry } from "../capabilities/registry.js";
 import type { SessionManager } from "../core/session-manager.js";
 import { log } from "../logger/index.js";
 import { newTraceId, preview } from "../logger/trace.js";
+import { consumePendingGreeting } from "../core/conversation-store.js";
 
 /**
  * ChatPiece — session-agnostic chat bridge.
@@ -398,6 +399,12 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
       const managed = this.sessions.get(sid);
       const rawMessages = managed.session.getMessages() as any[];
       const entries = parseMessagesToHistory(rawMessages);
+      // Append startup greeting if one is pending (set by consumeStartupPrompt on boot).
+      // Consumed once so subsequent history requests don't repeat it.
+      const greeting = sid === "main" ? consumePendingGreeting() : null;
+      if (greeting) {
+        entries.push({ kind: "message", role: "assistant", text: greeting, source: "jarvis" });
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(entries));
     } catch (e) {

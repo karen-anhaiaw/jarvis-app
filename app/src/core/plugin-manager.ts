@@ -63,6 +63,8 @@ export class PluginManager implements Piece {
   private httpServer?: HttpServerLike;
   /** Chat-piece reference for timeline entry broadcasting. Set by main.ts. */
   private chatPiece?: { broadcastEvent(sessionId: string, data: Record<string, unknown>): void };
+  /** Plugin load failures — flushed to main after jarvisCore.ready(). */
+  private pluginLoadFailures: Array<{ name: string; err: string }> = [];
 
   /**
    * Set of context injectors registered by plugins. Composed into a single
@@ -192,6 +194,20 @@ export class PluginManager implements Piece {
     }
 
     return pieceContexts.join("\n\n");
+  }
+
+  /** Call after jarvisCore.ready() to flush plugin load failures to the main session. */
+  notifyLoadFailures(): void {
+    if (this.pluginLoadFailures.length === 0) return;
+    for (const { name, err } of this.pluginLoadFailures) {
+      this.bus.publish({
+        channel: "ai.request",
+        source: "system",
+        target: "main",
+        text: `[SYSTEM] Plugin **${name}** failed to load: ${err}\n\nThe plugin has been skipped. JARVIS continues normally without it.`,
+      } as any);
+    }
+    this.pluginLoadFailures = [];
   }
 
   async start(bus: EventBus): Promise<void> {
@@ -399,6 +415,8 @@ export class PluginManager implements Piece {
         }
       } catch (err) {
         log.error({ name, err: String(err) }, "PluginManager: failed to load pieces");
+        // Notify main session — deferred so the message arrives after jarvisCore.ready()
+        this.pluginLoadFailures.push({ name, err: String(err) });
       }
     }
 

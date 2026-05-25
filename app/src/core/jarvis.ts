@@ -1,3 +1,14 @@
+/**
+ * @module jarvis-core
+ * @see docs/modules/core/jarvis-core.md
+ * @see docs/features/chat.md
+ *
+ * The central orchestration engine of JARVIS.
+ * Implements the event-driven state machine for all AI conversations.
+ *
+ * Architecture: EventBus subscriber → SessionManager → AI Provider → streaming loop
+ * Key channels: ai.request (in), capability.result (in), ai.stream/* (out), capability.request (out)
+ */
 // src/core/jarvis.ts
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -20,6 +31,21 @@ import { newTraceId, preview } from "../logger/trace.js";
 import { config } from "../config/index.js";
 import { graphRegistry } from "./graph-registry.js";
 
+/**
+ * Produces a compact, human-readable summary of a tool call's arguments
+ * for display in the HUD timeline and chat panel.
+ *
+ * Strips the internal `__sessionId` field (injected by the capability
+ * executor, not meaningful to users) before formatting.
+ *
+ * For single-argument tools, returns only the value (no key prefix).
+ * For multi-argument tools, formats as `key=value key=value ...`.
+ * Objects and arrays are JSON-stringified.
+ *
+ * @param input - Raw tool input from the AI provider (may contain __sessionId)
+ * @returns Compact display string. Empty string if no args after stripping.
+ * @see docs/modules/core/jarvis-core.md
+ */
 function summarizeToolArgs(input: Record<string, unknown>): string {
   const { __sessionId: _, ...args } = input;
   const entries = Object.entries(args);
@@ -37,6 +63,18 @@ function summarizeToolArgs(input: Record<string, unknown>): string {
     .join(" ");
 }
 
+/**
+ * Converts MCP-namespaced tool names into shorter display names.
+ *
+ * MCP tools follow the pattern `mcp__<server>__<tool>`. This function
+ * returns only the final segment for cleaner HUD display.
+ *
+ * Example: `mcp__knowledge-semantic__knowledge_search` → `knowledge_search`
+ * Non-MCP names pass through unchanged.
+ *
+ * @param name - Full tool name string as returned by the AI provider
+ * @returns Shortened display name
+ */
 function shortenToolName(name: string): string {
   // mcp__knowledge-semantic__knowledge_search → knowledge_search
   if (name.startsWith("mcp__")) {
@@ -46,6 +84,32 @@ function shortenToolName(name: string): string {
   return name;
 }
 
+/**
+ * JarvisCore — The central orchestration engine of JARVIS.
+ *
+ * Implements the event-driven state machine that drives all AI conversations:
+ * - Receives prompts from the EventBus (ai.request) for ANY session
+ * - Dispatches them to AI provider sessions via SessionManager
+ * - Drives the full streaming loop token-by-token
+ * - Detects tool calls, emits capability.request, waits for results
+ * - Resumes generation after tools complete
+ * - Manages the per-session prompt queue (never drops messages)
+ * - Tracks global and per-session state for HUD display
+ *
+ * State Machine (global): loading → online → processing | waiting_tools
+ * State Machine (per-session): idle → processing → waiting_tools → idle
+ *
+ * Key Invariants:
+ * - New prompts NEVER interrupt in-flight work — they queue
+ * - Queue survives abort — only the current turn is cancelled
+ * - Idle sessions are NOT stored in sessionStates (deleted on idle)
+ * - Global state is DERIVED from per-session states, never set directly
+ * - Handles ANY session ID — no ownedPatterns filter
+ *
+ * @see docs/modules/core/jarvis-core.md
+ * @see docs/features/chat.md
+ * @see docs/features/bdd/chat.feature
+ */
 export class JarvisCore implements Piece {
   readonly id = "jarvis-core";
   readonly name = "Jarvis Core";
@@ -68,40 +132,60 @@ export class JarvisCore implements Piece {
   }
   private jarvisMdPath = join(homedir(), ".jarvis", "jarvis.md");
 
-  /** Session ownership: JarvisCore only processes sessions it owns.
-   *  Default: "main" and "grpc-*". Plugins can register additional patterns. */
-  private ownedPatterns: Array<string | RegExp> = ["main", /^grpc-/];
-
-  /** Check if a session ID belongs to this core instance */
-  private isOwnedSession(sessionId: string): boolean {
-    return this.ownedPatterns.some(p =>
-      typeof p === "string" ? p === sessionId : p.test(sessionId)
-    );
+  /**
+   * JarvisCore processes ai.request for ANY session that has a target.
+   * Session existence is managed by SessionManager — no pattern filtering needed.
+   * Kept for backward compat with plugins that may call it.
+   */
+  /**
+   * Returns whether a session is "owned" by JarvisCore.
+   *
+   * Always returns true — JarvisCore processes ai.request for ANY session.
+   * Session existence and lazy creation are delegated to SessionManager.get().
+   *
+   * @deprecated The concept of "owned sessions" no longer exists. Kept for
+   * backward compatibility with plugins that call this method.
+   * @returns Always true
+   */
+  isSessionOwned(_sessionId: string): boolean {
+    return true;
   }
 
   /**
-   * Public matcher for other pieces (notably ChatPiece) to ask whether a
-   * sessionId is processed by this core. Used to decide whether to mirror
-   * user-typed input as type:"user" SSE immediately, or wait for the
-   * core's prompt_dispatched event. Plugin-owned sessions (e.g. actor-*)
-   * never get prompt_dispatched, so the asker must mirror locally.
+   * @deprecated No-op since the session-agnostic refactor.
+   *
+   * Previously registered a regex/string pattern to claim ownership of sessions.
+   * Now defunct — JarvisCore handles ALL sessions unconditionally.
+   * Safe to call; does nothing. Will be removed in a future major version.
+   * @param _pattern - Ignored
    */
-  isSessionOwned(sessionId: string): boolean {
-    return this.isOwnedSession(sessionId);
+  registerSessionPattern(_pattern: string | RegExp): void {
+    // no-op — JarvisCore now processes any ai.request with a target
   }
 
-  /** Register an additional session pattern that JarvisCore should manage.
-   *  Accepts exact string or RegExp. */
-  registerSessionPattern(pattern: string | RegExp): void {
-    this.ownedPatterns.push(pattern);
-    log.info({ pattern: String(pattern) }, "JarvisCore: registered session pattern");
-  }
-
+  /**
+   * Piece interface — provides text to inject into the AI system prompt.
+   *
+   * Returns empty string intentionally. The ~/.jarvis/jarvis.md persona file
+   * is injected as the FIRST CONVERSATION MESSAGE (not as a system prompt block)
+   * to allow it to be cache-controlled independently and updated per-session.
+   *
+   * @returns Empty string — jarvis.md is handled elsewhere (main.ts)
+   */
   systemContext(): string {
     // jarvis.md is now injected as the first message, not system prompt
     return "";
   }
 
+  /**
+   * Loads the user's custom JARVIS persona/instruction file.
+   *
+   * Reads ~/.jarvis/jarvis.md if it exists. Called by main.ts during
+   * the bootstrap sequence to inject the persona as the first conversation
+   * message before the session is restored.
+   *
+   * @returns File contents as UTF-8 string, or empty string if not found.
+   */
   getJarvisMd(): string {
     if (existsSync(this.jarvisMdPath)) {
       try { return readFileSync(this.jarvisMdPath, "utf-8"); } catch { }
@@ -113,10 +197,30 @@ export class JarvisCore implements Piece {
     this.sessions = sessions as any;
   }
 
+  /**
+   * Dependency injection setter for SessionManager.
+   *
+   * Called by main.ts after constructing both JarvisCore and SessionManager
+   * to complete the wiring. Avoids circular dependency issues in constructors.
+   *
+   * @param sessions - The fully constructed SessionManager instance
+   */
   setSessions(sessions: SessionManager): void {
     this.sessions = sessions;
   }
 
+  /**
+   * Piece lifecycle hook — called by PieceManager during JARVIS boot.
+   *
+   * Establishes two permanent bus subscriptions:
+   * 1. ai.request → handlePrompt() for any message with a target
+   * 2. capability.result → handleToolResult() for any message with a target
+   *
+   * Also registers the JarvisCore HUD overlay panel (type: "overlay",
+   * position: x:650 y:30, size: 220x260).
+   *
+   * @param bus - The application EventBus instance
+   */
   async start(bus: EventBus): Promise<void> {
     this.bus = bus;
 
@@ -126,7 +230,7 @@ export class JarvisCore implements Piece {
     this.registerSessionPattern(/^actor-/);
 
     this.bus.subscribe<AIRequestMessage>("ai.request", (msg) => {
-      if (msg.target && this.isOwnedSession(msg.target)) {
+      if (msg.target) {
         return this.handlePrompt(msg);
       }
     });
@@ -156,6 +260,12 @@ export class JarvisCore implements Piece {
     log.info("JarvisCore: started (event-driven state machine)");
   }
 
+  /**
+   * Piece lifecycle hook — called during graceful shutdown.
+   *
+   * Closes all open AI provider sessions and removes the HUD overlay.
+   * Called before process exit (SIGINT/SIGTERM handlers in main.ts).
+   */
   async stop(): Promise<void> {
     this.sessions.closeAll();
     this.bus.publish({
@@ -167,6 +277,16 @@ export class JarvisCore implements Piece {
     log.info("JarvisCore: stopped");
   }
 
+  /**
+   * Called after ALL pieces have started — signals the system is ready.
+   *
+   * Transitions globalState from "loading" to "online" and triggers the
+   * startup prompt flow (zero-cost greeting + optional note-to-self from
+   * a previous session's jarvis_reset call).
+   *
+   * @see sendStartupPrompt
+   * @see docs/features/startup-prompt.md
+   */
   ready(): void {
     this.globalState = "online";
     this.updateHud();
@@ -176,9 +296,48 @@ export class JarvisCore implements Piece {
     this.sendStartupPrompt();
   }
 
+  /**
+   * Emits the post-restart greeting and optionally injects the startup prompt.
+   *
+   * Always publishes "Back online, Sir." via ai.stream/complete — zero-cost,
+   * no LLM call, no tokens. ChatPiece renders it as an assistant message.
+   *
+   * If ~/.jarvis/startup-prompt.txt exists (written by reset.sh), reads and
+   * consumes it (deletes the file), then publishes it as ai.request to "main"
+   * wrapped in a <note-to-self> disambiguation block.
+   *
+   * WHY THE <note-to-self> WRAPPER:
+   * Without it, a previous session note containing "Próximas ações: restart"
+   * was treated as new instructions, causing an infinite restart loop.
+   * The wrapper explicitly marks the content as self-directed context,
+   * NOT a user request, NOT a system event, NOT a command to execute.
+   *
+   * @see consumeStartupPrompt (conversation-store.ts)
+   * @see docs/features/startup-prompt.md
+   */
   private sendStartupPrompt(): void {
+    log.info("JarvisCore: sendStartupPrompt called");
     const prompt = consumeStartupPrompt();
-    if (!prompt) return;
+    log.info({ hasPrompt: !!prompt, promptLength: prompt?.length ?? 0 }, "JarvisCore: consumeStartupPrompt returned");
+
+    // Always show a greeting so the user knows JARVIS is back online.
+    // Uses ai.stream/complete so ChatPiece renders it as an assistant
+    // message immediately — no LLM call, no tokens consumed.
+    log.info("JarvisCore: publishing ai.stream greeting");
+    this.bus.publish({
+      channel: "ai.stream",
+      source: "jarvis-core",
+      target: "main",
+      event: "complete",
+      text: "Back online, Sir.",
+      usage: { input_tokens: 0, output_tokens: 0 },
+      traceId: `startup-${Date.now()}`,
+    } as any);
+
+    if (!prompt) {
+      log.info("JarvisCore: no startup prompt — skipping ai.request injection");
+      return;
+    }
 
     // Wrap in an explicit self-origin marker. The model needs to know this message
     // is a note-to-self from its previous jarvis_reset call — not a user request,
@@ -198,15 +357,34 @@ export class JarvisCore implements Piece {
       `</note-to-self>`,
     ].join("\n");
 
-    log.info({ length: prompt.length, preview: prompt.slice(0, 100) }, "JarvisCore: sending startup prompt");
+    log.info({ length: prompt.length, preview: prompt.slice(0, 100) }, "JarvisCore: publishing startup prompt via ai.request");
     this.bus.publish({
       channel: "ai.request",
       source: "system",
       target: "main",
       text: contextMessage,
     });
+    log.info("JarvisCore: startup prompt ai.request published");
   }
 
+  /**
+   * Aborts the current AI turn for a session (called on user ESC press).
+   *
+   * Abort Sequence:
+   * 1. If waiting_tools: calls cleanupAbortedTools() to remove orphaned
+   *    tool_use/tool_result blocks from message history. Without this,
+   *    the next turn gets a validation error from the AI provider.
+   * 2. Signals the AI provider to stop streaming.
+   * 3. Transitions session to idle.
+   * 4. Broadcasts current queue snapshot (QUEUE IS PRESERVED — not cleared).
+   * 5. Drains the queue immediately (pending messages dispatched).
+   * 6. Publishes tool_cancelled events for each aborted tool.
+   * 7. Publishes aborted event for the session.
+   *
+   * QUEUE INVARIANT: abort = "cancel current request", not "cancel all work".
+   *
+   * @param sessionId - No-op if not found or already idle
+   */
   abortSession(sessionId: string): void {
     const managed = this.sessions.get(sessionId);
     if (!managed || managed.state === "idle") return;
@@ -222,10 +400,14 @@ export class JarvisCore implements Piece {
     }
 
     this.sessions.abort(sessionId);
-    this.pendingPrompts.delete(sessionId);
+    // NOTE: pendingPrompts are intentionally preserved — the user aborted
+    // the current request, not the queued ones. drainQueue() will pick
+    // them up now that the session is idle again.
     this.setSessionState(sessionId, "idle");
     this.updateHud();
     this.broadcastPendingQueue(sessionId);
+    // Drain any queued prompts that arrived while this request was running.
+    this.drainQueue(sessionId);
 
     const traceId = this.getTrace(sessionId);
 
@@ -255,6 +437,27 @@ export class JarvisCore implements Piece {
     this.currentTrace.delete(sessionId);
   }
 
+  /**
+   * Primary handler for incoming ai.request bus events.
+   *
+   * Queuing Logic:
+   * - If session is busy (processing/waiting_tools): pushes msg to
+   *   pendingPrompts[sessionId], broadcasts queue snapshot, returns.
+   *   The message will be drained automatically when session becomes idle.
+   * - If session is idle: registers replyTo routing, sets turn trace ID,
+   *   emits prompt_dispatched (HUD timeline entry), calls dispatchToSession.
+   *
+   * INVARIANT: New prompts NEVER abort in-flight work. Only explicit user
+   * action (abortSession) can interrupt a running turn.
+   *
+   * replyTo Routing: If msg.replyTo is set, the completed turn's full text
+   * is forwarded to the caller session as ai.request prefixed "[JARVIS] ".
+   *
+   * @param msg - ai.request bus message. msg.target must be set.
+   * @see drainQueue
+   * @see dispatchToSession
+   * @see docs/features/chat.md#message-queue
+   */
   private async handlePrompt(msg: AIRequestMessage): Promise<void> {
     const sessionId = msg.target!;
     const text = msg.text ?? "";
@@ -348,6 +551,22 @@ export class JarvisCore implements Piece {
    * branch and without re-emitting prompt_dispatched (drain emits its own,
    * one event per original queued message).
    */
+  /**
+   * Sends a prompt to the AI provider and drives the response stream.
+   *
+   * Extracted from handlePrompt so drainQueue can reuse it without
+   * re-running the queue branch or re-emitting prompt_dispatched.
+   *
+   * Transitions session to "processing", calls session.sendAndStream(),
+   * then drives consumeStream() to completion.
+   *
+   * Error Handling: Any provider error resets session to idle and publishes
+   * ai.stream/error with the error string. Errors do NOT propagate further.
+   *
+   * @param sessionId - Target session
+   * @param text - Prompt text to send to the AI provider
+   * @param msgImages - Optional image attachments
+   */
   private async dispatchToSession(
     sessionId: string,
     text: string | import("../ai/types.js").PromptBlock[],
@@ -409,6 +628,23 @@ export class JarvisCore implements Piece {
     this.updateHud();
   }
 
+  /**
+   * Handles the capability.result bus event — return from tool execution.
+   *
+   * Guards: Discards late-arriving results if session is not in waiting_tools
+   * (e.g., result arrives after an abort). Prevents stale results from
+   * corrupting a new turn.
+   *
+   * Flow:
+   * 1. Validate state is waiting_tools. Discard + warn otherwise.
+   * 2. Add tool results to session message history (session.addToolResults).
+   * 3. Emit ai.stream/tool_done per completed tool.
+   * 4. Transition session to "processing".
+   * 5. Call session.continueAndStream() to resume generation.
+   * 6. Drive consumeStream() — may produce more tool calls or complete.
+   *
+   * @param msg - capability.result bus message. msg.target must be set.
+   */
   private async handleToolResult(msg: CapabilityResultMessage): Promise<void> {
     const sessionId = msg.target!;
     const results = msg.results;
@@ -496,6 +732,31 @@ export class JarvisCore implements Piece {
     }
   }
 
+  /**
+   * The core streaming loop — drives an AI provider AsyncGenerator to completion.
+   *
+   * Event Routing:
+   * - text_delta     → accumulate fullText, publish ai.stream/delta
+   * - tool_use       → accumulate toolCalls array
+   * - message_complete → capture token usage
+   * - compaction_start → forward to bus (cast, not in public union)
+   * - compaction     → forward to ai.stream and system.event
+   * - error(non-abort) → publish ai.stream/error (was silently dropped before)
+   * - error(abort)   → log only (user-initiated, not an error)
+   *
+   * Post-stream branches:
+   * IF tool calls: store pendingToolCalls, transition to waiting_tools,
+   *   emit tool_start per tool, publish capability.request. Do NOT drain queue.
+   * IF text only: transition to idle, publish ai.stream/complete,
+   *   route replyTo if set, call drainQueue().
+   *
+   * Errors thrown by the generator propagate to dispatchToSession/handleToolResult
+   * where they are caught, session is reset, and ai.stream/error is published.
+   *
+   * @param sessionId - Session driving this stream
+   * @param stream - AsyncGenerator<AIStreamEvent> from the AI provider session
+   * @see docs/features/chat.md#streaming-response-flow
+   */
   private async consumeStream(
     sessionId: string,
     stream: AsyncGenerator<AIStreamEvent, void>,
@@ -744,6 +1005,26 @@ export class JarvisCore implements Piece {
     }
   }
 
+  /**
+   * Processes all queued prompts for a session after it becomes idle.
+   *
+   * N-to-1 Combining: Combines N queued messages into one API call
+   * (joined with "\n\n") for token efficiency. The HUD timeline still
+   * shows N individual user entries via broadcastPromptDispatched.
+   *
+   * Queue Clear Timing (important for UX):
+   * 1. queue.length = 0 (queue cleared)
+   * 2. broadcastPromptDispatched (queued items appear as user entries)
+   * 3. broadcastPendingQueue (empty snapshot — UI clears queue list)
+   * 4. dispatchToSession (API call made)
+   * This sequence creates a visible transition: items move from queue list
+   * to timeline, not just disappear.
+   *
+   * Called from consumeStream() after text-only turns and from abortSession().
+   *
+   * @param sessionId - Session whose queue to drain
+   * @see docs/features/chat.md#message-queue
+   */
   private drainQueue(sessionId: string): void {
     const queue = this.pendingPrompts.get(sessionId);
     if (!queue || queue.length === 0) return;
@@ -760,7 +1041,10 @@ export class JarvisCore implements Piece {
     const combined = items.map(i => i.text).join("\n\n");
     const allImages = items.flatMap(i => i.images ?? []);
     queue.length = 0;
-    this.broadcastPendingQueue(sessionId);
+    // NOTE: do NOT broadcastPendingQueue here — the empty broadcast would
+    // wipe the UI queue display before the messages are actually processed.
+    // The caller (abortSession or consumeStream) already broadcast the
+    // pre-drain snapshot. The UI will clear naturally when items drain.
 
     // Drain starts a fresh turn — generate a new traceId so logs separate
     // the previous turn's tail from this combined dispatch.
@@ -778,6 +1062,9 @@ export class JarvisCore implements Piece {
     // Emit one prompt_dispatched per original queued message — the timeline
     // renders each as its own user entry with its own source label.
     this.broadcastPromptDispatched(sessionId, items);
+
+    // Queue is now empty — tell the UI to clear the pending list.
+    this.broadcastPendingQueue(sessionId);
 
     // Send the combined prompt to the AI. We bypass handlePrompt because
     // (a) the queue branch would re-queue (session is still flipping out
@@ -800,6 +1087,18 @@ export class JarvisCore implements Piece {
    * The event name `prompt_dispatched` is intentionally NOT in the public
    * AIStreamMessage event union; we publish via cast and ChatPiece reads
    * via cast, keeping the public type surface stable for plugins.
+   */
+  /**
+   * Publishes ai.stream/prompt_dispatched to notify the frontend that
+   * prompts are being dispatched to the AI provider.
+   *
+   * ChatPiece expands each item into a type:"user" SSE event for the
+   * HUD timeline. Each item gets its own entry, preserving source labels.
+   *
+   * NOT IN PUBLIC AIStreamMessage UNION — published via "as any" cast.
+   * Keeps the plugin API surface stable when this internal event evolves.
+   *
+   * @param items - One entry per original user message (N from drain, 1 from direct dispatch)
    */
   private broadcastPromptDispatched(
     sessionId: string,
@@ -824,6 +1123,16 @@ export class JarvisCore implements Piece {
    * channel. Frontend uses this to render the "queued messages" list under
    * the JARVIS thinking indicator.
    */
+  /**
+   * Publishes a snapshot of the current pending queue as ai.stream/pending_queue.
+   *
+   * ChatPiece delivers this as type:"pending_queue" SSE to the browser.
+   * Frontend renders the "queued messages" list under the thinking indicator.
+   * Empty snapshot (items: []) signals the frontend to clear the list.
+   *
+   * Text is truncated to 280 chars per item. Images summarized as hasImages bool.
+   * NOT IN PUBLIC AIStreamMessage UNION — same rationale as prompt_dispatched.
+   */
   private broadcastPendingQueue(sessionId: string): void {
     const queue = this.pendingPrompts.get(sessionId) ?? [];
     const items = queue.map(msg => ({
@@ -841,6 +1150,14 @@ export class JarvisCore implements Piece {
   }
 
   /** Derive global state from all tracked per-session states */
+  /**
+   * Recomputes globalState from all per-session states.
+   *
+   * Priority: waiting_tools > processing > online.
+   * Empty sessionStates map (all idle) → "online".
+   * Also syncs graphRegistry for hud-core-node visualization.
+   * Called after every setSessionState() invocation.
+   */
   private deriveGlobalState(): void {
     const prev = this.globalState;
     if (this.sessionStates.size === 0) {
@@ -861,6 +1178,15 @@ export class JarvisCore implements Piece {
     }
   }
 
+  /**
+   * Updates per-session state and re-derives global state.
+   *
+   * IDLE CONVENTION: "idle" DELETES the key from sessionStates (not sets it).
+   * This keeps sessionStates.size meaningful as "count of active sessions".
+   * An empty map means all sessions are idle.
+   *
+   * @param state - "idle" removes the key; other values set it.
+   */
   private setSessionState(sessionId: string, state: "idle" | "processing" | "waiting_tools"): void {
     if (state === "idle") {
       this.sessionStates.delete(sessionId);
@@ -870,6 +1196,14 @@ export class JarvisCore implements Piece {
     this.deriveGlobalState();
   }
 
+  /**
+   * Returns a snapshot of current state for HUD overlay display.
+   *
+   * Called by updateHud() on every state change. The object is passed
+   * as the HUD panel's data prop and rendered by the overlay component.
+   *
+   * @returns { status, coreLabel, totalRequests, lastResponseMs, activeSessions }
+   */
   getData(): Record<string, unknown> {
     return {
       status: this.globalState,
@@ -880,6 +1214,11 @@ export class JarvisCore implements Piece {
     };
   }
 
+  /**
+   * Publishes hud.update/update for the jarvis-core HUD overlay panel.
+   * Guards against calls before start() (bus not yet set).
+   * Called after every state change that should be reflected in the HUD.
+   */
   private updateHud(): void {
     if (!this.bus) return;
     this.bus.publish({

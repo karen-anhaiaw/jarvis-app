@@ -1024,10 +1024,25 @@ export const ChatTimeline = React.memo(function ChatTimeline({
         }
 
         if (entry.kind === 'error') {
-          // Extract a short human-readable message from the raw API error string.
-          // The full error is too noisy — try to surface just the inner message.
+          // "aborted" is a user-initiated cancel — render as a subtle grey note,
+          // not a red error banner (the user already clicked Stop).
           const raw = entry.message ?? ''
-          const inner = raw.match(/\"message\":\"([^"]+)\"/)?.[1]
+          if (raw === 'aborted') {
+            return (
+              <div key={i} style={{ marginBottom: '4px' }}>
+                <div style={{
+                  padding: '4px 10px',
+                  fontSize: '10px',
+                  color: '#666',
+                  fontFamily: 'var(--font-mono)',
+                  fontStyle: 'italic',
+                }}>— stopped —</div>
+              </div>
+            )
+          }
+          // For real API errors (now pre-formatted by the backend as "[STATUS] type: msg"),
+          // display as-is. Fallback: try to extract inner message from legacy raw JSON.
+          const inner = raw.match(/"message":"([^"]+)"/)?.[1]
             ?? raw.match(/message: ([^,}\n]+)/)?.[1]
             ?? raw.slice(0, 200)
           return (

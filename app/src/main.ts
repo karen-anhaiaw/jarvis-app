@@ -514,6 +514,9 @@ async function main() {
   jarvisCore.ready();
   console.log("JARVIS online\n");
 
+  // Flush any piece/plugin startup failures to the main session now that the AI is online.
+  pluginManager.notifyLoadFailures();
+  pieceManager.notifyStartupFailures();
   // ─── Graceful shutdown — shared by SIGINT, SIGTERM, SIGHUP ─────────
   // Pulled into a named function so death-watch can reuse it for SIGTERM/SIGHUP.
   let shuttingDown = false;

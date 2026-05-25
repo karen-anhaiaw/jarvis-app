@@ -25,6 +25,8 @@ export class PieceManager {
   private registry: CapabilityRegistry;
   private settings: Settings;
   private ephemeralPieces = new Set<string>();
+  /** Pieces that failed start() — flushed to main session after jarvisCore.ready(). */
+  private startupFailures: Array<{ name: string; id: string; err: string }> = [];
 
   constructor(pieces: Piece[], bus: EventBus, registry: CapabilityRegistry) {
     this.pieces = new Map(pieces.map(p => [p.id, p]));
@@ -58,7 +60,15 @@ export class PieceManager {
       }
       // Register in graph BEFORE start() so pieces can enrich with children/meta during start()
       this.registerGraphNode(piece.id, piece.name, "running");
-      await piece.start(this.bus);
+      try {
+        await piece.start(this.bus);
+      } catch (err) {
+        log.error({ pieceId: piece.id, err: String(err) }, "PieceManager: piece.start() failed — piece isolated, JARVIS continues");
+        graphRegistry.update(piece.id, { status: "error" });
+        // Collect for post-startup notification (see notifyStartupFailures())
+        this.startupFailures.push({ name: piece.name, id: piece.id, err: String(err) });
+        continue;
+      }
       this.running.add(piece.id);
 
       // Apply visibility from settings
@@ -67,6 +77,19 @@ export class PieceManager {
       }
     }
     log.info({ running: [...this.running], total: this.pieces.size }, "PieceManager: started");
+  }
+
+  /** Call this after jarvisCore.ready() to flush piece startup failures to the main session. */
+  notifyStartupFailures(): void {
+    if (this.startupFailures.length === 0) return;
+    for (const { name, id, err } of this.startupFailures) {
+      const isDockerIssue = err.includes("docker") || err.includes("Docker") || err.includes("preflight");
+      const text = isDockerIssue
+        ? `[SYSTEM] **${name}** não conseguiu iniciar — Docker não está disponível ou o container não existe.\n\n${err}\n\nInicie o Docker e rode \`jarvis_reset\` para tentar novamente.`
+        : `[SYSTEM] Piece **${name}** (${id}) failed to start: ${err}\n\nThe piece has been isolated. JARVIS continues normally without it.`;
+      this.bus.publish({ channel: "ai.request", source: "system", target: "main", text } as any);
+    }
+    this.startupFailures = [];
   }
 
   async stopAll(): Promise<void> {
@@ -84,7 +107,13 @@ export class PieceManager {
     if (this.running.has(pieceId)) return { ok: false, error: `${pieceId} is already running` };
 
     const piece = this.pieces.get(pieceId)!;
-    await piece.start(this.bus);
+    try {
+      await piece.start(this.bus);
+    } catch (err) {
+      log.error({ pieceId, err: String(err) }, "PieceManager: piece.start() failed during enable");
+      graphRegistry.update(pieceId, { status: "error" });
+      return { ok: false, error: String(err) };
+    }
     this.running.add(pieceId);
 
     // Persist enabled + visible (re-enabling a piece should make it visible again)

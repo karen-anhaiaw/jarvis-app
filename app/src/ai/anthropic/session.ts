@@ -896,14 +896,19 @@ export class AnthropicSession implements AISession {
       this.abortController = undefined;
 
     } catch (err: any) {
-      if (this.abortController?.signal.aborted) {
+      // Detect abort — either via our own AbortController or native AbortError
+      // from the fetch/stream layer (name === "AbortError" or message contains "aborted").
+      const errMsg = String(err?.message ?? err ?? "");
+      const isAbort = this.abortController?.signal.aborted
+        || err?.name === "AbortError"
+        || /request was aborted|aborted/i.test(errMsg);
+      if (isAbort) {
         log.info({ label: this.label }, "AnthropicSession: stream aborted");
         yield { type: "error", error: "aborted" };
         return;
       }
 
       // Detect "Could not process image" errors and recover by stripping images
-      const errMsg = String(err?.message ?? err ?? "");
       if (errMsg.includes("Could not process image")) {
         log.warn({ label: this.label }, "AnthropicSession: image processing error detected, stripping images from history and retrying");
         const stripped = this.stripImagesFromMessages();
@@ -917,7 +922,27 @@ export class AnthropicSession implements AISession {
       }
 
       log.error({ label: this.label, err }, "AnthropicSession: API error");
-      yield { type: "error", error: String(err) };
+      // Build a human-readable error string from the Anthropic SDK error shape.
+      // err.status  → HTTP status code (e.g. 529, 529, 400)
+      // err.error   → { type: 'error', error: { type: '...', message: '...' } }
+      // err.message → "<status> <raw JSON body>"  (SDK default)
+      const humanError = (() => {
+        const status = (err as any)?.status as number | undefined;
+        const inner = (err as any)?.error?.error; // { type, message }
+        if (inner?.message) {
+          const label = inner.type
+            ? inner.type.replace(/_/g, ' ')
+            : 'API error';
+          return status
+            ? `[${status}] ${label}: ${inner.message}`
+            : `${label}: ${inner.message}`;
+        }
+        // Fallback: strip the raw JSON body from err.message if present
+        const rawMsg = String((err as any)?.message ?? err ?? '');
+        const stripped = rawMsg.replace(/^(Error:\s*)?\d+\s*/, '').replace(/^\{.*\}$/, '').trim();
+        return stripped || rawMsg.slice(0, 200);
+      })();
+      yield { type: "error", error: humanError };
     }
   }
 

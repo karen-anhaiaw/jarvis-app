@@ -3,7 +3,8 @@
 # $1 = optional startup message for next boot
 
 JARVIS_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-STARTUP_PROMPT_FILE="$JARVIS_DIR/.jarvis/startup-prompt.txt"
+# startup-prompt.txt is read by jarvisPath("startup-prompt.txt") → ~/.jarvis/startup-prompt.txt
+STARTUP_PROMPT_FILE="${JARVIS_HOME:-$HOME/.jarvis}/startup-prompt.txt"
 MESSAGE="$1"
 
 # Save startup prompt if provided
