@@ -120,6 +120,16 @@ When the user presses ESC:
 6. If the session was in `waiting_tools`: tool history is cleaned up (orphaned tool blocks removed from message history) and `tool_cancelled` events are published.
 7. `ai.stream/aborted` is published for the session.
 
+### Race Condition: ESC during `processing` while API is resolving
+
+A subtle race exists when the user presses ESC while the AI provider is about to return a `tool_use` response:
+
+- `abortSession` fires `AbortController.abort()` and transitions state to `idle`.
+- Concurrently, `streamFromAPI` already has the final API response in memory (`await finalMessage()` resolved just before the signal arrived).
+- Without a guard, `streamFromAPI` would push `assistant[tool_use]` to message history — but `consumeStream` would detect the stale trace ID and return without registering `pendingToolCalls` or calling `addToolResults`. Result: orphan `tool_use` in history → 400 on the next turn.
+
+**Fix (implemented in `session.ts`):** before pushing the assistant message, check `abortController.signal.aborted`. If true, skip the push entirely and log. This closes the race at the source rather than requiring downstream cleanup.
+
 ### Queue Preservation on Abort
 
 A key invariant: the pending queue survives an abort. The UI shows the queue during the pre-drain moment, then messages transition to the chat as user entries when the drain fires.
@@ -184,6 +194,7 @@ When a user provides a free-text "Other" answer, `OTHER_VALUE = "__other__"` is 
 | Decision | Rationale |
 |---|---|
 | Queue survives abort | Abort = "cancel current request", not "cancel all work" |
+| Abort guard before assistant message push | Closes race between ESC and `finalMessage()` resolving — prevents orphan `tool_use` when API returns `stop_reason:"tool_use"` milliseconds after abort is signalled |
 | N queued messages → 1 API call | Token efficiency; display still shows N entries via `prompt_dispatched` items |
 | `type:"user"` fires at dispatch, not at HTTP receive | Timeline must reflect "what was sent to the AI", not "what arrived at the boundary" |
 | `prompt_dispatched` not in public `AIStreamMessage` union | Keeps plugin API surface stable; internal detail that may change |

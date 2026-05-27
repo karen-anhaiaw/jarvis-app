@@ -8,8 +8,12 @@ const PANEL_Z_CAP = 9000
 
 function getMaxPanelZ(): number {
   let max = 10
+  // .draggablePanel is the inner div inside the Rnd wrapper.
+  // bringToFront calls getSelfElement() which returns the Rnd wrapper itself,
+  // and sets zIndex on it. So we must read from el.parentElement (= Rnd wrapper).
+  // Cap reads at PANEL_Z_CAP so stale runaway values don't accumulate.
   document.querySelectorAll<HTMLElement>('.draggablePanel').forEach(el => {
-    const z = parseInt(el.parentElement?.style.zIndex ?? '0', 10)
+    const z = Math.min(parseInt(el.parentElement?.style.zIndex ?? '0', 10), PANEL_Z_CAP)
     if (z > max) max = z
   })
   return max
@@ -93,6 +97,11 @@ export function DraggablePanel({
     registerPanelFocus(pieceId, bringToFront)
     return () => unregisterPanelFocus(pieceId)
   }, [pieceId, bringToFront])
+
+  // Bring to front on mount — new panels appear above all existing ones.
+  useEffect(() => {
+    bringToFront()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const syncHeight = useCallback(() => {
     if (!autoGrowBottom || !rndRef.current || !innerRef.current) return

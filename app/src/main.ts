@@ -239,7 +239,7 @@ async function main() {
       if (!managed.session.forceCompact) {
         return { message: "⚠️ Current provider does not support forced compaction." };
       }
-      if (managed.state !== "idle") {
+      if (sessions.getState(sessionId) !== "idle") {
         return { message: "⚠️ Session is busy — wait for it to finish before compacting." };
       }
 

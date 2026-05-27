@@ -386,28 +386,31 @@ export class JarvisCore implements Piece {
    * @param sessionId - No-op if not found or already idle
    */
   abortSession(sessionId: string): void {
-    const managed = this.sessions.get(sessionId);
-    if (!managed || managed.state === "idle") return;
+    const currentState = this.sessions.getState(sessionId);
+    if (currentState === "idle") return;
 
-    const wasWaitingTools = managed.state === "waiting_tools";
-    const pendingTools = managed.pendingToolCalls;
+    const managed = this.sessions.peek(sessionId);
+    const wasWaitingTools = currentState === "waiting_tools";
+    const pendingTools = managed?.pendingToolCalls;
 
-    log.info({ sessionId, state: managed.state }, "JarvisCore: abort requested");
+    log.info({ sessionId, state: currentState, queueSize: (this.pendingPrompts.get(sessionId) ?? []).length }, "JarvisCore: *** USER ABORT REQUESTED ***");
 
     // Clean up message history BEFORE aborting the session
-    if (wasWaitingTools && pendingTools && managed.session.cleanupAbortedTools) {
+    if (wasWaitingTools && pendingTools && managed?.session.cleanupAbortedTools) {
       managed.session.cleanupAbortedTools(pendingTools);
     }
 
-    this.sessions.abort(sessionId);
+    // abort() = signal provider + pop the current state frame.
+    // The stack returns to the frame below (or idle if empty).
+    const nextState = this.sessions.abort(sessionId);
+    log.info({ sessionId, nextState }, "JarvisCore: abort complete — session state after pop");
     // NOTE: pendingPrompts are intentionally preserved — the user aborted
     // the current request, not the queued ones. drainQueue() will pick
     // them up now that the session is idle again.
-    this.setSessionState(sessionId, "idle");
+    this.setSessionState(sessionId, nextState);
     this.updateHud();
+    this.broadcastSessionState(sessionId, nextState);
     this.broadcastPendingQueue(sessionId);
-    // Drain any queued prompts that arrived while this request was running.
-    this.drainQueue(sessionId);
 
     const traceId = this.getTrace(sessionId);
 
@@ -435,6 +438,12 @@ export class JarvisCore implements Piece {
 
     // Trace ends — clear so the next turn starts with a fresh id.
     this.currentTrace.delete(sessionId);
+
+    // Drain any queued prompts AFTER publishing aborted — ensures the frontend
+    // has processed the abort event before the new turn's prompt_dispatched
+    // arrives. Prevents the aborted event from racing with (and clobbering)
+    // the new turn's stream state on the frontend.
+    this.drainQueue(sessionId);
   }
 
   /**
@@ -463,20 +472,20 @@ export class JarvisCore implements Piece {
     const text = msg.text ?? "";
     const traceId = msg.traceId ?? newTraceId();
 
-    const managed = this.sessions.get(sessionId);
+    const currentState = this.sessions.getState(sessionId);
 
     log.info({
       traceId,
       sessionId,
       source: msg.source,
-      managedState: managed.state,
+      managedState: currentState,
       promptLength: text.length,
       promptPreview: preview(text, 120),
       images: msg.images?.length ?? 0,
       replyTo: msg.replyTo,
     }, "JarvisCore: handlePrompt");
 
-    if (managed.state !== "idle") {
+    if (currentState !== "idle") {
       // Queue the message — it will be drained after the current operation finishes.
       // Never abort a running operation just because a new message arrived.
       // Only explicit user abort (ESC / abort button) should interrupt processing.
@@ -487,7 +496,7 @@ export class JarvisCore implements Piece {
       log.info({
         traceId,
         sessionId,
-        state: managed.state,
+        state: currentState,
         queueSize: this.pendingPrompts.get(sessionId)!.length,
       }, "JarvisCore: queued prompt (session busy)");
       this.broadcastPendingQueue(sessionId);
@@ -572,33 +581,41 @@ export class JarvisCore implements Piece {
     text: string | import("../ai/types.js").PromptBlock[],
     msgImages?: AIRequestMessage["images"],
   ): Promise<void> {
-    const managed = this.sessions.get(sessionId);
     const traceId = this.getTrace(sessionId);
-    this.sessions.setState(sessionId, "processing");
+    log.info({ sessionId, traceId }, "JarvisCore: dispatchToSession — pushState(processing)");
+    this.sessions.pushState(sessionId, "processing");
     this.setSessionState(sessionId, "processing");
     this.updateHud();
+    this.broadcastSessionState(sessionId, "processing");
     const t0 = Date.now();
-    const textForLog = Array.isArray(text)
-      ? text.map(b => b.text).join(" ")
-      : text;
-    log.info({
-      traceId,
-      sessionId,
-      promptLength: textForLog.length,
-      promptPreview: preview(textForLog, 120),
-      promptBlocks: Array.isArray(text) ? text.length : 1,
-      images: msgImages?.length ?? 0,
-      messageCountBefore: (managed.session as any)?.messages?.length,
-    }, "JarvisCore: dispatchToSession → calling provider");
 
     try {
+      const managed = this.sessions.get(sessionId);
+      if (!managed?.session) {
+        throw new Error(`dispatchToSession: no managed session found for '${sessionId}'`);
+      }
+      const textForLog = Array.isArray(text)
+        ? text.map(b => b.text).join(" ")
+        : text;
+      log.info({
+        traceId,
+        sessionId,
+        promptLength: textForLog.length,
+        promptPreview: preview(textForLog, 120),
+        promptBlocks: Array.isArray(text) ? text.length : 1,
+        images: msgImages?.length ?? 0,
+        messageCountBefore: (managed.session as any)?.messages?.length,
+      }, "JarvisCore: *** API CALL START ***");
+
       const images = msgImages?.map(i => ({ label: i.label, base64: i.base64, mediaType: i.mediaType }));
       const stream = managed.session.sendAndStream(text, images);
       await this.consumeStream(sessionId, stream);
     } catch (err: any) {
-      this.sessions.setState(sessionId, "idle");
+      log.info({ sessionId, traceId }, "JarvisCore: dispatchToSession error — popState");
+      this.sessions.popState(sessionId);
       this.setSessionState(sessionId, "idle");
       this.updateHud();
+      this.broadcastSessionState(sessionId, "idle");
       this.bus.publish({
         channel: "ai.stream",
         source: "jarvis-core",
@@ -652,11 +669,12 @@ export class JarvisCore implements Piece {
     // Trace flows from msg if present; else fall back to the session's
     // current trace (set when handlePrompt dispatched).
     const traceId = msg.traceId ?? this.getTrace(sessionId);
+    const sessionState = this.sessions.getState(sessionId);
 
     log.info({
       traceId,
       sessionId,
-      sessionState: managed.state,
+      sessionState,
       resultCount: results?.length ?? 0,
       results: results?.map(r => ({
         id: r.tool_use_id,
@@ -665,8 +683,8 @@ export class JarvisCore implements Piece {
       })),
     }, "JarvisCore: handleToolResult (entry)");
 
-    if (managed.state !== "waiting_tools") {
-      log.warn({ traceId, sessionId, state: managed.state }, "JarvisCore: tool result but not waiting — discarding");
+    if (sessionState !== "waiting_tools") {
+      log.warn({ traceId, sessionId, state: sessionState }, "JarvisCore: tool result but not waiting — discarding");
       return;
     }
 
@@ -696,10 +714,20 @@ export class JarvisCore implements Piece {
       } as any);
     }
 
+    log.info({
+      traceId,
+      sessionId,
+      tools: pendingCalls.map(tc => tc.name),
+      results: results.map(r => ({ id: r.tool_use_id, isError: r.is_error })),
+    }, "JarvisCore: *** TOOL RESULTS RECEIVED ***");
     managed.pendingToolCalls = undefined;
-    this.sessions.setState(sessionId, "processing");
+    // Pop waiting_tools, push processing — tool done, back to generating.
+    log.info({ sessionId, traceId }, "JarvisCore: handleToolResult — popState(waiting_tools) + pushState(processing)");
+    this.sessions.popState(sessionId);   // removes "waiting_tools"
+    this.sessions.pushState(sessionId, "processing");  // resumes API call
     this.setSessionState(sessionId, "processing");
     this.updateHud();
+    this.broadcastSessionState(sessionId, "processing");
 
     log.info({
       traceId,
@@ -712,9 +740,10 @@ export class JarvisCore implements Piece {
       const stream = managed.session.continueAndStream();
       await this.consumeStream(sessionId, stream);
     } catch (err: any) {
-      this.sessions.setState(sessionId, "idle");
+      this.sessions.popState(sessionId);
       this.setSessionState(sessionId, "idle");
       this.updateHud();
+      this.broadcastSessionState(sessionId, "idle");
       this.bus.publish({
         channel: "ai.stream",
         source: "jarvis-core",
@@ -928,11 +957,30 @@ export class JarvisCore implements Piece {
     }
 
     if (toolCalls.length > 0) {
+      // Same stale-turn guard as the text-only branch below.
+      const currentTrace = this.currentTrace.get(sessionId);
+      if (currentTrace !== traceId) {
+        log.info({ sessionId, traceId, currentTrace },
+          "JarvisCore: consumeStream — stale turn (tool_use) completed after abort, skipping");
+        return;
+      }
+
       const managed = this.sessions.get(sessionId);
       managed.pendingToolCalls = toolCalls;
-      this.sessions.setState(sessionId, "waiting_tools");
+      // Pop processing, push waiting_tools — API done, now waiting for tools.
+      log.info({
+        traceId,
+        sessionId,
+        toolCount: toolCalls.length,
+        toolNames: toolCalls.map(tc => tc.name),
+        ms: Date.now() - tStream0,
+      }, "JarvisCore: *** API RESPONSE — TOOL USE ***");
+      log.info({ sessionId, traceId, toolCount: toolCalls.length }, "JarvisCore: consumeStream — popState(processing) + pushState(waiting_tools)");
+      this.sessions.popState(sessionId);  // removes "processing"
+      this.sessions.pushState(sessionId, "waiting_tools");
       this.setSessionState(sessionId, "waiting_tools");
       this.updateHud();
+      this.broadcastSessionState(sessionId, "waiting_tools");
 
       log.info({
         traceId,
@@ -963,9 +1011,29 @@ export class JarvisCore implements Piece {
         traceId,
       } as any);
     } else {
-      this.sessions.setState(sessionId, "idle");
+      // Guard: if this turn's trace was already deleted (by abortSession),
+      // the session stack has already been popped by the abort. We must NOT
+      // pop again — that would steal a frame belonging to a newer turn (drain).
+      const currentTrace = this.currentTrace.get(sessionId);
+      if (currentTrace !== traceId) {
+        log.info({ sessionId, traceId, currentTrace },
+          "JarvisCore: consumeStream — stale turn completed after abort, skipping pop");
+        return;
+      }
+
+      log.info({
+        traceId,
+        sessionId,
+        finalTextLength: fullText.length,
+        finalTextPreview: preview(fullText, 120),
+        deltaCount,
+        ms: Date.now() - tStream0,
+      }, "JarvisCore: *** API RESPONSE COMPLETE ***");
+      log.info({ sessionId, traceId }, "JarvisCore: consumeStream — turn complete, popState(processing)");
+      this.sessions.popState(sessionId);  // removes "processing" — turn complete
       this.setSessionState(sessionId, "idle");
       this.updateHud();
+      this.broadcastSessionState(sessionId, "idle");
       log.info({
         traceId,
         sessionId,
@@ -1059,6 +1127,16 @@ export class JarvisCore implements Piece {
       images: allImages.length,
     }, "JarvisCore: draining queued prompts");
 
+    // Signal "processing" to the frontend BEFORE emitting prompt_dispatched
+    // so the thinking indicator lights up before the user entry appears.
+    // We do NOT push onto the stack here — dispatchToSession will push.
+    // Only update the HUD-side sessionStates map and broadcast SSE; the
+    // SessionManager stack is left for dispatchToSession to manage.
+    log.info({ sessionId, traceId, queueItems: items.length }, "JarvisCore: drainQueue — pre-broadcast processing (no stack push)");
+    this.setSessionState(sessionId, "processing");
+    this.updateHud();
+    this.broadcastSessionState(sessionId, "processing");
+
     // Emit one prompt_dispatched per original queued message — the timeline
     // renders each as its own user entry with its own source label.
     this.broadcastPromptDispatched(sessionId, items);
@@ -1067,9 +1145,10 @@ export class JarvisCore implements Piece {
     this.broadcastPendingQueue(sessionId);
 
     // Send the combined prompt to the AI. We bypass handlePrompt because
-    // (a) the queue branch would re-queue (session is still flipping out
-    // of processing), and (b) prompt_dispatched was already emitted above
-    // for the original items.
+    // (a) the queue branch would re-queue (session is already processing),
+    // and (b) prompt_dispatched was already emitted above for the original
+    // items. dispatchToSession will call setState("processing") again at its
+    // top — that is a no-op since we already set it here.
     void this.dispatchToSession(sessionId, combined, allImages.length > 0 ? allImages : undefined);
   }
 
@@ -1133,6 +1212,23 @@ export class JarvisCore implements Piece {
    * Text is truncated to 280 chars per item. Images summarized as hasImages bool.
    * NOT IN PUBLIC AIStreamMessage UNION — same rationale as prompt_dispatched.
    */
+  /**
+   * Broadcasts the current session state to the frontend via SSE.
+   * Emitted on every push/pop so the ChatPanel can derive isThinking/isStreaming
+   * from authoritative state rather than inferring from individual events.
+   *
+   * Type: "session_state". Not in the public AIStreamMessage union (internal).
+   */
+  private broadcastSessionState(sessionId: string, state: "idle" | "processing" | "waiting_tools"): void {
+    this.bus.publish({
+      channel: "ai.stream",
+      source: "jarvis-core",
+      target: sessionId,
+      event: "session_state",
+      state,
+    } as any);
+  }
+
   private broadcastPendingQueue(sessionId: string): void {
     const queue = this.pendingPrompts.get(sessionId) ?? [];
     const items = queue.map(msg => ({

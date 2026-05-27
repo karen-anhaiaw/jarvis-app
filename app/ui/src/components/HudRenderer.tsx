@@ -80,8 +80,8 @@ const STATUS_LABELS: Record<string, string> = {
 interface CtxMenuState { x: number; y: number }
 
 // ── Z-index tiers ──────────────────────────────────────────────────────────
-// Panels: 10…9000 (capped by PANEL_Z_MAX in DraggablePanel)
-// Menu backdrop: 9998  Menu / submenu: 9999
+// Panels: unlimited (react-rnd managed, brought to front on click)
+// Menu backdrop: 9999999999998  Menu / submenu: 9999999999999
 // ───────────────────────────────────────────────────────────────────────────
 
 function HudContextMenu({
@@ -125,7 +125,7 @@ function HudContextMenu({
   const row: React.CSSProperties = { display: 'flex', alignItems: 'center', padding: '4px 12px', cursor: 'pointer' }
   const hl = (e: React.MouseEvent, on: boolean) => { (e.currentTarget as HTMLElement).style.background = on ? 'rgba(68,170,255,0.10)' : 'transparent' }
   const dot = (color: string) => <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: color, marginRight: 8, flexShrink: 0 }} />
-  const menuBox: React.CSSProperties = { position: 'fixed', zIndex: 9999, background: '#0d1117', border: '1px solid #2a3040', borderRadius: 6, minWidth: 200, boxShadow: '0 8px 32px rgba(0,0,0,0.7)', fontFamily: 'var(--font-mono)', fontSize: 11, color: '#cfd8e8', overflow: 'hidden' }
+  const menuBox: React.CSSProperties = { position: 'fixed', zIndex: 9999999999999, background: '#0d1117', border: '1px solid #2a3040', borderRadius: 6, minWidth: 200, boxShadow: '0 8px 32px rgba(0,0,0,0.7)', fontFamily: 'var(--font-mono)', fontSize: 11, color: '#cfd8e8', overflow: 'hidden' }
 
   // All non-chat panels — flat list, sorted by name
   const panels = allComponents
@@ -134,7 +134,7 @@ function HudContextMenu({
 
   return (
     <>
-      <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 9998 }} />
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 9999999999998 }} />
 
       {/* main menu */}
       <div ref={menuRef} style={{ ...menuBox, left: menu.x, top: menu.y }} onClick={e => e.stopPropagation()}>
@@ -241,7 +241,12 @@ export function HudRenderer({ state }: { state: HudState }) {
 
   const openContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
-    setCtxMenu({ x: e.clientX, y: e.clientY })
+    // Clamp so the menu never spawns below / right of the viewport
+    const MENU_W = 220
+    const MENU_H = 400 // conservative upper bound
+    const x = Math.min(e.clientX, window.innerWidth  - MENU_W - 8)
+    const y = Math.min(e.clientY, window.innerHeight - MENU_H - 8)
+    setCtxMenu({ x, y })
   }, [])
 
   const togglePanel = useCallback((id: string, currentlyVisible: boolean) => {
@@ -309,11 +314,18 @@ export function HudRenderer({ state }: { state: HudState }) {
     : state.reactor.status === 'loading' ? '#a6f'
     : '#f44'
 
-  // Build chat panel list: main + all actor/session chats
+  // Build chat panel list: main + all actor/session chats.
+  // Use the full components array (not otherComps) so hidden chats still appear
+  // in the menu and can be focused/revealed.
   const chatPanels = [
     ...(chatOutputComp ? [{ id: 'chat-output', name: 'main' }] : []),
-    ...otherComps
-      .filter(c => c.renderer?.file === 'ChatPanel')
+    ...state.components
+      .filter(c =>
+        c.id !== 'chat-output' &&
+        c.id !== 'chat-input' &&
+        c.id !== 'hud-core-node' &&
+        c.renderer?.file === 'ChatPanel'
+      )
       .map(c => ({ id: c.id, name: c.name || c.id })),
   ]
 

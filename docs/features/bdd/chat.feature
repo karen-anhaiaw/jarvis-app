@@ -77,6 +77,14 @@ Feature: Chat
     And orphaned tool blocks are removed from message history
     And an "aborted" SSE event is delivered
 
+  Scenario: Abort during processing when API resolves just before abort signal
+    Given the session "main" is in state "processing"
+    And the AI provider is about to return a tool_use response
+    When the user presses ESC and the API response resolves concurrently
+    Then the assistant message with tool_use blocks is NOT pushed to message history
+    And no orphan tool_use blocks exist in message history
+    And the next user message can be sent without a 400 error
+
   # ─── Tool Execution ──────────────────────────────────────────────────────────
 
   Scenario: AI requests a tool call

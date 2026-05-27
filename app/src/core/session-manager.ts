@@ -15,9 +15,24 @@ type SessionState = "idle" | "processing" | "waiting_tools";
 
 interface ManagedSession {
   session: AISession;
-  state: SessionState;
+  /**
+   * State stack — each push() adds a frame, each pop() removes the top.
+   * The current state is the top of the stack (last element).
+   * An empty stack means idle.
+   *
+   * Invariant: only "processing" and "waiting_tools" are pushed.
+   * "idle" is never a stack frame — it is derived from an empty stack.
+   */
+  stateStack: SessionState[];
   createdAt: number;
   pendingToolCalls?: import("../ai/types.js").CapabilityCall[];
+}
+
+/** Derived state from the stack top, or "idle" if empty. */
+function peekStack(managed: ManagedSession): SessionState {
+  return managed.stateStack.length > 0
+    ? managed.stateStack[managed.stateStack.length - 1]
+    : "idle";
 }
 
 /**
@@ -177,7 +192,7 @@ export class SessionManager {
 
       managed = {
         session,
-        state: "idle",
+        stateStack: [],
         createdAt: Date.now(),
       };
       this.sessions.set(sessionId, managed);
@@ -221,7 +236,7 @@ export class SessionManager {
 
     managed = {
       session,
-      state: "idle",
+      stateStack: [],
       createdAt: Date.now(),
     };
     this.sessions.set(sessionId, managed);
@@ -230,38 +245,84 @@ export class SessionManager {
     return managed;
   }
 
-  setState(sessionId: string, state: SessionState): void {
+  /**
+   * Push a new state frame onto the session's stack.
+   * Called at the start of each operation (API call, tool execution).
+   * JarvisCore calls this; never call setState() for new code.
+   */
+  pushState(sessionId: string, state: Exclude<SessionState, "idle">): void {
     const managed = this.sessions.get(sessionId);
-    if (managed) {
-      const prev = managed.state;
-      managed.state = state;
-      // info-level so state transitions are visible without enabling debug.
-      // No-op transitions (idle→idle, processing→processing) are filtered to
-      // avoid noise from defensive callers.
-      if (prev !== state) {
-        log.info({ sessionId, from: prev, to: state }, "SessionManager: state changed");
-      } else {
-        log.trace({ sessionId, state }, "SessionManager: state set (no change)");
-      }
+    if (!managed) return;
+    const prev = peekStack(managed);
+    managed.stateStack.push(state);
+    log.info({ sessionId, pushed: state, stack: managed.stateStack, from: prev }, "SessionManager: state pushed");
+  }
 
-      // Save after each complete turn (when going back to idle) — skip ephemeral sessions
-      if (state === "idle" && !this.ephemeralSessions.has(sessionId)) {
-        this.save(sessionId);
-      }
+  /**
+   * Pop the top state frame from the session's stack.
+   * Called when an operation completes (API response, tool result, abort).
+   * Returns the new top state ("idle" if stack is now empty).
+   */
+  popState(sessionId: string): SessionState {
+    const managed = this.sessions.get(sessionId);
+    if (!managed) return "idle";
+    const popped = managed.stateStack.pop();
+    const next = peekStack(managed);
+    log.info({ sessionId, popped, stack: managed.stateStack, next }, "SessionManager: state popped");
+    // Save on return to idle — turn is complete
+    if (next === "idle" && !this.ephemeralSessions.has(sessionId)) {
+      this.save(sessionId);
     }
+    return next;
+  }
+
+  /**
+   * Abort the current operation: signal the AI provider to stop streaming,
+   * then pop the top frame. Does NOT clear the full stack — only the current
+   * operation is cancelled. The stack returns to whatever was below it.
+   */
+  abort(sessionId: string): SessionState {
+    const managed = this.sessions.get(sessionId);
+    if (!managed) return "idle";
+    managed.session.abort();
+    managed.pendingToolCalls = undefined;
+    const next = this.popState(sessionId);
+    log.info({ sessionId, next }, "SessionManager: aborted, popped state");
+    return next;
   }
 
   getState(sessionId: string): SessionState {
-    return this.sessions.get(sessionId)?.state ?? "idle";
+    const managed = this.sessions.get(sessionId);
+    if (!managed) return "idle";
+    return peekStack(managed);
   }
 
-  abort(sessionId: string): void {
+  /**
+   * @deprecated Use pushState/popState instead.
+   * Kept for backward compatibility with old callers during migration.
+   * Sets state directly by manipulating the stack to match the desired state.
+   */
+  setState(sessionId: string, state: SessionState): void {
     const managed = this.sessions.get(sessionId);
-    if (managed) {
-      managed.session.abort();
-      managed.pendingToolCalls = undefined;
-      managed.state = "idle";
-      log.info({ sessionId }, "SessionManager: aborted");
+    if (!managed) return;
+    const prev = peekStack(managed);
+    if (state === "idle") {
+      // Clear the entire stack — caller wants a hard reset to idle
+      if (managed.stateStack.length > 0) {
+        managed.stateStack.length = 0;
+        log.info({ sessionId, from: prev }, "SessionManager: setState(idle) — stack cleared");
+        if (!this.ephemeralSessions.has(sessionId)) this.save(sessionId);
+      }
+    } else {
+      // Replace top frame if already in a non-idle state, otherwise push
+      if (managed.stateStack.length > 0) {
+        managed.stateStack[managed.stateStack.length - 1] = state;
+      } else {
+        managed.stateStack.push(state);
+      }
+      if (prev !== state) {
+        log.info({ sessionId, from: prev, to: state }, "SessionManager: setState (legacy)");
+      }
     }
   }
 

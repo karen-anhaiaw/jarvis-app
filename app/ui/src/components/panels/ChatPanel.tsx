@@ -191,6 +191,18 @@ export function ChatPanel({
       const data = JSON.parse(event.data)
 
       switch (data.type) {
+        // Authoritative state snapshot from the backend stack.
+        // Takes precedence over inferred state from individual events.
+        // idle → clear thinking+streaming; processing → thinking; waiting_tools → thinking.
+        case 'session_state':
+          if (data.state === 'idle') {
+            setIsThinking(false)
+            setIsStreaming(false)
+          } else {
+            // processing or waiting_tools → session is active
+            setIsThinking(true)
+          }
+          break
         case 'user':
           setEntries(prev => [...prev, { kind: 'message', role: 'user', text: data.text, images: data.images, source: data.source, session: data.session }])
           setIsThinking(true)
@@ -202,7 +214,8 @@ export function ChatPanel({
           break
         case 'done':
           setIsStreaming(false)
-          setIsThinking(false)
+          // isThinking is managed by session_state — do not set it here.
+          // session_state:idle arrives before/with 'done' and is authoritative.
           setStreamingText(prev => {
             if (prev) {
               setEntries(msgs => [...msgs, { kind: 'message', role: 'assistant', text: prev, source: data.source, session: data.session }])
@@ -220,7 +233,7 @@ export function ChatPanel({
           break
         case 'error':
           setIsStreaming(false)
-          setIsThinking(false)
+          // isThinking managed by session_state — authoritative source.
           setStreamingText('')
           setEntries(prev => [
             // Collapse any live thinking_text from this turn before appending the error.
@@ -281,7 +294,10 @@ export function ChatPanel({
           break
         case 'aborted':
           setIsStreaming(false)
-          setIsThinking(false)
+          // Do NOT setIsThinking(false) here — session_state is the authoritative
+          // source. If drainQueue fires immediately after abort, session_state:processing
+          // arrives in the same SSE flush and must win. Letting aborted reset isThinking
+          // causes a race where the drain's thinking indicator gets wiped.
           setStreamingText(prev => {
             if (prev) {
               setEntries(msgs => [...msgs, { kind: 'message', role: 'assistant', text: prev, source: data.source, session: data.session, aborted: true }])

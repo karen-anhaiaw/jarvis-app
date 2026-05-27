@@ -92,7 +92,14 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
           this.broadcast(msg.target, { type: "tool_cancelled", name: msg.toolName, id: msg.toolId, source, session: msg.target });
           break;
         case "aborted":
+          log.info({ sessionId: msg.target }, "ChatPiece: SSE → aborted");
           this.broadcast(msg.target, { type: "aborted", source, session: msg.target });
+          break;
+        // Authoritative session state from the backend stack push/pop.
+        // Forwarded verbatim so the frontend can use it as ground truth.
+        case "session_state" as any:
+          log.info({ sessionId: msg.target, state: (msg as any).state }, "ChatPiece: SSE → session_state");
+          this.broadcast(msg.target, { type: "session_state", state: (msg as any).state, session: msg.target });
           break;
         case "compaction":
           this.broadcast(msg.target, {

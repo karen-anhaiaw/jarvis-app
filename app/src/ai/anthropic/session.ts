@@ -69,6 +69,24 @@ export class AnthropicSession implements AISession {
   private consecutiveFallbacks = 0;
   private static MAX_CONSECUTIVE_FALLBACKS = 2;
   /**
+   * Sliding-window compaction config — all units are LOGICAL TURNS, not raw
+   * messages or API calls.
+   *
+   * A logical turn is "one real user prompt + everything the assistant does in
+   * response (including the full tool loop)". Tool-loop iterations do NOT
+   * count as turns — an assistant that runs 30 tool_use rounds before the
+   * final text answer is still ONE turn. Turn boundaries are detected by
+   * scanning the history for `user` messages whose first content block is NOT
+   * a `tool_result` (see findUserTurnStarts).
+   *
+   * Defaults: start at turn 30, fire every 10 turns, compact the 10 oldest
+   * turns into a single summary. Conservative — the goal is to keep context
+   * healthy proactively, not to aggressively compress everything.
+   */
+  private static SLIDING_START_TURN = 30;
+  private static SLIDING_INTERVAL = 10;
+  private static SLIDING_CHUNK_TURNS = 10;
+  /**
    * Real total input tokens from the LAST API response (input + cache_read + cache_create).
    * Set after every successful response. Used by measureContext() to override the
    * char/4 heuristic with the truth — chars/4 systematically underestimates by 3-4x
@@ -76,6 +94,14 @@ export class AnthropicSession implements AISession {
    * cache_control markers, and structured blocks differently from raw text).
    */
   private lastRealInputTokens = 0;
+  /**
+   * Snapshot of lastRealInputTokens taken at the START of each API turn (before the
+   * response arrives). Used to detect abrupt context growth in a single turn (e.g. a
+   * large log dump or tool result). Reset to 0 after compaction — when history is
+   * replaced the previous baseline is no longer meaningful, so the growth check skips
+   * the first turn post-compaction (previousRealInputTokens == 0 → skip).
+   */
+  private previousRealInputTokens = 0;
 
   constructor(opts: {
     model: string | (() => string);
@@ -499,8 +525,14 @@ export class AnthropicSession implements AISession {
     const settings = getCompactionSettings(loadSettings());
     if (!settings.enabled) return;
 
-    const maxCtx = getMaxContext();
-    const safetyThreshold = Math.floor(maxCtx * 0.95);
+    // Use the session's effective model to determine the correct context window.
+    // getMaxContext() without args falls back to config.model (the global/main model),
+    // which is wrong for actor sessions that may use a different model — they would
+    // get 200K instead of 1M, causing premature compaction at ~160K tokens.
+    const maxCtx = getMaxContext(this.stickyModelOverride ?? this.getBaseModel());
+    // Trigger at 80% of the context window — down from 95% to give the summarizer
+    // enough headroom to produce a good summary before the session is full.
+    const safetyThreshold = Math.floor(maxCtx * 0.80);
 
     if (lastInputTokens < safetyThreshold) {
       this.consecutiveFallbacks = 0;
@@ -523,9 +555,246 @@ export class AnthropicSession implements AISession {
 
     this.consecutiveFallbacks++;
 
-    log.info({ label: this.label, tokensBefore: lastInputTokens, threshold: safetyThreshold }, "AnthropicSession: Engine B fallback compaction triggered");
+    log.info({ label: this.label, tokensBefore: lastInputTokens, threshold: safetyThreshold }, "AnthropicSession: Engine B threshold compaction triggered");
 
     yield* this.doCompact(lastInputTokens, "threshold");
+  }
+
+  /**
+   * Sliding-window compaction — proactive, incremental, turn-aware.
+   *
+   * Unit of work is a LOGICAL TURN, not a message or an API call. A turn is
+   * "one real user prompt + everything the assistant does in response (the
+   * entire tool loop until a final non-tool_use stop)". Tool-loop iterations
+   * are part of the turn that started them, they don't count separately.
+   *
+   * Runs after `SLIDING_START_TURN` turns, then every `SLIDING_INTERVAL` turns.
+   * Compacts the `SLIDING_CHUNK_TURNS` oldest turns into a summary block
+   * prepended before the remaining turns. The summary is additive — it does
+   * NOT replace previous summaries or recent messages.
+   *
+   * Structure after compaction:
+   *   [existing summaries...] [new sliding summary] [recent turns...]
+   *
+   * The slice boundary is, by construction, the start of a fresh user prompt
+   * (`turnStarts[SLIDING_CHUNK_TURNS]`). This eliminates the orphan
+   * `tool_use` / `tool_result` failure mode at the boundary — there is no way
+   * to cut a tool pair when you only ever slice between turns.
+   *
+   * Caller MUST gate on `stop_reason !== "tool_use"` so this doesn't fire in
+   * the middle of an ongoing tool loop (the assistant hasn't finished yet,
+   * so the "current turn" is still being built).
+   */
+  private async *slidingWindowCompact(stopReason: string | undefined): AsyncGenerator<AIStreamEvent, void> {
+    const settings = getCompactionSettings(loadSettings());
+    if (!settings.enabled) return;
+
+    // Don't fire mid-tool-loop — the current turn isn't done yet. Compaction
+    // must wait until the assistant produces a non-tool_use stop_reason
+    // (end_turn, max_tokens, stop_sequence, etc.).
+    if (stopReason === 'tool_use') return;
+
+    // Count turns from the message history (not from an in-memory counter)
+    // so the schedule survives restore — a session loaded from disk picks up
+    // exactly where it left off.
+    const turnStarts = this.findUserTurnStarts();
+    const turnCount = turnStarts.length;
+
+    if (turnCount < AnthropicSession.SLIDING_START_TURN) return;
+    if ((turnCount - AnthropicSession.SLIDING_START_TURN) % AnthropicSession.SLIDING_INTERVAL !== 0) return;
+
+    // Need enough turns: chunk to compact + at least 1 turn remaining after.
+    if (turnCount < AnthropicSession.SLIDING_CHUNK_TURNS + 1) return;
+
+    // Split at the start of the (N+1)-th turn. By definition this is a
+    // non-tool_result user message — a fresh user prompt — so the boundary is
+    // automatically safe (no tool_use/tool_result pair can ever be cut here).
+    const splitAt = turnStarts[AnthropicSession.SLIDING_CHUNK_TURNS];
+
+    const tokensBefore = this.lastRealInputTokens || this.measureContext().totalTokensEst;
+
+    log.info(
+      {
+        label: this.label,
+        userTurns: turnCount,
+        messageCount: this.messages.length,
+        compactingTurns: AnthropicSession.SLIDING_CHUNK_TURNS,
+        splitAt,
+      },
+      'AnthropicSession: sliding-window compaction triggered'
+    );
+
+    yield {
+      type: 'compaction_start',
+      compactionStart: {
+        // NOTE: type system only allows 'fallback' here — 'sliding-window' is a compaction
+        // event engine value. compaction_start.engine is a separate field used only for
+        // the pending banner. The reason field already carries 'sliding-window'.
+        engine: 'fallback',
+        tokensBefore,
+        reason: 'sliding-window',
+      },
+    };
+
+    try {
+      // Extract the oldest `splitAt` messages — i.e., the first
+      // SLIDING_CHUNK_TURNS complete logical turns. The split is guaranteed
+      // to fall on a turn boundary, so we can't cut a tool_use/tool_result
+      // pair here. Still sanitize defensively to absorb any pre-existing
+      // orphans inside the chunk (legacy history, restored sessions, residue
+      // from a previously aborted turn).
+      const toCompact = sanitizeMessages(this.messages.slice(0, splitAt));
+      const remaining = this.messages.slice(splitAt);
+
+      // Ensure toCompact ends with a user message (API requirement for the summary call)
+      const msgs = [...toCompact];
+      if (msgs.length > 0 && msgs[msgs.length - 1].role === 'assistant') {
+        msgs.push({ role: 'user', content: 'Please summarize the conversation above.' });
+      }
+
+      const compactionModel = this.stickyModelOverride ?? this.getBaseModel();
+      // Sliding-window prompt is purpose-built for token reduction, NOT narrative summary.
+      // Goal: extract and compress ONLY what is operationally relevant — decisions, tasks,
+      // objectives, findings, errors, commands, artifacts. Drop conversation filler.
+      // Intentionally separate from the user-configurable full-compact instructions.
+      const SLIDING_SYSTEM_PROMPT =
+        'You are a context compressor. Reduce token count while preserving ALL operationally ' +
+        'relevant information from the conversation segment. Use terse structured format:\n\n' +
+        '- OBJECTIVES: active goals and tasks in progress\n' +
+        '- DECISIONS: architectural, technical, or strategic choices made\n' +
+        '- FINDINGS: discoveries, root causes, confirmed facts, investigation results\n' +
+        '- ARTIFACTS: file paths, function names, commands, configs, schemas, IDs produced\n' +
+        '- ERRORS: failures encountered and their resolutions or current status\n' +
+        '- PENDING: unresolved questions, blocked items, next steps explicitly mentioned\n\n' +
+        'Drop: greetings, acknowledgements, repetition, conversational filler, ' +
+        'reformulations of already-captured content.\n\n' +
+        'Output ONLY the compressed content inside <summary></summary> tags. ' +
+        'Be as dense as possible — every token must earn its place.';
+
+      log.info({ label: this.label, compactionModel, compactingMessages: toCompact.length }, 'AnthropicSession: sliding-window summary call');
+
+      const summaryResponse = await this.client.messages.create({
+        model: compactionModel,
+        max_tokens: 4096, // sliding summaries are partial — less content than full compaction
+        system: SLIDING_SYSTEM_PROMPT,
+        messages: msgs,
+      });
+
+      const summaryText = summaryResponse.content
+        .filter((b: any) => b.type === 'text')
+        .map((b: any) => b.text)
+        .join('\n');
+
+      const match = summaryText.match(/<summary>([\s\S]*?)<\/summary>/);
+      const summary = match ? match[1].trim() : summaryText.trim();
+
+      // Prepend summary as a synthetic user/assistant pair, keep remaining messages intact.
+      // The synthetic user message starts with plain text (NOT a tool_result), so it
+      // counts as a fresh turn start for the next sliding-window cycle —
+      // findUserTurnStarts will pick it up as turn #1 of the new history.
+      // Run sanitizeMessages as a final defensive pass — the turn-aware split
+      // already prevents orphans across the boundary, but if `remaining` itself
+      // carries pre-existing orphans (legacy history, abort residue) we patch
+      // them here rather than crashing the next API call.
+      this.messages = sanitizeMessages([
+        { role: 'user', content: `[Conversation summary — first ${AnthropicSession.SLIDING_CHUNK_TURNS} turns]\n\n${summary}` },
+        { role: 'assistant', content: 'Understood. I have the summary of our earlier conversation.' },
+        ...remaining,
+      ]);
+
+      // injectedContextCount tracks ephemeral blocks — sliding window doesn't wipe all
+      // messages, so we leave it as-is. The stale cache_control cleanup on the next
+      // sendAndStream will handle any ephemeral markers in remaining messages.
+
+      // Use measureContext() on the new message array for tokensAfter.
+      // The previous inline chars/4 heuristic was dead code (result unused) and
+      // underestimated by 3-4x — removed to avoid log confusion.
+      const ctxAfter = this.measureContext();
+      const tokensAfterFinal = ctxAfter.totalTokensEst;
+
+      log.info(
+        { label: this.label, tokensBefore, tokensAfter: tokensAfterFinal, summaryLength: summary.length, remainingMessages: remaining.length },
+        'AnthropicSession: sliding-window compaction complete'
+      );
+
+      yield {
+        type: 'compaction',
+        compaction: {
+          summary,
+          engine: 'sliding-window',
+          tokensBefore,
+          tokensAfter: tokensAfterFinal,
+        },
+      };
+    } catch (err) {
+      log.error({ label: this.label, err }, 'AnthropicSession: sliding-window compaction failed');
+    }
+  }
+
+  /**
+   * True iff `msg` is a user message whose first content block is a `tool_result`.
+   *
+   * Used as the building block for `findUserTurnStarts` (a tool_result-leading
+   * user message is a continuation of an ongoing tool loop, NOT a new turn).
+   */
+  private startsWithToolResult(msg: MessageParam): boolean {
+    if (msg.role !== 'user') return false;
+    if (typeof msg.content === 'string') return false;
+    if (!Array.isArray(msg.content) || msg.content.length === 0) return false;
+    return (msg.content[0] as any)?.type === 'tool_result';
+  }
+
+  /**
+   * Indices in `this.messages` that mark the start of a logical turn.
+   *
+   * A turn begins with a `user` message that is NOT a `tool_result`
+   * continuation. Every tool_result-leading user message is part of the turn
+   * started by the previous fresh user prompt, regardless of how many
+   * tool_use/tool_result rounds the assistant runs.
+   *
+   * Returned indices are monotonically increasing. The slice boundary
+   * `messages.slice(0, turnStarts[N])` covers exactly the first N turns —
+   * which is what the sliding window relies on for a tool-pair-safe split.
+   */
+  private findUserTurnStarts(): number[] {
+    const out: number[] = [];
+    for (let i = 0; i < this.messages.length; i++) {
+      const m = this.messages[i];
+      if (m.role !== 'user') continue;
+      if (this.startsWithToolResult(m)) continue;
+      out.push(i);
+    }
+    return out;
+  }
+
+  /**
+   * Abrupt-growth compaction — independent of the absolute threshold.
+   * Triggers when a single turn increases context by more than 15% (e.g. a large
+   * log dump, trace output, or tool result). Does NOT increment consecutiveFallbacks
+   * because it is a distinct trigger path — it should not interfere with the
+   * consecutive-fallback guard on the absolute-threshold path.
+   *
+   * Skipped when previousRealInputTokens is 0 (fresh session or just post-compaction)
+   * to avoid false positives on the very first turn.
+   */
+  private async *growthCompact(lastInputTokens: number): AsyncGenerator<AIStreamEvent, void> {
+    const settings = getCompactionSettings(loadSettings());
+    if (!settings.enabled) return;
+
+    // Skip on first turn after session start or post-compaction (no valid baseline).
+    if (this.previousRealInputTokens === 0) return;
+
+    const growthRatio = lastInputTokens / this.previousRealInputTokens;
+    const GROWTH_THRESHOLD = 1.15; // 15% growth in a single turn
+
+    if (growthRatio < GROWTH_THRESHOLD) return;
+
+    log.info(
+      { label: this.label, previousTokens: this.previousRealInputTokens, currentTokens: lastInputTokens, growthRatio: growthRatio.toFixed(2) },
+      "AnthropicSession: Engine B abrupt-growth compaction triggered"
+    );
+
+    yield* this.doCompact(lastInputTokens, "growth" as any);
   }
 
   /**
@@ -558,12 +827,14 @@ export class AnthropicSession implements AISession {
 
       // Compaction is a UTILITY call: summary doesn't share cache pool with
       // the main loop. Force Haiku regardless of session sticky to capture
-      // the price gap (~$3 → ~$0.20 on a 200k context).
-      const utilityModel = loadUtilityModel();
-      log.info({ label: this.label, utilityModel }, "AnthropicSession: compaction summary using utility model");
+      // Use the session's current model for compaction — same client, same model.
+      // The utility model (Haiku) was too weak for large contexts (~1M tokens)
+      // and would silently truncate, producing summaries that barely reduced context.
+      const compactionModel = this.stickyModelOverride ?? this.getBaseModel();
+      log.info({ label: this.label, compactionModel }, "AnthropicSession: compaction summary using session model");
 
       const summaryResponse = await this.client.messages.create({
-        model: utilityModel,
+        model: compactionModel,
         max_tokens: 8192, // summary is short prose, doesn't need the full output budget
         system: `You are a conversation summarizer. ${instructions}\nWrap your summary in <summary></summary> tags.`,
         messages: msgs,
@@ -580,6 +851,9 @@ export class AnthropicSession implements AISession {
 
       // Replace message history with summary
       this.injectedContextCount = 0; // compaction wipes all messages — reset ephemeral tracking
+      // Reset growth baseline — history was just replaced, so the old token count
+      // is no longer a valid baseline. The next turn will skip the growth check.
+      this.previousRealInputTokens = 0;
       this.messages = [
         { role: "user", content: `[Previous conversation summary]\n\n${summary}` },
         { role: "assistant", content: "Understood. I have the context from our previous conversation. How would you like to proceed?" },
@@ -648,6 +922,9 @@ export class AnthropicSession implements AISession {
 
   private async *streamFromAPI(): AsyncGenerator<AIStreamEvent, void> {
     const t0 = Date.now();
+    // Snapshot the current token count BEFORE the API call so growthCompact can
+    // compare previous vs current after the response arrives.
+    this.previousRealInputTokens = this.lastRealInputTokens;
     const rawTools = this.getTools();
     const toolNames = rawTools.map((t: any) => t.name);
 
@@ -843,8 +1120,22 @@ export class AnthropicSession implements AISession {
       // unless compaction already replaced the history above.
       // This includes stop_reason === "tool_use" (so the tool_use blocks are
       // persisted before addToolResults appends the matching tool_result).
-      if (message.stop_reason !== "compaction" && !compactionSummary && message.content.length > 0) {
+      //
+      // ABORT GUARD: if the AbortController fired while the API was still
+      // generating (race between ESC and finalMessage() resolving), the turn
+      // was cancelled mid-flight. Do NOT push the assistant message — it would
+      // leave an orphan tool_use in history with no matching tool_result,
+      // causing a 400 on every subsequent turn. consumeStream already handles
+      // the stale-turn check by comparing traceId, but the push here happens
+      // INSIDE streamFromAPI, before consumeStream gets to run the guard.
+      const wasAborted = this.abortController?.signal.aborted ?? false;
+      if (!wasAborted && message.stop_reason !== "compaction" && !compactionSummary && message.content.length > 0) {
         this.messages.push({ role: "assistant", content: message.content });
+      } else if (wasAborted) {
+        log.info(
+          { label: this.label, stopReason: message.stop_reason, toolUseCount: toolCalls.length },
+          "AnthropicSession: skipping assistant message push — turn was aborted (prevents orphan tool_use)",
+        );
       }
 
       const iterations = (message.usage as any)?.iterations;
@@ -869,10 +1160,39 @@ export class AnthropicSession implements AISession {
         usage,
       };
 
-      // Engine B: check if fallback compaction needed (only if Engine A didn't trigger)
+      // Engine B: check if compaction is needed (only if Engine A didn't trigger).
+      // Three independent triggers, checked in priority order:
+      //   1. Sliding window (proactive, turn-based) — slidingWindowCompact
+      //   2. Absolute threshold (80% of context window) — fallbackCompact
+      //   3. Abrupt growth (>15% increase in a single turn) — growthCompact
+      // Only one runs per turn: first trigger that fires wins, others skip.
+      //
+      // Sliding-window receives stop_reason and self-gates: it bails out when
+      // stop_reason === "tool_use" so it never fires mid-tool-loop. Threshold
+      // and growth checks DO run on every API response because they protect
+      // against context overflow regardless of turn structure.
       if (!compactionSummary && usage) {
         const totalInput = usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
-        yield* this.fallbackCompact(totalInput);
+
+        // 1. Sliding window — proactive turn-based compaction
+        let compacted = false;
+        for await (const evt of this.slidingWindowCompact(message.stop_reason as string | undefined)) {
+          yield evt;
+          if (evt.type === "compaction") compacted = true;
+        }
+
+        // 2. Absolute threshold — only if sliding window didn't already compact
+        if (!compacted) {
+          for await (const evt of this.fallbackCompact(totalInput)) {
+            yield evt;
+            if (evt.type === "compaction") compacted = true;
+          }
+        }
+
+        // 3. Abrupt growth — only if neither of the above fired
+        if (!compacted) {
+          yield* this.growthCompact(totalInput);
+        }
       }
 
       const ctxAfter = this.measureContext();

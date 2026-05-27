@@ -21,12 +21,12 @@ export interface AIStreamEvent {
   compactionStart?: {
     engine: 'fallback';
     tokensBefore: number;
-    /** Optional reason for why compaction started ('forced' | 'threshold'). */
-    reason?: 'forced' | 'threshold';
+    /** Optional reason for why compaction started. */
+    reason?: 'forced' | 'threshold' | 'growth' | 'sliding-window';
   };
   compaction?: {
     summary: string;
-    engine: 'api' | 'fallback';
+    engine: 'api' | 'fallback' | 'sliding-window';
     tokensBefore: number;
     tokensAfter: number;
   };
