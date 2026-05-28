@@ -48,8 +48,13 @@ const pluginRendererCache: Record<string, React.LazyExoticComponent<React.Compon
 function getPluginRenderer(plugin: string, file: string) {
   const key = `${plugin}/${file}`
   if (!pluginRendererCache[key]) {
+    // Each new cache entry gets a unique bust so re-imports after panel
+    // close/reopen always fetch a fresh bundle from the server.
+    // Using a per-entry counter (not Date.now at module load) means
+    // every new lazy() call gets a unique URL defeating the ES module cache.
+    const bust = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     pluginRendererCache[key] = lazy(() =>
-      import(/* @vite-ignore */ `/plugins/${plugin}/renderers/${file}.js`)
+      import(/* @vite-ignore */ `/plugins/${plugin}/renderers/${file}.js?v=${bust}`)
     )
   }
   return pluginRendererCache[key]

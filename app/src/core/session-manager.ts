@@ -53,6 +53,14 @@ export class SessionManager {
   private static AUTO_SAVE_INTERVAL_MS = 30_000; // save every 30s
 
   /**
+   * Global context injector — installed on every session (existing + future).
+   * Set once via setGlobalContextInjector(); applied in get() and getWithPrompt().
+   * This replaces the per-session onSessionCreated approach: a single fn covers
+   * all sessions regardless of when they are created.
+   */
+  private globalContextInjector?: (sessionId: string) => string[] | Promise<string[]>;
+
+  /**
    * Tracks creation options per session so we can restore with the right prompt.
    * Only set for sessions created via getWithPrompt.
    */
@@ -69,6 +77,26 @@ export class SessionManager {
    */
   setBus(bus: EventBus): void {
     this.bus = bus;
+  }
+
+  /**
+   * Register a global context injector called before every AI request,
+   * for every session. Replaces any previously registered injector.
+   * Also installs it retroactively on all currently loaded sessions.
+   */
+  setGlobalContextInjector(fn: (sessionId: string) => string[] | Promise<string[]>): void {
+    this.globalContextInjector = fn;
+    // Retroactively install on all already-loaded sessions.
+    for (const [, managed] of this.sessions) {
+      this.applyGlobalInjector(managed.session);
+    }
+  }
+
+  private applyGlobalInjector(session: unknown): void {
+    const setter = (session as { setContextInjector?: (fn: (sessionId: string) => string[] | Promise<string[]>) => void }).setContextInjector;
+    log.info({ hasInjector: !!this.globalContextInjector, hasSetter: typeof setter === "function" }, "SessionManager: applyGlobalInjector");
+    if (typeof setter !== "function") return;
+    if (this.globalContextInjector) setter.call(session, this.globalContextInjector);
   }
 
   /** Set current provider name (needed for save/restore compatibility checks) */
@@ -196,6 +224,7 @@ export class SessionManager {
         createdAt: Date.now(),
       };
       this.sessions.set(sessionId, managed);
+      this.applyGlobalInjector(session);
       log.info({ sessionId, restored: !!restoreMessages }, "SessionManager: created new session");
       this.fireCreated(sessionId, managed);
     }
@@ -240,6 +269,7 @@ export class SessionManager {
       createdAt: Date.now(),
     };
     this.sessions.set(sessionId, managed);
+    this.applyGlobalInjector(session);
     log.info({ sessionId, model: options.model, hasRestore: !!(saved && saved.messages.length > 0) }, "SessionManager: created session with custom prompt");
     this.fireCreated(sessionId, managed);
     return managed;

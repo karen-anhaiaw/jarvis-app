@@ -13,8 +13,9 @@ const pluginRendererCache: Record<string, React.LazyExoticComponent<React.Compon
 function getPluginRenderer(plugin: string, file: string) {
   const key = `${plugin}/${file}`
   if (!pluginRendererCache[key]) {
+    const bust = Date.now()
     pluginRendererCache[key] = lazy(() =>
-      import(/* @vite-ignore */ `/plugins/${plugin}/renderers/${file}.js`)
+      import(/* @vite-ignore */ `/plugins/${plugin}/renderers/${file}.js?v=${bust}`)
     )
   }
   return pluginRendererCache[key]

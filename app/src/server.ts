@@ -517,9 +517,12 @@ export class HttpServer {
     }
 
     // Plugin renderer compilation endpoint
-    // URL: /plugins/{name}/renderers/{file}.js
-    if (req.url?.startsWith("/plugins/") && req.url?.endsWith(".js")) {
-      const parts = req.url.split("/");
+    // URL: /plugins/{name}/renderers/{file}.js[?v=cache-buster]
+    // Strip query string before matching — the ?v= cache-buster must not
+    // prevent the route from being recognised (endsWith(".js") fails otherwise).
+    const reqPath = req.url?.split("?")[0] ?? "";
+    if (reqPath.startsWith("/plugins/") && reqPath.endsWith(".js")) {
+      const parts = reqPath.split("/");
       // parts = ["", "plugins", name, "renderers", "file.js"]
       if (parts.length === 5 && parts[3] === "renderers") {
         const pluginName = parts[2];
@@ -573,11 +576,21 @@ export class HttpServer {
     }
 
     const cacheKey = `${pluginName}/${fileName}`;
-    const stat = statSync(filePath);
+    // Use the latest mtime across ALL files in the renderers dir so that
+    // changes to imported sub-components (e.g. MemoryCard.tsx imported by
+    // MnemosynePanel.tsx) invalidate the bundle for the entrypoint too.
+    const rendererDir = filePath.replace(/[^/\\]+$/, "");
+    let maxMtime = statSync(filePath).mtimeMs;
+    try {
+      const { readdirSync } = await import("fs");
+      for (const f of readdirSync(rendererDir)) {
+        try { const m = statSync(join(rendererDir, f)).mtimeMs; if (m > maxMtime) maxMtime = m; } catch { /* skip */ }
+      }
+    } catch { /* non-critical */ }
     const cached = this.rendererCache.get(cacheKey);
 
-    if (cached && cached.mtime === stat.mtimeMs) {
-      res.writeHead(200, { "Content-Type": "application/javascript" });
+    if (cached && cached.mtime === maxMtime) {
+      res.writeHead(200, { "Content-Type": "application/javascript", "Cache-Control": "no-store" });
       res.end(cached.js);
       return;
     }
@@ -619,9 +632,9 @@ export class HttpServer {
       });
 
       const js = result.outputFiles[0].text;
-      this.rendererCache.set(cacheKey, { js, mtime: stat.mtimeMs });
+      this.rendererCache.set(cacheKey, { js, mtime: maxMtime });
 
-      res.writeHead(200, { "Content-Type": "application/javascript" });
+      res.writeHead(200, { "Content-Type": "application/javascript", "Cache-Control": "no-store" });
       res.end(js);
     } catch (err) {
       log.error({ pluginName, fileName, err: String(err) }, "HttpServer: renderer compilation failed");

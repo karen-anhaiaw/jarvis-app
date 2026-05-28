@@ -38,12 +38,39 @@ export interface GraphHandle {
   update(patch: { status?: string; meta?: Record<string, unknown>; label?: string }): void;
 }
 
+/**
+ * Minimal logger interface exposed to plugins via `ctx.log`.
+ * Matches the pino / structured-log call signature so plugins can
+ * write structured entries that land in the core JARVIS log file.
+ *
+ * @since 0.4.1
+ */
+export interface PluginLogger {
+  trace(obj: Record<string, unknown> | string, msg?: string): void;
+  debug(obj: Record<string, unknown> | string, msg?: string): void;
+  info(obj: Record<string, unknown> | string, msg?: string): void;
+  warn(obj: Record<string, unknown> | string, msg?: string): void;
+  error(obj: Record<string, unknown> | string, msg?: string): void;
+  fatal(obj: Record<string, unknown> | string, msg?: string): void;
+  /** Returns a child logger with additional bound fields. */
+  child(bindings: Record<string, unknown>): PluginLogger;
+}
+
 export interface PluginContext {
   bus: EventBus;
   capabilityRegistry: CapabilityRegistry;
   config: Record<string, unknown>;
   pluginDir: string;
   sessionFactory: AISessionFactory;
+  /**
+   * Structured logger scoped to this plugin. Writes to the same
+   * JARVIS log file as the core (jarvis.log). Use instead of `console.*`
+   * so plugin entries appear in log aggregation and are filterable by
+   * the `plugin` field. Always available — never undefined.
+   *
+   * @since 0.4.1
+   */
+  log: PluginLogger;
   /** Central session manager — handles persistence, auto-save, restore for all sessions (added in 0.3.0) */
   sessionManager?: SessionManager;
   registerRoute: (method: string, path: string, handler: RouteHandler) => void;

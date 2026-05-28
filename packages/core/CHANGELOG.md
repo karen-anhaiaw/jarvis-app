@@ -4,6 +4,13 @@ All notable changes to this package will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-05-27
+
+### Added
+- `PluginLogger` interface and `PluginContext.log` field — plugins receive the core
+  pino logger as a child scoped to `{ plugin: name }`. Entries land in `jarvis.log`
+  without bundling pino. Use `ctx.log.info(...)` instead of `console.*` in plugins.
+
 ## [0.3.0] — 2026-05-08
 
 ### Added

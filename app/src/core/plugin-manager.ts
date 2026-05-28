@@ -73,7 +73,6 @@ export class PluginManager implements Piece {
    * (Set preserves insertion order in JS).
    */
   private contextInjectors = new Set<ContextInjectorFn>();
-  private sessionsWithAggregator = new WeakSet<object>();
 
   constructor(registry: CapabilityRegistry) {
     this.registry = registry;
@@ -89,32 +88,20 @@ export class PluginManager implements Piece {
 
   setSessionManager(sessions: SessionManager): void {
     this.sessions = sessions;
-    // Hook into session lifecycle: every session that gets created from now on
-    // will receive the composed injector aggregator. Existing sessions (if any
-    // were created BEFORE plugins registered) get the aggregator pushed via
-    // installAggregatorOnSession during registerContextInjector.
-    sessions.onSessionCreated((sessionId, managed) => {
-      this.installAggregatorOnSession(managed.session);
-    });
-  }
-
-  /**
-   * Install (or refresh) the composite context injector on a session.
-   * The aggregator iterates every registered injector, concatenates their
-   * contributions, and returns the combined string[]. Idempotent —
-   * calling twice on the same session just replaces the previous aggregator
-   * with one that closes over the current Set, so additions/removals to
-   * `this.contextInjectors` are picked up live.
-   */
-  private installAggregatorOnSession(session: unknown): void {
-    const setter = (session as { setContextInjector?: (fn: ContextInjectorFn) => void }).setContextInjector;
-    if (typeof setter !== "function") return; // provider doesn't support
-    const inject: ContextInjectorFn = async (sessionId: string): Promise<string[]> => {
+    // Register the global aggregator once — SessionManager applies it to every
+    // session (existing + future) without per-session wiring or onSessionCreated hooks.
+    sessions.setGlobalContextInjector(async (sessionId: string): Promise<string[]> => {
+      log.info({ sessionId, injectorCount: this.contextInjectors.size }, "PluginManager: global aggregator called");
       if (this.contextInjectors.size === 0) return [];
       const out: string[] = [];
-      // Run injectors in parallel — they're independent and may all touch async stores.
+      const fns = Array.from(this.contextInjectors);
       const results = await Promise.allSettled(
-        Array.from(this.contextInjectors).map(async (fn) => fn(sessionId)),
+        fns.map(async (fn, i) => {
+          log.info({ sessionId, i, fnName: fn.name || "anonymous" }, "PluginManager: calling injector");
+          const r = await fn(sessionId);
+          log.info({ sessionId, i, resultLen: Array.isArray(r) ? r.length : -1 }, "PluginManager: injector returned");
+          return r;
+        }),
       );
       for (const r of results) {
         if (r.status === "rejected") {
@@ -123,28 +110,18 @@ export class PluginManager implements Piece {
         }
         if (Array.isArray(r.value)) out.push(...r.value);
       }
+      log.info({ sessionId, totalBlocks: out.length }, "PluginManager: global aggregator done");
       return out;
-    };
-    setter.call(session, inject);
-    this.sessionsWithAggregator.add(session as object);
+    });
   }
 
   /**
    * Add a context injector. Returns an unregister function.
-   * Side effects: ensures every existing owned session has the aggregator
-   * installed (idempotent), so the new injector takes effect immediately.
+   * The global aggregator on SessionManager closes over `this.contextInjectors`,
+   * so additions/removals take effect on the next request without re-wiring.
    */
   registerContextInjector(fn: ContextInjectorFn): () => void {
     this.contextInjectors.add(fn);
-    // Make sure all known sessions have the aggregator wired up.
-    if (this.sessions) {
-      for (const sid of this.sessions.listActive()) {
-        const m = this.sessions.peek(sid);
-        if (m && !this.sessionsWithAggregator.has(m.session as object)) {
-          this.installAggregatorOnSession(m.session);
-        }
-      }
-    }
     log.debug({ count: this.contextInjectors.size }, "PluginManager: context injector registered");
     return () => {
       this.contextInjectors.delete(fn);
@@ -358,7 +335,11 @@ export class PluginManager implements Piece {
       try {
         const entryPath = join(pluginDir, manifest.entry);
         if (existsSync(entryPath)) {
-          const mod = await import(entryPath);
+          // Cache-bust with mtime so plugin edits take effect on next restart
+          // without requiring a full process kill+relaunch each time.
+          const { statSync: _pStat } = await import("fs");
+          const _pMtime = _pStat(entryPath).mtimeMs;
+          const mod = await import(`${entryPath}?t=${_pMtime}`);
           if (typeof mod.createPieces === "function" && this.pieceManager) {
             const configKey = `plugin:${name}`;
             const ctx: PluginContext = {
@@ -367,6 +348,10 @@ export class PluginManager implements Piece {
               config: loadSettings().pieces?.[configKey]?.config ?? {},
               pluginDir,
               sessionFactory: this.factory as unknown as PluginContext["sessionFactory"],
+              // Provide the core logger as a child scoped to the plugin name.
+              // Plugin entries land in jarvis.log alongside core entries and
+              // are filterable by the `plugin` field — no pino bundling needed.
+              log: log.child({ plugin: name }) as unknown as PluginContext["log"],
               sessionManager: this.sessions as unknown as PluginContext["sessionManager"],
               registerRoute: (method: string, path: string, handler: any) => {
                 if (this.httpServer) {
