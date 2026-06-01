@@ -566,11 +566,12 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
         input_schema: (tool.inputSchema as Record<string, unknown>) ?? { type: "object", properties: {} },
         handler: async (input) => {
           const sessionId = input.__sessionId as string | undefined;
+          const { __sessionId: _, ...args } = input;
           const ctrl = new AbortController();
           if (sessionId) this.abortControllers.set(sessionId, ctrl);
           try {
             const result = await server.client!.callTool(
-              { name: tool.name, arguments: input },
+              { name: tool.name, arguments: args },
               undefined,
               { signal: ctrl.signal },
             );

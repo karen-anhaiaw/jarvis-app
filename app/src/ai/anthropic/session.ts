@@ -283,20 +283,24 @@ export class AnthropicSession implements AISession {
     const memoryBlocks = this.contextInjector ? await this.contextInjector(this.label) : [];
     const memoryText = memoryBlocks.join("\n\n").trim();
 
-    // Strip cache_control from any prior memory blocks in the history.
-    // We add a fresh ephemeral cache_control on the new memory block below,
-    // and Anthropic enforces a hard limit of 4 cache_control blocks per request
-    // (system + tools + messages combined). Old memory blocks shouldn't keep
-    // their cache_control — they're stale, won't get cache hits, and just eat
-    // breakpoints. Only the most recent memory block (this turn) is worth caching.
-    if (memoryText) {
-      this.stripStaleMemoryCacheControl();
-    }
+    // Cache control on message content is OWNED EXCLUSIVELY by this provider.
+    // Plugins (Mnemosyne, Skills, etc.) inject pure content — they do NOT set
+    // cache_control. Memory blocks here are pushed without any cache marker.
+    // The single rolling cache breakpoint for messages is placed later in
+    // placeMessageCacheBreakpoint() (called from streamFromAPI), anchored to
+    // the LAST STABLE turn (assistant just produced output). That way the
+    // breakpoint position is deterministic and does not drift with every
+    // memory injection, preventing the cache-write storms observed when the
+    // ephemeral marker rode along with each turn's volatile memory text.
+    //
+    // Belt-and-suspenders: still strip any cache_control leftovers in case
+    // a plugin (or older code path) snuck one in.
+    this.stripAllMessageCacheControl();
 
     if (images && images.length > 0) {
       const content: ContentBlockParam[] = [];
       if (memoryText) {
-        content.push({ type: "text", text: memoryText, cache_control: { type: "ephemeral" } } as any);
+        content.push({ type: "text", text: memoryText } as any);
       }
       // Prompt blocks (may be multiple for inter-session context separation)
       for (const block of promptBlocks) {
@@ -314,7 +318,7 @@ export class AnthropicSession implements AISession {
       this.messages.push({
         role: "user",
         content: [
-          { type: "text", text: memoryText, cache_control: { type: "ephemeral" } } as any,
+          { type: "text", text: memoryText } as any,
           ...promptBlocks.map(b => ({ type: "text" as const, text: b.text })),
         ],
       });
@@ -339,39 +343,88 @@ export class AnthropicSession implements AISession {
   }
 
   /**
-   * Remove cache_control from old memory/context text blocks in history.
+   * Remove cache_control from every block in every message in the history.
    *
-   * Background: every turn that injects memory adds a `cache_control: ephemeral`
-   * marker on the memory text block. Without cleanup these accumulate, and
-   * Anthropic rejects requests with more than 4 cache_control blocks total
-   * (system + tools + messages). The actor pool was hitting "Found 6" / "Found 5"
-   * after a few dozen turns.
+   * This provider owns cache_control placement on `messages` exclusively.
+   * Other layers (plugins, pieces, Mnemosyne, Skills) inject content as plain
+   * blocks. Before every API call we wipe any cache_control that may have
+   * leaked in (defensive — kept even after refactor in case third-party code
+   * still adds it) and then re-place the single rolling message breakpoint
+   * deterministically in placeMessageCacheBreakpoint().
    *
-   * Strategy: a memory block is identifiable as a user-role text block whose
-   * text starts with "<system-reminder>" (the wrapper Mnemosyne uses) AND
-   * carries cache_control. Strip the marker — leave the text intact so the
-   * model still sees the past memories, just without paying for a stale
-   * cache breakpoint.
-   *
-   * We also strip any other text blocks in user messages that have
-   * cache_control set, to be defensive against future injectors that follow
-   * the same pattern.
+   * Why we strip ALL messages (not only user):
+   *   - Assistant tool_use blocks could in theory carry cache_control.
+   *   - Tool_result blocks in user messages could too.
+   *   We just clean everything; the placement step puts back the single
+   *   marker the provider wants.
    */
-  private stripStaleMemoryCacheControl(): void {
+  private stripAllMessageCacheControl(): void {
     let stripped = 0;
     for (const m of this.messages) {
-      if (m.role !== "user") continue;
       if (!Array.isArray(m.content)) continue;
       for (const block of m.content as any[]) {
-        if (block?.type === "text" && block?.cache_control) {
+        if (block && typeof block === "object" && block.cache_control) {
           delete block.cache_control;
           stripped++;
         }
       }
     }
     if (stripped > 0) {
-      log.info({ label: this.label, stripped }, "AnthropicSession: stripped stale cache_control markers from prior memory blocks");
+      log.debug({ label: this.label, stripped }, "AnthropicSession: stripped cache_control from message history");
     }
+  }
+
+  /**
+   * Place exactly ONE cache_control marker on the messages array, anchored
+   * to a stable boundary so the breakpoint position is deterministic across
+   * turns. A stable position means the next request can hit the cache fully
+   * up to that point — the only delta to pay for is whatever was added
+   * AFTER the breakpoint (which is the natural, minimal cache write).
+   *
+   * Anchor strategy:
+   *   - Find the last assistant message in the history (the most recent
+   *     completed model turn).
+   *   - Attach cache_control to the LAST content block of that message.
+   *   - This guarantees that the entire stable history (everything up to
+   *     and including the last assistant response) is cached, and the new
+   *     user turn (which contains volatile memory injections) lives AFTER
+   *     the cache point so it doesn't break the cache.
+   *
+   * Edge cases:
+   *   - No assistant message yet (first turn): no breakpoint added.
+   *     Cost is the same as if we had added one — the first call always
+   *     pays full input cost regardless.
+   *   - Last assistant message has only tool_use blocks: still works, the
+   *     cache_control just sits on the tool_use, which Anthropic accepts.
+   *
+   * Total breakpoints in the request:
+   *   - 2 in system blocks (factory.ts BP1+BP2)
+   *   - 1 on the last tool definition (BP3)
+   *   - 1 here on the last assistant message (BP4)
+   *   Total: 4 — exactly Anthropic's limit, all stable.
+   */
+  private placeMessageCacheBreakpoint(): void {
+    // Find the most recent assistant message (scan from the end).
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const m = this.messages[i];
+      if (m.role !== "assistant") continue;
+      if (!Array.isArray(m.content) || m.content.length === 0) continue;
+      const lastBlock = m.content[m.content.length - 1] as any;
+      if (lastBlock && typeof lastBlock === "object") {
+        lastBlock.cache_control = { type: "ephemeral" };
+        log.debug({
+          label: this.label,
+          anchorMsgIdx: i,
+          anchorBlockType: lastBlock.type,
+          msgsAfterAnchor: this.messages.length - 1 - i,
+        }, "AnthropicSession: placed message cache breakpoint");
+      }
+      return;
+    }
+    // No assistant message yet — nothing to anchor to. The system + tools
+    // breakpoints still apply, and the next assistant turn will create the
+    // anchor for subsequent caching.
+    log.debug({ label: this.label }, "AnthropicSession: no assistant message yet, skipping message cache breakpoint");
   }
 
   /**
@@ -423,13 +476,78 @@ export class AnthropicSession implements AISession {
     // whenever the API returns a mixed response (text + tool_use) with a
     // stop_reason that allows the streamFromAPI push to happen.
 
-    const toolResultBlocks: ToolResultBlockParam[] = results.map(r => ({
+    // Two defensive dedups, both targeting the API's
+    // "Found multiple 'tool_result' blocks with id" rejection:
+    //
+    //   1. Drop entries from `results` whose tool_use_id is already
+    //      represented by a tool_result block somewhere in history. This
+    //      catches stale capability.result messages from a previously-aborted
+    //      tool that race in while the session is back in waiting_tools for
+    //      a different tool. (cleanupAbortedTools may have already injected
+    //      a synthetic placeholder for the aborted id — accepting the late
+    //      real result would create a duplicate.)
+    //
+    //   2. Drop duplicates inside the same `results` array (keep first).
+    //      Should be a no-op in practice but cheap insurance against an
+    //      executor that retries internally without dedup.
+    const existingResultIds = this.collectExistingToolResultIds();
+    const seenInBatch = new Set<string>();
+    const skippedStale: string[] = [];
+    const skippedDupInBatch: string[] = [];
+    const filteredResults: CapabilityResult[] = [];
+    for (const r of results) {
+      const id = r.tool_use_id;
+      if (existingResultIds.has(id)) {
+        skippedStale.push(id);
+        continue;
+      }
+      if (seenInBatch.has(id)) {
+        skippedDupInBatch.push(id);
+        continue;
+      }
+      seenInBatch.add(id);
+      filteredResults.push(r);
+    }
+    if (skippedStale.length > 0 || skippedDupInBatch.length > 0) {
+      log.warn(
+        { label: this.label, skippedStale, skippedDupInBatch },
+        "AnthropicSession: addToolResults dropped duplicate/stale tool_result entries",
+      );
+    }
+
+    if (filteredResults.length === 0) {
+      log.info(
+        { label: this.label },
+        "AnthropicSession: addToolResults — all results already represented in history, skipping push",
+      );
+      return;
+    }
+
+    const toolResultBlocks: ToolResultBlockParam[] = filteredResults.map(r => ({
       type: "tool_result" as const,
       tool_use_id: r.tool_use_id,
       content: r.content as ToolResultBlockParam["content"],
       is_error: r.is_error,
     }));
     this.messages.push({ role: "user", content: toolResultBlocks });
+  }
+
+  /**
+   * Walk the message history and return every `tool_use_id` that already
+   * appears in a `tool_result` block. Used by addToolResults to skip stale
+   * or duplicate results that would otherwise corrupt the message shape.
+   */
+  private collectExistingToolResultIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const m of this.messages) {
+      if (!Array.isArray(m.content)) continue;
+      for (const block of m.content as any[]) {
+        if (block?.type === "tool_result" && typeof block.tool_use_id === "string") {
+          ids.add(block.tool_use_id);
+        }
+      }
+    }
+    return ids;
   }
 
   async *continueAndStream(): AsyncGenerator<AIStreamEvent, void> {
@@ -928,6 +1046,44 @@ export class AnthropicSession implements AISession {
     const rawTools = this.getTools();
     const toolNames = rawTools.map((t: any) => t.name);
 
+    // Defensive sanitization right before every API call.
+    //
+    // Why here and not only on restore: long-running sessions accumulate two
+    // classes of API-rejecting shape errors that can't all be prevented at
+    // the push sites — they emerge from races between abort, capability.result,
+    // compaction, and new prompts:
+    //
+    //   - orphan tool_use without a matching tool_result
+    //     (e.g. abort fired AFTER streamFromAPI pushed the assistant message
+    //      but BEFORE state reached waiting_tools, so cleanupAbortedTools
+    //      never ran for that id)
+    //   - duplicate tool_result blocks for the same tool_use_id
+    //     (e.g. cleanupAbortedTools injected a synthetic placeholder and
+    //      the real capability.result later raced in via handleToolResult
+    //      while a new turn had the session back in waiting_tools)
+    //
+    // Both produce HTTP 400 from Anthropic and brick the session permanently
+    // unless somebody manually edits the saved history file. sanitizeMessages
+    // is idempotent and side-effect-free, so running it on every turn is
+    // cheap insurance — it's a no-op on a clean history.
+    const sanitized = sanitizeMessages(this.messages);
+    if (sanitized.length !== this.messages.length) {
+      log.warn(
+        { label: this.label, before: this.messages.length, after: sanitized.length },
+        "AnthropicSession: sanitizer changed message count before API call",
+      );
+    }
+    this.messages = sanitized;
+
+    // Apply this provider's cache breakpoint policy. Strip any cache_control
+    // that may have leaked into messages (defensive — Mnemosyne and other
+    // plugins now inject pure content, but old saved sessions or third-party
+    // injectors might still carry markers) and then place exactly ONE
+    // ephemeral breakpoint anchored to the last completed assistant turn.
+    // See placeMessageCacheBreakpoint() for the rationale.
+    this.stripAllMessageCacheControl();
+    this.placeMessageCacheBreakpoint();
+
     const ctx = this.measureContext();
     log.info({
       label: this.label,
@@ -1003,11 +1159,12 @@ export class AnthropicSession implements AISession {
             system: this.getSystemPrompt(),
             messages: this.messages,
             tools,
-            // NOTE: top-level cache_control intentionally removed — it added an extra
-            // cache breakpoint on top of the explicit cache_control we already place on
-            // (a) the last system block, (b) the last tool, and (c) the ephemeral
-            // memory block prepended to the user message. Combined, that pushed us over
-            // Anthropic's hard limit of 4 cache_control blocks per request.
+            // NOTE: top-level cache_control intentionally removed — this provider
+            // owns explicit cache_control placement on (a) BP1+BP2 = the two
+            // system blocks (factory.ts), (b) BP3 = the last tool definition,
+            // and (c) BP4 = the last assistant message in history (placed by
+            // placeMessageCacheBreakpoint above). That uses Anthropic's full
+            // 4-breakpoint budget for stable, deterministic positions.
             betas,
             metadata,
             ...(effort !== undefined ? { output_config: { effort } } : {}),

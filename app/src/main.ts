@@ -166,7 +166,7 @@ async function main() {
   // Model management tools — now provider-aware
   capabilityRegistry.register({
     name: "model_set",
-    description: `Switch the AI model. Examples: claude-sonnet-4-6, claude-opus-4-6, claude-opus-4-7, gpt-4o, gpt-4o-mini, o3. Anthropic models use Claude, others use OpenAI-compatible API.`,
+    description: `Switch the AI model. Examples: claude-sonnet-4-6, claude-opus-4-8, claude-opus-4-7, gpt-4o, gpt-4o-mini, o3. Anthropic models use Claude, others use OpenAI-compatible API.`,
     input_schema: {
       type: "object",
       properties: { model: { type: "string", description: "Model ID to switch to" } },
@@ -311,7 +311,7 @@ async function main() {
 
       // Resolve alias or accept full model id
       const cfg = (loadSettingsForSlash() as any)?.models?.routing ?? {};
-      const aliases = { opus: "claude-opus-4-7", sonnet: "claude-sonnet-4-6", haiku: "claude-haiku-4-5", ...(cfg.aliases ?? {}) };
+      const aliases = { opus: "claude-opus-4-8", sonnet: "claude-sonnet-4-6", haiku: "claude-haiku-4-5", ...(cfg.aliases ?? {}) };
       const target = aliases[arg.toLowerCase()] ?? arg;
 
       // If the target model belongs to a different provider, switch it first

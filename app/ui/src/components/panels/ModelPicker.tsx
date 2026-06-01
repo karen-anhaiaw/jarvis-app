@@ -3,6 +3,7 @@ import { useHudPiece } from '../../hooks/useHudStream'
 
 // Known models with display labels
 const MODEL_LABELS: Record<string, { label: string; note: string }> = {
+  'claude-opus-4-8':    { label: 'Opus 4.8',   note: '1M · Max' },
   'claude-opus-4-7':    { label: 'Opus 4.7',   note: '1M · Max' },
   'claude-opus-4-6':    { label: 'Opus 4.6',   note: '1M · Max' },
   'claude-sonnet-4-6':  { label: 'Sonnet 4.6', note: '1M · High' },

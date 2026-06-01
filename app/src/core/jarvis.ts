@@ -512,10 +512,28 @@ export class JarvisCore implements Piece {
 
     this.currentTrace.set(sessionId, traceId);
 
+    /**
+     * Compose optional per-turn system reminders (msg.systems?: string[]).
+     *
+     * Each entry is wrapped in <system-reminder>...</system-reminder> tags
+     * and joined with blank lines. The composed block is prepended to the
+     * prompt the LLM sees (and persists in the session history), but the
+     * chat timeline still shows only the original msg.text — keeping the
+     * visible conversation clean.
+     *
+     * Compatibility: when systems is absent or empty, this is a no-op and
+     * the legacy code path (string OR inter-session blocks) is preserved
+     * verbatim, so plugins built against @jarvis/core <0.5.0 keep working.
+     */
+    const systems = Array.isArray((msg as any).systems) ? (msg as any).systems as string[] : [];
+    const reminderBlock = systems.length > 0
+      ? systems.map(s => `<system-reminder>\n${s}\n</system-reminder>`).join("\n\n") + "\n\n"
+      : "";
+
     // When a message arrives from another session (not the human chat input)
     // and carries a replyTo, deliver it as TWO separate content blocks:
     //   [0] [SYSTEM] preamble — origin + reply routing instruction
-    //   [1] the actual message text
+    //   [1] the actual message text (with reminders prepended)
     // This keeps context and content structurally distinct in the message history.
     // Inter-session: message from another session (not user input, not jarvis-core
     // routing its own result back) AND has a replyTo target.
@@ -537,14 +555,16 @@ export class JarvisCore implements Piece {
           },
           {
             type: "text" as const,
-            text: msg.text ?? "",
+            text: reminderBlock + (msg.text ?? ""),
           },
         ]
-      : text;
+      : reminderBlock + text;
 
     // Session is idle — this prompt is about to be sent to the API.
     // Emit prompt_dispatched so the timeline renders it as a user entry
     // NOW (not when the request first arrived). Single message → single event.
+    // IMPORTANT: pass the ORIGINAL `text` (without reminders) to the chat —
+    // reminders are LLM-only and must not appear in the user-facing timeline.
     this.broadcastPromptDispatched(sessionId, [{
       text,
       source: msg.source,
@@ -1105,8 +1125,20 @@ export class JarvisCore implements Piece {
       text: m.text ?? "",
       source: m.source,
       images: (m as any).images,
+      systems: Array.isArray((m as any).systems) ? (m as any).systems as string[] : [],
     }));
-    const combined = items.map(i => i.text).join("\n\n");
+    // Compose per-message: each queued msg's reminders prefix its own text,
+    // then all are joined. This preserves the source→reminder coupling — a
+    // voice STT message keeps its `voice_say`-forcing reminder right next to
+    // the transcript that needs it, even when combined with sibling prompts.
+    const combined = items
+      .map(i => {
+        const r = i.systems.length > 0
+          ? i.systems.map(s => `<system-reminder>\n${s}\n</system-reminder>`).join("\n\n") + "\n\n"
+          : "";
+        return r + i.text;
+      })
+      .join("\n\n");
     const allImages = items.flatMap(i => i.images ?? []);
     queue.length = 0;
     // NOTE: do NOT broadcastPendingQueue here — the empty broadcast would

@@ -310,4 +310,135 @@ describe("sanitizeMessages", () => {
     const result = sanitizeMessages(messages);
     expect(result).toEqual(messages);
   });
+
+  // ─── Duplicate tool_result dedup tests ───────────────────────────────
+  // Anthropic rejects with:
+  //   messages.N.content.M: each tool_use must have a single result.
+  //   Found multiple 'tool_result' blocks with id: toolu_...
+  // The sanitizer must collapse duplicates by keeping the first occurrence.
+
+  it("dedupes two tool_result blocks for the same id inside one user message", () => {
+    const messages: MessageParam[] = [
+      { role: "user", content: "run X" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tDup", name: "bash", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "tDup", content: "first" },
+          { type: "tool_result", tool_use_id: "tDup", content: "second (duplicate)" },
+        ],
+      },
+    ];
+    const result = sanitizeMessages(messages);
+    expect(result).toHaveLength(3);
+    expect(result[2]).toEqual({
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "tDup", content: "first" },
+      ],
+    });
+  });
+
+  it("dedupes tool_result blocks split across consecutive user messages (stale capability.result race)", () => {
+    // Real-world scenario from production:
+    //   1. cleanupAbortedTools injects a synthetic placeholder tool_result(X).
+    //   2. Session moves on, hits waiting_tools for a different tool (Y).
+    //   3. The original X tool finally completes and capability.result arrives.
+    //   4. handleToolResult doesn't validate ids against pendingCalls, so a
+    //      second tool_result(X) gets pushed.
+    //   5. Next API call returns 400 "Found multiple 'tool_result' blocks
+    //      with id: X".
+    const messages: MessageParam[] = [
+      { role: "user", content: "do X" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tX", name: "bash", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tX",
+            content: "[Tool execution was aborted by user]",
+            is_error: true,
+          },
+        ],
+      },
+      // ... time passes, new turn pushes a stale duplicate result for tX
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "tX", content: "late real result" },
+        ],
+      },
+    ];
+    const result = sanitizeMessages(messages);
+    // The duplicate user message ends up empty after dedup → replaced with text turn.
+    expect(result).toHaveLength(4);
+    // First tool_result preserved as-is
+    expect(result[2]).toEqual(messages[2]);
+    // Second collapsed into text turn
+    expect(result[3]).toEqual({
+      role: "user",
+      content: "[Duplicate tool_result blocks removed by sanitizer]",
+    });
+  });
+
+  it("dedup preserves non-duplicate blocks in the same message", () => {
+    const messages: MessageParam[] = [
+      { role: "user", content: "two tasks" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "tA", name: "bash", input: {} },
+          { type: "tool_use", id: "tB", name: "read_file", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "tA", content: "first A" },
+          { type: "tool_result", tool_use_id: "tB", content: "first B" },
+          { type: "tool_result", tool_use_id: "tA", content: "dup A (drop)" },
+        ],
+      },
+    ];
+    const result = sanitizeMessages(messages);
+    expect(result).toHaveLength(3);
+    expect(result[2]).toEqual({
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "tA", content: "first A" },
+        { type: "tool_result", tool_use_id: "tB", content: "first B" },
+      ],
+    });
+  });
+
+  it("dedup is idempotent — already-clean history is unchanged", () => {
+    const messages: MessageParam[] = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "t1", name: "bash", input: {} },
+          { type: "tool_use", id: "t2", name: "read_file", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: "x" },
+          { type: "tool_result", tool_use_id: "t2", content: "y" },
+        ],
+      },
+    ];
+    const once = sanitizeMessages(messages);
+    const twice = sanitizeMessages(once);
+    expect(once).toEqual(messages);
+    expect(twice).toEqual(once);
+  });
 });

@@ -7,12 +7,59 @@ export function launchHud(statusUrl: string): void {
   const electronMain = join(process.cwd(), "ui", "electron-main.cjs");
 
   writeFileSync(electronMain, `
-const { app, BrowserWindow, screen } = require('electron');
+const { app, BrowserWindow, screen, globalShortcut } = require('electron');
 const http = require('http');
 const url = require('url');
 
+/**
+ * Global hotkey for voice push-to-talk (toggle on/off).
+ * Lives in main process — globalShortcut is unreachable from renderer.
+ * Default: Shift+Space. Override via JARVIS_VOICE_HOTKEY env var.
+ */
+const VOICE_HOTKEY = process.env.JARVIS_VOICE_HOTKEY || 'Shift+Space';
+
 let win;
 const detachedWindows = new Map(); // panelId → BrowserWindow
+const browserWindows = new Map(); // id → { win, partition }
+
+function createBrowserWindow(id, url, partition) {
+  const { session: electronSession } = require('electron');
+  const ses = electronSession.fromPartition(partition || 'persist:jarvis-browser');
+
+  // Grant all permissions for browser sessions
+  ses.setPermissionRequestHandler((wc, permission, callback) => callback(true));
+
+  const bwin = new BrowserWindow({
+    width: 1280,
+    height: 900,
+    show: false,
+    title: 'JARVIS Browser — ' + id,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      session: ses,
+    },
+  });
+
+  bwin.once('ready-to-show', () => bwin.show());
+  if (url) bwin.loadURL(url);
+
+  bwin.on('closed', () => {
+    browserWindows.delete(id);
+    // notify Node server that window was closed
+    const http2 = require('http');
+    const body = JSON.stringify({ id, event: 'closed' });
+    const req = http2.request({
+      hostname: 'localhost', port: 50052,
+      path: '/plugins/browser/event', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    });
+    req.write(body); req.end(); req.on('error', () => {});
+  });
+
+  browserWindows.set(id, { win: bwin, partition: partition || 'persist:jarvis-browser' });
+  return bwin;
+}
 
 // Grant microphone permission for Web Speech API
 app.commandLine.appendSwitch('enable-speech-dispatcher');
@@ -71,6 +118,24 @@ app.whenReady().then(() => {
 
   win.loadURL('${statusUrl}');
 
+  // ── Global voice hotkey ──
+  // Dispatches DOM CustomEvent 'jarvis:voice-toggle' inside the HUD when the
+  // user presses VOICE_HOTKEY anywhere on the system. The VoiceRenderer
+  // listens for this event and starts/stops MediaRecorder capture.
+  try {
+    const registered = globalShortcut.register(VOICE_HOTKEY, () => {
+      if (!win || win.isDestroyed()) return;
+      win.webContents.executeJavaScript(
+        "window.dispatchEvent(new CustomEvent('jarvis:voice-toggle', { detail: { source: 'hotkey' } }));",
+        true,
+      ).catch(() => {});
+    });
+    if (registered) console.log('[hotkey] voice toggle registered:', VOICE_HOTKEY);
+    else console.warn('[hotkey] failed to register', VOICE_HOTKEY, '— another app may own it');
+  } catch (err) {
+    console.error('[hotkey] register error:', err);
+  }
+
   // Capture ALL console messages for debugging
   win.webContents.on('console-message', (event, level, message) => {
     console.log('[E' + level + ']', message.slice(0, 300));
@@ -79,6 +144,24 @@ app.whenReady().then(() => {
   // Auto-reload when server comes back after restart
   win.webContents.on('did-fail-load', () => {
     setTimeout(() => win.loadURL('${statusUrl}'), 2000);
+  });
+
+  // ── Open external links in the default browser, not in Electron ──
+  // Intercepts target="_blank" anchor clicks (setWindowOpenHandler) and any
+  // navigation away from the local dev server (will-navigate). Both delegate
+  // to shell.openExternal so the OS default browser handles the URL.
+  const { shell } = require('electron');
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (!url.startsWith('http://localhost') && !url.startsWith('file://')) {
+      shell.openExternal(url);
+    }
+    return { action: 'deny' }; // always deny — Electron never opens a new window
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('http://localhost') && !url.startsWith('file://')) {
+      event.preventDefault();
+      shell.openExternal(url);
+    }
   });
 
   // ── Detach panel: create a child BrowserWindow for a single panel ──
@@ -237,9 +320,150 @@ app.whenReady().then(() => {
       });
       return;
     }
+    // ── Browser window management ──────────────────────────────────────
+
+    // POST /browser/open  { id, url, partition? }
+    if (parsed.pathname === '/browser/open' && req.method === 'POST') {
+      let body = ''; req.on('data', c => body += c);
+      req.on('end', () => {
+        try {
+          const { id, url: burl, partition } = JSON.parse(body);
+          if (browserWindows.has(id)) {
+            const existing = browserWindows.get(id).win;
+            if (!existing.isDestroyed()) existing.focus();
+          } else {
+            createBrowserWindow(id, burl, partition);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, id }));
+        } catch(e) { res.writeHead(400); res.end(String(e)); }
+      }); return;
+    }
+
+    // POST /browser/navigate  { id, url }
+    if (parsed.pathname === '/browser/navigate' && req.method === 'POST') {
+      let body = ''; req.on('data', c => body += c);
+      req.on('end', () => {
+        try {
+          const { id, url: burl } = JSON.parse(body);
+          const entry = browserWindows.get(id);
+          if (!entry || entry.win.isDestroyed()) throw new Error('Window not found: ' + id);
+          entry.win.loadURL(burl);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch(e) { res.writeHead(400); res.end(String(e)); }
+      }); return;
+    }
+
+    // GET /browser/screenshot/:id
+    if (parsed.pathname.startsWith('/browser/screenshot/') && req.method === 'GET') {
+      const id = decodeURIComponent(parsed.pathname.replace('/browser/screenshot/', ''));
+      try {
+        const entry = browserWindows.get(id);
+        if (!entry || entry.win.isDestroyed()) throw new Error('Window not found: ' + id);
+        const image = await entry.win.webContents.capturePage();
+        // Resize to max 800px wide to keep base64 payload under ~100KB (≈1.3k tokens).
+        // JPEG at quality 60 gives good readability with minimal size.
+        const MAX_W = 800;
+        const resized = image.getSize().width > MAX_W
+          ? image.resize({ width: MAX_W })
+          : image;
+        const jpeg = resized.toJPEG(60);
+        res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': jpeg.length });
+        res.end(jpeg);
+      } catch(e) { res.writeHead(400); res.end(String(e)); }
+      return;
+    }
+
+    // POST /browser/eval  { id, js }
+    if (parsed.pathname === '/browser/eval' && req.method === 'POST') {
+      let body = ''; req.on('data', c => body += c);
+      req.on('end', async () => {
+        try {
+          const { id, js } = JSON.parse(body);
+          const entry = browserWindows.get(id);
+          if (!entry || entry.win.isDestroyed()) throw new Error('Window not found: ' + id);
+          const result = await entry.win.webContents.executeJavaScript(js, true);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, result }));
+        } catch(e) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: String(e) })); }
+      }); return;
+    }
+
+    // GET /browser/list
+    if (parsed.pathname === '/browser/list' && req.method === 'GET') {
+      const list = [];
+      for (const [id, entry] of browserWindows) {
+        if (!entry.win.isDestroyed()) {
+          list.push({ id, url: entry.win.webContents.getURL(), title: entry.win.getTitle() });
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, windows: list })); return;
+    }
+
+    // POST /browser/close  { id }
+    if (parsed.pathname === '/browser/close' && req.method === 'POST') {
+      let body = ''; req.on('data', c => body += c);
+      req.on('end', () => {
+        try {
+          const { id } = JSON.parse(body);
+          const entry = browserWindows.get(id);
+          if (entry && !entry.win.isDestroyed()) entry.win.close();
+          browserWindows.delete(id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch(e) { res.writeHead(400); res.end(String(e)); }
+      }); return;
+    }
+
+    // POST /browser/cookies  { id, filter? }
+    if (parsed.pathname === '/browser/cookies' && req.method === 'POST') {
+      let body = ''; req.on('data', c => body += c);
+      req.on('end', async () => {
+        try {
+          const { id, filter } = JSON.parse(body);
+          const entry = browserWindows.get(id);
+          if (!entry || entry.win.isDestroyed()) throw new Error('Window not found: ' + id);
+          const { session: es } = require('electron');
+          const ses = es.fromPartition(entry.partition);
+          const cookies = await ses.cookies.get(filter || {});
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, cookies }));
+        } catch(e) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: String(e) })); }
+      }); return;
+    }
+
+    // POST /browser/cookies-set  { partition, cookies: [{url, name, value, domain, path, secure, httpOnly, expirationDate}] }
+    // Injects cookies directly into a partition's session (no window needed).
+    if (parsed.pathname === '/browser/cookies-set' && req.method === 'POST') {
+      let body = ''; req.on('data', c => body += c);
+      req.on('end', async () => {
+        try {
+          const { partition, cookies } = JSON.parse(body);
+          const { session: es } = require('electron');
+          const ses = es.fromPartition(partition || 'persist:jarvis-browser');
+          let ok = 0, fail = 0;
+          for (const cookie of cookies) {
+            try {
+              await ses.cookies.set(cookie);
+              ok++;
+            } catch(e) { fail++; }
+          }
+          await ses.cookies.flushStore();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, imported: ok, failed: fail }));
+        } catch(e) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: String(e) })); }
+      }); return;
+    }
+
     res.writeHead(404);
     res.end();
   }).listen(50053);
+});
+
+app.on('will-quit', () => {
+  try { globalShortcut.unregisterAll(); } catch {}
 });
 
 app.on('window-all-closed', () => app.quit());

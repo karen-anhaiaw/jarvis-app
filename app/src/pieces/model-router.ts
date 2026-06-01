@@ -39,6 +39,7 @@ import { getProviderForModel, getCurrentProvider } from "../config/index.js";
 // Used ONLY for cost estimates in banners — actual billing is whatever
 // LiteLLM/Anthropic charges. Ratios are correct for relative comparison.
 const PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
+  "claude-opus-4-8":             { input: 5.00,  output: 25.00, cacheWrite: 6.25,  cacheRead: 0.50 },
   "claude-opus-4-7":             { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
   "claude-opus-4-6":             { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
   "claude-opus-4-5":             { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
@@ -50,7 +51,7 @@ const PRICING: Record<string, { input: number; output: number; cacheWrite: numbe
 };
 
 function priceOf(model: string) {
-  return PRICING[model] ?? PRICING["claude-opus-4-7"]; // worst-case fallback
+  return PRICING[model] ?? PRICING["claude-opus-4-8"]; // worst-case fallback
 }
 
 interface RoutingConfig {
@@ -73,11 +74,11 @@ interface RoutingConfig {
 const DEFAULTS: RoutingConfig = {
   enabled: true,
   default: "claude-sonnet-4-6",
-  heavy:   "claude-opus-4-7",
+  heavy:   "claude-opus-4-8",
   light:   "claude-haiku-4-5",
   utility: "claude-haiku-4-5",
   aliases: {
-    opus:   "claude-opus-4-7",
+    opus:   "claude-opus-4-8",
     sonnet: "claude-sonnet-4-6",
     haiku:  "claude-haiku-4-5",
   },
@@ -85,7 +86,7 @@ const DEFAULTS: RoutingConfig = {
     degradeOnLargeContext: {
       enabled: true,
       threshold: 150_000,
-      from: "claude-opus-4-7",
+      from: "claude-opus-4-8",
       to:   "claude-sonnet-4-6",
     },
   },

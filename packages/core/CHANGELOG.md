@@ -4,6 +4,24 @@ All notable changes to this package will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-05-29
+
+### Added
+- **`AIRequestMessage.systems?: string[]`** — optional per-turn system reminders.
+  Each entry is wrapped in `<system-reminder>...</system-reminder>` by JarvisCore
+  and prepended to `text` before the prompt is sent to the API. The chat timeline
+  shows only `text` (clean); the LLM sees reminders + text and they persist in the
+  session history so subsequent turns retain the context via prompt caching.
+  Multiple publishers can concatenate their arrays in order.
+
+  Use case: turn-scoped instructions from plugins without polluting the visible
+  conversation. The voice plugin's STT piece uses it to force `voice_say` when
+  the input came from speech.
+
+  Compatibility: optional field. Plugins built against older core versions still
+  work — they omit `systems` and the prompt is sent verbatim. Renderers and the
+  chat surface are unaffected (they continue reading only `text`).
+
 ## [0.4.1] — 2026-05-27
 
 ### Added

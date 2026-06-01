@@ -38,6 +38,31 @@ export interface AIRequestMessage extends BusMessage {
   images?: ImageAttachment[];
   replyTo?: string;
   /**
+   * Optional per-turn system reminders.
+   *
+   * Each entry is wrapped in `<system-reminder>...</system-reminder>` and
+   * prepended to `text` BEFORE the prompt is sent to the API. The chat
+   * timeline shows only `text` (clean), but the API sees reminders + text.
+   *
+   * Use case: turn-scoped instructions from plugins (e.g. STT forces
+   * `voice_say`, never-forget injects persistent reminders, future tools
+   * may add task-list context) without polluting the visible conversation.
+   *
+   * Persistence: the composed prompt (reminders + text) is persisted in the
+   * AI session message history, so the LLM continues to see the reminders
+   * in subsequent turns via prompt caching. The user-visible chat timeline
+   * keeps showing only `text`.
+   *
+   * Multiple sources: if multiple publishers ever need to inject reminders
+   * for the same turn, concatenate the arrays in order — entries are emitted
+   * sequentially in the final prompt.
+   *
+   * Compatibility: optional field added in @jarvis/core 0.5.0. Plugins built
+   * against older core versions still work — they simply omit `systems` and
+   * the prompt is sent verbatim.
+   */
+  systems?: string[];
+  /**
    * Optional payload for dispatch metadata.
    *
    * Conventional keys (consumed by core pieces):

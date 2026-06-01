@@ -69,6 +69,11 @@
     "jarvis-plugin-tasks": {
       "repo": "github.com/giovanibarili/jarvis-plugin-tasks",
       "enabled": true
+    },
+    "jarvis-plugin-browser": {
+      "repo": "local",
+      "enabled": true,
+      "path": "/Users/giovani.barili/.jarvis/plugins/jarvis-plugin-browser"
     }
   },
   "compaction": {
@@ -81,10 +86,10 @@
     "routing": {
       "enabled": true,
       "default": "claude-sonnet-4-6",
-      "heavy": "claude-opus-4-7",
+      "heavy": "claude-opus-4-8",
       "light": "claude-haiku-4-5",
       "aliases": {
-        "opus": "claude-opus-4-7",
+        "opus": "claude-opus-4-8",
         "sonnet": "claude-sonnet-4-6",
         "haiku": "claude-haiku-4-5"
       },

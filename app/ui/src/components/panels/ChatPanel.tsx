@@ -222,11 +222,39 @@ export function ChatPanel({
             }
             return ''
           })
-          // Turn finished — collapse any live `thinking_text` entries (intermediate
-          // model text emitted between tool calls) into their compact, clickable form.
-          setEntries(prev => prev.map(e =>
-            e.kind === 'thinking_text' && e.live ? { ...e, live: false, expanded: false } : e
-          ))
+          // Turn finished — collapse intermediate `thinking_text` entries and
+          // promote the last one to a proper `message` if streamingText was empty.
+          //
+          // This handles the pattern: model responds (text → thinking_text on
+          // tool_start) → tool calls (e.g. memory_reinforce) → no further deltas
+          // → done arrives with streamingText=''. Without this, the assistant
+          // response stays trapped in a thinking_text entry and never appears as
+          // a message in the timeline.
+          setEntries(prev => {
+            // Find the last live thinking_text entry — that is the final assistant
+            // response when no deltas were emitted after the last tool call.
+            const lastLiveIdx = (() => {
+              for (let i = prev.length - 1; i >= 0; i--) {
+                if (prev[i].kind === 'thinking_text' && (prev[i] as any).live) return i
+              }
+              return -1
+            })()
+            // Only promote if there is no assistant message entry already for
+            // this turn (i.e. streamingText was empty when done fired).
+            const hasMessageAfterLastTool = prev.some((e, i) =>
+              e.kind === 'message' && (e as any).role === 'assistant' && i > lastLiveIdx
+            )
+            return prev.map((e, i) => {
+              if (e.kind !== 'thinking_text' || !(e as any).live) return e
+              const isLast = i === lastLiveIdx
+              if (isLast && !hasMessageAfterLastTool && lastLiveIdx !== -1) {
+                // Promote: convert the last live thinking_text to a message entry.
+                return { kind: 'message', role: 'assistant', text: (e as any).text, source: (e as any).source, session: (e as any).session } as any
+              }
+              // All other live thinking_text entries collapse normally.
+              return { ...e, live: false, expanded: false }
+            })
+          })
           // Turn finished — choice cards captured during the turn now land
           // at the very end of the conversation, AFTER any final assistant text.
           flushPendingChoices()

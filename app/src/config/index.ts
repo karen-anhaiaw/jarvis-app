@@ -20,6 +20,7 @@ export const config: JarvisConfig = {
 };
 
 const MODEL_PROVIDERS: Record<string, string> = {
+  "claude-opus-4-8": "anthropic",
   "claude-opus-4-7": "anthropic",
   "claude-opus-4-6": "anthropic",
   "claude-sonnet-4-6": "anthropic",
@@ -74,7 +75,7 @@ export function getCurrentProvider(): string {
 export function supportsLongContext(model?: string): boolean {
   const m = model ?? config.model;
   // Match exact model IDs (and dated variants like "claude-opus-4-7-20260101").
-  return /(?:^|-)(opus-4-7|opus-4-6|sonnet-4-6)(?:-|$)/.test(m);
+  return /(?:^|-)(opus-4-8|opus-4-7|opus-4-6|sonnet-4-6)(?:-|$)/.test(m);
 }
 
 export function getMaxContext(model?: string): number {

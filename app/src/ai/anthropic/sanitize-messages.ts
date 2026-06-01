@@ -4,11 +4,11 @@ import { log } from "../../logger/index.js";
 /**
  * Sanitize Anthropic message history before sending it to the API.
  *
- * Two failure modes the API rejects with `invalid_request_error`:
+ * Three failure modes the API rejects with `invalid_request_error`:
  *
  *   1. ORPHAN tool_result — a `user` message contains tool_result blocks
  *      whose tool_use_id has no matching tool_use in the immediately
- *      previous assistant message. (Original case covered by this fn.)
+ *      previous assistant message.
  *
  *   2. ORPHAN tool_use — an `assistant` message ends with tool_use blocks
  *      and the FOLLOWING message does NOT carry the corresponding
@@ -16,18 +16,39 @@ import { log } from "../../logger/index.js";
  *      (process restart, abort that didn't run cleanupAbortedTools, crash
  *      mid-execution) and a new user prompt arrived afterward.
  *
- * Strategy: replace orphan pairs with synthetic text turns so the API
- * sees a coherent conversation. The model loses the tool execution
- * context but the session keeps working.
+ *   3. DUPLICATE tool_result — the same `tool_use_id` appears in more than
+ *      one tool_result block (either inside the same message or split across
+ *      consecutive user messages). Anthropic rejects with
+ *      `each tool_use must have a single result. Found multiple
+ *       'tool_result' blocks with id: ...`.
+ *      Triggered when a stale capability.result for an aborted/old tool
+ *      lands while the session is back in waiting_tools, or when
+ *      cleanupAbortedTools inserts a synthetic placeholder and the real
+ *      result later races in.
  *
- * Two-pass design:
- *   - Pass A handles orphan tool_results by replacing the broken pair.
- *   - Pass B walks the resulting list and inserts a synthetic tool_result
- *     after any assistant message whose tool_use blocks aren't satisfied
- *     by the next message.
+ * Strategy: replace orphan pairs with synthetic text turns and drop
+ * duplicate tool_result blocks so the API sees a coherent conversation.
+ * The model loses some tool execution context but the session keeps
+ * working instead of being permanently bricked.
+ *
+ * Three-pass design (order matters — dedup MUST run first):
+ *   - Pass A (dedupeToolResults) dedupes tool_result blocks by tool_use_id,
+ *     keeping the FIRST occurrence (which is the one Anthropic already
+ *     considered "the result" on its previous turn). Runs first so the
+ *     orphan passes see a clean tool_use ↔ tool_result mapping. If a user
+ *     message ends up with no blocks after dedup, it is replaced with a
+ *     short text turn so we don't ship `{role: "user", content: []}`.
+ *   - Pass B (sanitizeOrphanToolResults) replaces tool_result-bearing
+ *     messages whose ids have no matching tool_use in the previous
+ *     assistant turn.
+ *   - Pass C (sanitizeOrphanToolUses) walks the resulting list and inserts
+ *     a synthetic tool_result after any assistant message whose tool_use
+ *     blocks aren't satisfied by the next message.
  */
 export function sanitizeMessages(messages: MessageParam[]): MessageParam[] {
-  return sanitizeOrphanToolUses(sanitizeOrphanToolResults(messages));
+  return sanitizeOrphanToolUses(
+    sanitizeOrphanToolResults(dedupeToolResults(messages)),
+  );
 }
 
 /** Pass A: orphan tool_result without matching tool_use. */
@@ -124,6 +145,83 @@ function sanitizeOrphanToolUses(messages: MessageParam[]): MessageParam[] {
         is_error: true,
       })),
     });
+  }
+
+  return result;
+}
+
+/**
+ * Pass C: dedupe tool_result blocks by tool_use_id across the entire history.
+ *
+ * Two shapes produce the API's "Found multiple 'tool_result' blocks with id"
+ * error and both are handled here:
+ *
+ *   (a) Two tool_result blocks for the same id inside one user message
+ *       content array. Happens if `addToolResults` ever receives a
+ *       `results` array with duplicate `tool_use_id` entries (e.g. an
+ *       executor retried internally).
+ *   (b) Two user messages, each carrying a tool_result for the same id.
+ *       Happens when `cleanupAbortedTools` injects a synthetic placeholder
+ *       and a stale real result later races back in via handleToolResult.
+ *
+ * Strategy: keep the FIRST tool_result encountered for any given id and
+ * drop later duplicates. The first one is what the model already saw in
+ * its previous turn (its reasoning was conditioned on that value), so
+ * keeping it preserves the conversation semantics.
+ *
+ * If a user message has ALL its blocks dropped, replace the message with
+ * a short text turn — `{role: "user", content: []}` is also rejected by
+ * the API.
+ */
+function dedupeToolResults(messages: MessageParam[]): MessageParam[] {
+  const seen = new Set<string>();
+  const result: MessageParam[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (typeof msg.content === "string" || !Array.isArray(msg.content)) {
+      result.push(msg);
+      continue;
+    }
+
+    const dropped: string[] = [];
+    const kept: any[] = [];
+    for (const block of msg.content as any[]) {
+      if (block?.type !== "tool_result") {
+        kept.push(block);
+        continue;
+      }
+      const id = block.tool_use_id;
+      if (typeof id !== "string") {
+        kept.push(block);
+        continue;
+      }
+      if (seen.has(id)) {
+        dropped.push(id);
+        continue;
+      }
+      seen.add(id);
+      kept.push(block);
+    }
+
+    if (dropped.length === 0) {
+      result.push(msg);
+      continue;
+    }
+
+    log.warn(
+      { index: i, droppedToolResultIds: dropped },
+      "sanitizeMessages: dropped duplicate tool_result blocks (same tool_use_id seen earlier in history)",
+    );
+
+    if (kept.length === 0) {
+      result.push({
+        role: msg.role,
+        content: "[Duplicate tool_result blocks removed by sanitizer]",
+      });
+    } else {
+      result.push({ ...msg, content: kept });
+    }
   }
 
   return result;
