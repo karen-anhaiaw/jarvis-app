@@ -1279,26 +1279,33 @@ export class JarvisCore implements Piece {
 
   /** Derive global state from all tracked per-session states */
   /**
-   * Recomputes globalState from all per-session states.
+   * Recomputes globalState from the `main` session state ONLY.
    *
-   * Priority: waiting_tools > processing > online.
-   * Empty sessionStates map (all idle) → "online".
+   * Rationale (decided 2026-06-01):
+   *   The central reactor (the orange "JARVIS THINKING" core) historically
+   *   reflected the AGGREGATED state of every active session — any actor
+   *   processing a request lit the core. That was confusing because each
+   *   actor already has its own indicator in the Actor Pool panel, and the
+   *   core implied that "main" was busy when it wasn't.
+   *
+   *   New rule: the reactor mirrors ONLY the `main` session. Actor activity
+   *   is surfaced exclusively through the Actor Pool indicators. The core
+   *   is the user's personal "are you thinking about MY request?" signal.
+   *
+   * Priority for main: waiting_tools > processing > online.
+   * `main` absent or idle → "online".
    * Also syncs graphRegistry for hud-core-node visualization.
    * Called after every setSessionState() invocation.
    */
   private deriveGlobalState(): void {
     const prev = this.globalState;
-    if (this.sessionStates.size === 0) {
-      this.globalState = "online";
+    const mainState = this.sessionStates.get("main");
+    if (mainState === "waiting_tools") {
+      this.globalState = "waiting_tools";
+    } else if (mainState === "processing") {
+      this.globalState = "processing";
     } else {
-      const states = [...this.sessionStates.values()];
-      if (states.includes("waiting_tools")) {
-        this.globalState = "waiting_tools";
-      } else if (states.includes("processing")) {
-        this.globalState = "processing";
-      } else {
-        this.globalState = "online";
-      }
+      this.globalState = "online";
     }
     // Keep graphRegistry in sync so the core-node tree reflects live state
     if (this.globalState !== prev) {
