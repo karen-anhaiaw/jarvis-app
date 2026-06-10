@@ -293,6 +293,18 @@ export class JarvisCore implements Piece {
       if (msg.target) {
         return this.handlePrompt(msg);
       }
+      // Targetless ai.request → DROP, but never silently. There is NO
+      // default target by design: routing a stray/buggy publisher's message
+      // into the user's main chat would be ghost behavior (decided 2026-06-10,
+      // mission jarvis-fix). target is mandatory for ai.request — the
+      // bus_publish tool enforces it at schema level; internal publishers
+      // must set it explicitly. This warn is the observability net.
+      log.warn({
+        source: msg.source,
+        replyTo: msg.replyTo,
+        traceId: msg.traceId,
+        preview: preview(msg.text ?? "", 80),
+      }, "JarvisCore: ai.request WITHOUT target — dropped (no default; fix the publisher)");
     });
 
     this.bus.subscribe<CapabilityResultMessage>("capability.result", (msg) => {
