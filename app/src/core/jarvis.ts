@@ -31,6 +31,66 @@ import { newTraceId, preview } from "../logger/trace.js";
 import { config } from "../config/index.js";
 import { graphRegistry } from "./graph-registry.js";
 
+// ─── Inter-session dispatch text (attribution + reply routing) ────────────
+// WHY: when session A publishes ai.request into session B, B's LLM must know
+// WHO sent the message (or it may treat it as human input) and WHERE to send
+// the answer when one is expected. Pure function — unit-tested against
+// docs/features/bdd/inter-session-messaging.feature.
+//
+// Rules:
+//   - chat-input / jarvis-core / cron → plain text (user input, self-routing,
+//     and cron self-prefixes [CRON job ...] respectively).
+//   - any other source WITH replyTo → origin + bus_publish reply instruction
+//     (legacy contract preserved — plugins that request answers rely on it).
+//   - a LIVE-SESSION source WITHOUT replyTo → origin-only preamble marking it
+//     fire-and-forget (the "bare pong" fix; no reply instruction).
+//   - non-session sources without replyTo (voice-stt, canvas, mnemosyne,
+//     system, grpc, plugins) → plain text, unchanged.
+
+export function buildDispatchText(opts: {
+  text: string;
+  source: string;
+  replyTo?: string;
+  reminderBlock?: string;
+  /** True when opts.source is a live session id (SessionManager.has).
+   *  Computed by the caller so this function stays pure. */
+  sourceIsLiveSession?: boolean;
+}): string | import("../ai/types.js").PromptBlock[] {
+  const reminder = opts.reminderBlock ?? "";
+  const internal = opts.source === "chat-input" || opts.source === "jarvis-core" || opts.source === "cron";
+
+  if (!internal && opts.replyTo) {
+    return [
+      {
+        type: "text" as const,
+        text: [
+          `[SYSTEM] This message was sent by session "${opts.source}" (not the user).`,
+          `It expects your response to be delivered via bus_publish to session "${opts.replyTo}".`,
+          `Do NOT address the user directly. Publish your answer using:`,
+          `  bus_publish({ channel: "ai.request", target: "${opts.replyTo}", text: "<your answer>" })`,
+        ].join("\n"),
+      },
+      { type: "text" as const, text: reminder + opts.text },
+    ];
+  }
+
+  if (!internal && opts.sourceIsLiveSession) {
+    return [
+      {
+        type: "text" as const,
+        text: [
+          `[SYSTEM] This message was sent by session "${opts.source}" (not the user).`,
+          `It is fire-and-forget: no reply channel was provided and no response is expected.`,
+          `Do NOT treat it as input typed by the human user.`,
+        ].join("\n"),
+      },
+      { type: "text" as const, text: reminder + opts.text },
+    ];
+  }
+
+  return reminder + opts.text;
+}
+
 /**
  * Produces a compact, human-readable summary of a tool call's arguments
  * for display in the HUD timeline and chat panel.
@@ -530,35 +590,22 @@ export class JarvisCore implements Piece {
       ? systems.map(s => `<system-reminder>\n${s}\n</system-reminder>`).join("\n\n") + "\n\n"
       : "";
 
-    // When a message arrives from another session (not the human chat input)
-    // and carries a replyTo, deliver it as TWO separate content blocks:
-    //   [0] [SYSTEM] preamble — origin + reply routing instruction
-    //   [1] the actual message text (with reminders prepended)
-    // This keeps context and content structurally distinct in the message history.
-    // Inter-session: message from another session (not user input, not jarvis-core
-    // routing its own result back) AND has a replyTo target.
-    // Excludes jarvis-core as source to avoid injecting preamble on task dispatches
-    // (actor_dispatch flows through JarvisCore with source="jarvis-core", replyTo="main").
-    const isInterSession = msg.source !== "chat-input"
-      && msg.source !== "jarvis-core"
-      && !!msg.replyTo;
-    const dispatchText: string | import("../ai/types.js").PromptBlock[] = isInterSession
-      ? [
-          {
-            type: "text" as const,
-            text: [
-              `[SYSTEM] This message was sent by session "${msg.source}" (not the user).`,
-              `It expects your response to be delivered via bus_publish to session "${msg.replyTo}".`,
-              `Do NOT address the user directly. Publish your answer using:`,
-              `  bus_publish({ channel: "ai.request", target: "${msg.replyTo}", text: "<your answer>" })`,
-            ].join("\n"),
-          },
-          {
-            type: "text" as const,
-            text: reminderBlock + (msg.text ?? ""),
-          },
-        ]
-      : reminderBlock + text;
+    // Inter-session attribution + reply routing — see buildDispatchText()
+    // (exported pure helper, top of file) and
+    // docs/features/bdd/inter-session-messaging.feature.
+    // sourceIsLiveSession: bus_publish stamps the caller's sessionId as source,
+    // so a live-session source = session-to-session traffic. It must carry
+    // origin attribution even without replyTo — otherwise the receiving LLM
+    // mistakes it for human input (evidenced 2026-06-10: bare "pong" from an
+    // actor arrived in main with zero context). Non-session sources
+    // (voice-stt, canvas, mnemosyne, system, grpc) keep legacy plain delivery.
+    const dispatchText = buildDispatchText({
+      text,
+      source: msg.source,
+      replyTo: msg.replyTo,
+      reminderBlock,
+      sourceIsLiveSession: this.sessions.has(msg.source),
+    });
 
     // Session is idle — this prompt is about to be sent to the API.
     // Emit prompt_dispatched so the timeline renders it as a user entry
