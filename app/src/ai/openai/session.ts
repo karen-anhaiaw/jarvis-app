@@ -2,6 +2,7 @@
 import OpenAI from "openai";
 import type { AISession, AIStreamEvent, CapabilityCall, CapabilityResult, ImageBlock } from "../types.js";
 import type { EventBus } from "../../core/bus.js";
+import { cleanupAbortedToolMessages } from "./cleanup-aborted-tools.js";
 import { log } from "../../logger/index.js";
 
 type CapabilityDef = { name: string; description: string; input_schema: Record<string, unknown> };
@@ -33,6 +34,13 @@ export class OpenAISession implements AISession {
 
   // ── Context injector (Mnemosyne support) ─────────────────────────────
   private contextInjector?: (sessionId: string) => string[];
+
+  /** Assistant text produced in the SAME turn as tool calls. OpenAI allows
+   *  an assistant message to carry BOTH content and tool_calls — the old
+   *  code discarded this text (B2), losing the model's pre-tool reasoning
+   *  from history. Captured by streamFromAPI, consumed exactly once by
+   *  addToolResults. (mission jarvis-fix F2.1) */
+  private pendingAssistantText = "";
 
   // ── Bus (telemetry) ───────────────────────────────────────────────────
   private bus?: EventBus;
@@ -86,25 +94,14 @@ export class OpenAISession implements AISession {
   // ── Cleanup aborted tools ─────────────────────────────────────────────
 
   cleanupAbortedTools(pendingCalls: CapabilityCall[]): void {
-    if (pendingCalls.length === 0) return;
-    // Remove trailing assistant messages that contain unresolved tool calls
-    const pendingIds = new Set(pendingCalls.map(c => c.id));
-    // Walk backwards and remove incomplete tool sequences
-    while (this.messages.length > 0) {
-      const last = this.messages[this.messages.length - 1];
-      if (last.role === "tool") {
-        this.messages.pop();
-        continue;
-      }
-      if (last.role === "assistant" && last.tool_calls) {
-        const hasPending = last.tool_calls.some((tc: any) => pendingIds.has(tc.id));
-        if (hasPending) {
-          this.messages.pop();
-          break;
-        }
-      }
-      break;
-    }
+    // Additive cleanup ported from the tested Anthropic module — the old
+    // destructive loop popped trailing role:"tool" messages unconditionally,
+    // orphaning valid assistant tool_calls (API 400). See
+    // openai/cleanup-aborted-tools.ts for the decision record. (F2.4)
+    this.messages = cleanupAbortedToolMessages(this.messages, pendingCalls);
+    // The aborted turn's pre-tool text is represented by the synthetic
+    // pair — drop any pending text so it doesn't leak into the next turn.
+    this.pendingAssistantText = "";
     log.info({ label: this.label, cleaned: pendingCalls.length }, "OpenAISession: aborted tools cleaned up");
   }
 
@@ -117,21 +114,22 @@ export class OpenAISession implements AISession {
   }
 
   async *sendAndStream(prompt: string | import("../types.js").PromptBlock[], images?: ImageBlock[]): AsyncGenerator<AIStreamEvent, void> {
-    // Inject context (Mnemosyne, etc.) as system additions
+    // Context injections prepend to the REAL user message of this turn —
+    // parity with the Anthropic session. The old code fabricated a fake
+    // user "<context>" + assistant "Understood." pair on EVERY injected
+    // turn: permanent history pollution and growing token cost (B3/F2.2).
+    let injectionPrefix = "";
     if (this.contextInjector) {
       const injections = this.contextInjector(this.label);
       if (injections.length > 0) {
-        // Prepend injections as a user message that looks like system context
-        const injectionText = injections.join("\n\n");
-        this.messages.push({ role: "user", content: `<context>\n${injectionText}\n</context>` });
-        this.messages.push({ role: "assistant", content: "Understood. I have the context." });
+        injectionPrefix = `<context>\n${injections.join("\n\n")}\n</context>\n\n`;
       }
     }
 
     // Normalize prompt to text — OpenAI doesn't need granular block separation
-    const promptText = Array.isArray(prompt)
+    const promptText = injectionPrefix + (Array.isArray(prompt)
       ? prompt.map(b => b.text).join("\n")
-      : prompt;
+      : prompt);
 
 
     if (images && images.length > 0) {
@@ -152,15 +150,20 @@ export class OpenAISession implements AISession {
   }
 
   addToolResults(toolCalls: CapabilityCall[], results: CapabilityResult[]): void {
-    // Add assistant message with tool calls
+    // Add assistant message with tool calls — INCLUDING the text the model
+    // produced before calling tools (captured by streamFromAPI). OpenAI
+    // supports content + tool_calls on the same assistant message; dropping
+    // the text lost the model's reasoning from history (B2/F2.1).
     this.messages.push({
       role: "assistant",
+      content: this.pendingAssistantText || null,
       tool_calls: toolCalls.map(tc => ({
         id: tc.id,
         type: "function" as const,
         function: { name: tc.name, arguments: JSON.stringify(tc.input) },
       })),
     });
+    this.pendingAssistantText = ""; // consumed — exactly once
     // Add tool results
     for (const r of results) {
       this.messages.push({
@@ -224,13 +227,17 @@ export class OpenAISession implements AISession {
 
     log.info({ label: this.label, model, messageCount: this.messages.length, toolCount: tools.length }, "OpenAISession: calling API");
 
-    // Emit streaming start
+    // Announce streaming start (verb + model for the metrics HUD).
+    // Internal event — intentionally NOT in the public AIStreamMessage
+    // union (published via cast, same pattern as prompt_dispatched).
+    // The old shape used `type: "delta"` with no `event` field — outside
+    // the channel contract: it fell through every consumer switch and
+    // logged as INFO noise on the bus (B4/F2.3).
     this.bus?.publish({
       channel: "ai.stream",
       source: this.label,
       target: this.label,
-      type: "delta",
-      text: "",
+      event: "streaming_started",
       data: { streamingVerb, model },
     } as any);
 
@@ -296,9 +303,14 @@ export class OpenAISession implements AISession {
         yield { type: "tool_use", toolUse: tc };
       }
 
-      // If no tool calls, save assistant message
-      if (toolCalls.length === 0 && fullText) {
+      // Persist assistant text. With tool calls, the text is NOT pushed yet —
+      // addToolResults builds the combined assistant message (content +
+      // tool_calls) so the pre-tool reasoning survives in history (F2.1).
+      if (toolCalls.length > 0) {
+        this.pendingAssistantText = fullText;
+      } else if (fullText) {
         this.messages.push({ role: "assistant", content: fullText });
+        this.pendingAssistantText = "";
       }
 
       // Emit usage telemetry to bus
