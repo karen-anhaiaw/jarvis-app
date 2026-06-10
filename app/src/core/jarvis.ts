@@ -1005,6 +1005,43 @@ export class JarvisCore implements Piece {
               }, "JarvisCore: compaction started");
             }
             break;
+          case "compaction_failed":
+            if (event.compactionFailed) {
+              // Engine B compaction failed — history is PRESERVED (see
+              // doCompact failure semantics). Forward so the chat UI resolves
+              // the pending banner into a failure entry instead of hanging.
+              // Like compaction_start, intentionally NOT in the public
+              // AIStreamMessage union — published via cast.
+              this.bus.publish({
+                channel: "ai.stream",
+                source: "jarvis-core",
+                target: sessionId,
+                event: "compaction_failed",
+                compactionFailed: event.compactionFailed,
+                traceId,
+              } as any);
+
+              this.bus.publish({
+                channel: "system.event",
+                source: "jarvis-core",
+                event: "compaction_failed",
+                data: {
+                  sessionId,
+                  engine: event.compactionFailed.engine,
+                  tokensBefore: event.compactionFailed.tokensBefore,
+                  reason: event.compactionFailed.reason,
+                },
+                traceId,
+              } as any);
+
+              log.error({
+                traceId,
+                sessionId,
+                tokensBefore: event.compactionFailed.tokensBefore,
+                reason: event.compactionFailed.reason,
+              }, "JarvisCore: compaction FAILED — history preserved");
+            }
+            break;
           case "compaction":
             if (event.compaction) {
               this.bus.publish({

@@ -270,6 +270,29 @@ async function main() {
             summaryLength: event.compaction.summary.length,
           },
         });
+      } else if (event.type === "compaction_failed" && event.compactionFailed) {
+        // Forced compaction failed — history preserved (doCompact failure
+        // semantics). Forward to ai.stream so the chat banner resolves, and
+        // to system.event for metrics/forensics. This path matters: the
+        // 2026-06-10 incident came through THIS loop (POST /chat/compact).
+        bus.publish({
+          channel: "ai.stream",
+          source: "jarvis-core",
+          target: sessionId,
+          event: "compaction_failed",
+          compactionFailed: event.compactionFailed,
+        } as any);
+        bus.publish({
+          channel: "system.event",
+          source: "jarvis-core",
+          event: "compaction_failed",
+          data: {
+            sessionId,
+            engine: event.compactionFailed.engine,
+            tokensBefore: event.compactionFailed.tokensBefore,
+            reason: event.compactionFailed.reason,
+          },
+        });
       }
     }
     // Persist the compacted history (skips ephemeral sessions)

@@ -147,6 +147,7 @@ export type ChatEntry =
   | { kind: 'capability'; name: string; id: string; args?: string; status: 'running' | 'done' | 'cancelled'; ms?: number; output?: string; expanded?: boolean }
   | { kind: 'compaction'; engine: 'api' | 'fallback' | 'sliding-window'; tokensBefore: number; tokensAfter: number; summary: string; expanded?: boolean }
   | { kind: 'compaction_pending'; engine: 'fallback'; tokensBefore: number; reason?: 'forced' | 'threshold' | 'growth' | 'sliding-window'; startedAt: number }
+  | { kind: 'compaction_failed'; engine: 'fallback'; tokensBefore: number; reason: string }
   | { kind: 'bash_result'; command: string; output: string; exitCode: number; ms: number; expanded?: boolean }
   | { kind: 'system'; text: string; subtype?: string; detail?: string; session?: string; expanded?: boolean }
   | {
@@ -980,6 +981,30 @@ export const ChatTimeline = React.memo(function ChatTimeline({
               >
                 <span style={{ animation: 'pulse 1.5s infinite', display: 'inline-block' }}>⏳</span>
                 <span>Compacting context — {beforeK}K tokens ({reasonLabel})…</span>
+              </div>
+            </div>
+          )
+        }
+
+        if (entry.kind === 'compaction_failed') {
+          const beforeK = Math.round(entry.tokensBefore / 1000)
+          return (
+            <div key={i} style={{ marginBottom: '2px' }}>
+              <div
+                style={{
+                  padding: '3px 8px',
+                  borderRadius: '4px',
+                  fontSize: '10px',
+                  borderLeft: '3px solid #ff5555',
+                  background: '#1a1e2e',
+                  color: '#ff5555',
+                  fontFamily: 'var(--font-mono)',
+                }}
+              >
+                ⚠ Compaction failed — history preserved ({beforeK}K tokens intact)
+                <div style={{ marginTop: '2px', fontSize: '9px', color: '#888', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {entry.reason}
+                </div>
               </div>
             </div>
           )

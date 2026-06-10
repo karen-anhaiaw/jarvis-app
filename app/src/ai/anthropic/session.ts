@@ -10,6 +10,7 @@ import { sanitizeMessages } from "./sanitize-messages.js";
 import { unescapeToolInput } from "./unescape-tool-input.js";
 import { logUsage } from "./usage-log.js";
 import { load as loadSettings, getCompactionSettings } from "../../core/settings.js";
+import { archivePreCompactBackup } from "../../core/conversation-store.js";
 import { getMaxContext, getMaxOutput, supportsLongContext } from "../../config/index.js";
 
 type CapabilityDef = { name: string; description: string; input_schema: Record<string, unknown> };
@@ -958,14 +959,35 @@ export class AnthropicSession implements AISession {
       "AnthropicSession: Engine B abrupt-growth compaction triggered"
     );
 
-    yield* this.doCompact(lastInputTokens, "growth" as any);
+    yield* this.doCompact(lastInputTokens, "growth");
   }
 
   /**
-   * Core compaction logic shared by both fallbackCompact and forceCompact.
-   * Sends messages to a summarizer, replaces history with the summary.
+   * Core compaction logic shared by fallbackCompact, growthCompact and
+   * forceCompact. Sends messages to a summarizer, replaces history with the
+   * summary.
+   *
+   * FAILURE SEMANTICS (added after the 2026-06-10 incident — a forced
+   * compaction on a 734k-token session received an EMPTY summarizer response
+   * and replaced the entire history with it, unrecoverably):
+   *
+   *   1. History is NEVER replaced unless the summarizer returned a usable
+   *      summary (empty / whitespace-only / suspiciously-short = failure).
+   *   2. stop_reason "max_tokens" with zero text (adaptive-thinking models,
+   *      e.g. fable, can burn the whole budget on thinking blocks) gets
+   *      exactly ONE retry with a 4x budget clamped to the model ceiling.
+   *   3. The full pre-compaction history is archived to sessions/archive/
+   *      BEFORE replacement. If the backup write fails, compaction ABORTS —
+   *      an oversized context is recoverable, destroyed history is not.
+   *   4. Every failure path yields `compaction_failed` so the UI resolves the
+   *      pending banner — the catch no longer swallows errors invisibly.
+   *   5. Messages are sanitized before the summarizer call. This used to be
+   *      the ONLY call site sending history to the API without
+   *      sanitizeMessages — orphan tool_use blocks made the summarizer 400
+   *      while the main loop kept working, so automatic compaction failed
+   *      silently until the context ballooned.
    */
-  private async *doCompact(tokensBefore: number, reason: "forced" | "threshold"): AsyncGenerator<AIStreamEvent, void> {
+  private async *doCompact(tokensBefore: number, reason: "forced" | "threshold" | "growth"): AsyncGenerator<AIStreamEvent, void> {
     const settings = getCompactionSettings(loadSettings());
     const instructions = settings.instructions ||
       "Summarize this conversation preserving key decisions, code, and progress.";
@@ -983,35 +1005,132 @@ export class AnthropicSession implements AISession {
     };
 
     try {
-      // Ensure messages end with a user message (API requirement)
-      const msgs = [...this.messages];
+      // Sanitize a COPY before the summarizer call (in-memory history is not
+      // mutated — the main loop sanitizes independently right before its own
+      // API calls). Then ensure the sequence ends with a user message (API
+      // requirement for messages.create).
+      const msgs = sanitizeMessages([...this.messages]);
       if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
         msgs.push({ role: "user", content: "Please summarize the conversation above." });
       }
 
-      // Compaction is a UTILITY call: summary doesn't share cache pool with
-      // the main loop. Force Haiku regardless of session sticky to capture
       // Use the session's current model for compaction — same client, same model.
       // The utility model (Haiku) was too weak for large contexts (~1M tokens)
       // and would silently truncate, producing summaries that barely reduced context.
       const compactionModel = this.stickyModelOverride ?? this.getBaseModel();
       log.info({ label: this.label, compactionModel }, "AnthropicSession: compaction summary using session model");
 
-      const summaryResponse = await this.client.messages.create({
-        model: compactionModel,
-        max_tokens: 8192, // summary is short prose, doesn't need the full output budget
-        system: `You are a conversation summarizer. ${instructions}\nWrap your summary in <summary></summary> tags.`,
-        messages: msgs,
-      });
+      // Summary is short prose — doesn't need the full output budget. The
+      // retry path quadruples this when thinking exhausts it (see below).
+      const BASE_MAX_TOKENS = 8192;
 
-      const summaryText = summaryResponse.content
-        .filter((b: any) => b.type === "text")
-        .map((b: any) => b.text)
-        .join("\n");
+      /**
+       * One summarizer round-trip + full diagnostics. The 2026-06-10 incident
+       * was undiagnosable because none of this was recorded: the call bypassed
+       * usage.log and the response shape (stop_reason / block types) was never
+       * logged — `summaryLength: 0` was the only trace.
+       */
+      const callSummarizer = async (maxTokens: number) => {
+        const response = await this.client.messages.create({
+          model: compactionModel,
+          max_tokens: maxTokens,
+          system: `You are a conversation summarizer. ${instructions}\nWrap your summary in <summary></summary> tags.`,
+          messages: msgs,
+        });
 
-      // Extract content between <summary> tags, or use full text
-      const match = summaryText.match(/<summary>([\s\S]*?)<\/summary>/);
-      const summary = match ? match[1].trim() : summaryText.trim();
+        const text = response.content
+          .filter((b: any) => b.type === "text")
+          .map((b: any) => b.text)
+          .join("\n");
+        // Extract content between <summary> tags, or use full text
+        const match = text.match(/<summary>([\s\S]*?)<\/summary>/);
+        const summary = (match ? match[1] : text).trim();
+
+        const stopReason = (response as any).stop_reason as string | undefined;
+        const blockTypes = response.content.map((b: any) => b.type);
+        const usage = (response as any).usage;
+
+        log.info({
+          label: this.label,
+          compactionModel,
+          maxTokens,
+          stopReason,
+          blockTypes,
+          summaryLength: summary.length,
+          inputTokens: usage?.input_tokens,
+          outputTokens: usage?.output_tokens,
+        }, "AnthropicSession: compaction summarizer response");
+
+        // Summarizer calls are real billed API usage — record them like every
+        // other call so cost analysis and incident forensics see them.
+        if (usage) {
+          logUsage({
+            sessionId: this.label,
+            instanceId: this.sessionId,
+            effort: this.highEffort ? "xhigh" : "high",
+            model: compactionModel,
+            input_tokens: usage.input_tokens ?? 0,
+            output_tokens: usage.output_tokens ?? 0,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
+            cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+          });
+        }
+
+        return { summary, stopReason, blockTypes };
+      };
+
+      let result = await callSummarizer(BASE_MAX_TOKENS);
+
+      // Thinking-budget exhaustion: adaptive-thinking models can spend the
+      // entire max_tokens budget on thinking blocks and return ZERO text
+      // (stop_reason "max_tokens"). Exactly one retry with a 4x budget,
+      // clamped to the model's output ceiling.
+      if (result.summary.length === 0 && result.stopReason === "max_tokens") {
+        const retryBudget = Math.min(BASE_MAX_TOKENS * 4, getMaxOutput(compactionModel));
+        log.warn(
+          { label: this.label, retryBudget, blockTypes: result.blockTypes },
+          "AnthropicSession: summarizer exhausted max_tokens with no text — retrying with larger budget",
+        );
+        result = await callSummarizer(retryBudget);
+      }
+
+      // ── Empty-summary guard ─────────────────────────────────────────────
+      // An empty summary is ALWAYS a failure. A non-empty but tiny summary is
+      // a failure only for large contexts — small sessions can legitimately
+      // summarize to a short sentence.
+      const MIN_SUMMARY_CHARS = 50;
+      const LARGE_CONTEXT_TOKENS = 10_000;
+      const empty = result.summary.length === 0;
+      const tooShort = !empty && tokensBefore > LARGE_CONTEXT_TOKENS && result.summary.length < MIN_SUMMARY_CHARS;
+      if (empty || tooShort) {
+        const failReason = `summarizer returned ${empty ? "an empty" : "a suspiciously short"} summary `
+          + `(${result.summary.length} chars for ~${tokensBefore} tokens, stop_reason=${result.stopReason ?? "?"}, `
+          + `blocks=[${result.blockTypes.join(",")}]) — history preserved`;
+        log.error(
+          { label: this.label, tokensBefore, summaryLength: result.summary.length, stopReason: result.stopReason, blockTypes: result.blockTypes },
+          "AnthropicSession: compaction ABORTED — unusable summary, history preserved",
+        );
+        yield {
+          type: "compaction_failed",
+          compactionFailed: { engine: "fallback", reason: failReason, tokensBefore },
+        };
+        return;
+      }
+
+      // ── Pre-compact backup ──────────────────────────────────────────────
+      // Archive the FULL history BEFORE replacing it. If the write fails,
+      // ABORT: an oversized context is recoverable, destroyed history is not.
+      if (!archivePreCompactBackup(this.label, this.messages)) {
+        const failReason = "pre-compaction backup write failed — compaction aborted, history preserved";
+        log.error({ label: this.label, tokensBefore }, "AnthropicSession: compaction ABORTED — backup failed");
+        yield {
+          type: "compaction_failed",
+          compactionFailed: { engine: "fallback", reason: failReason, tokensBefore },
+        };
+        return;
+      }
+
+      const summary = result.summary;
 
       // Replace message history with summary
       this.injectedContextCount = 0; // compaction wipes all messages — reset ephemeral tracking
@@ -1038,6 +1157,15 @@ export class AnthropicSession implements AISession {
       };
     } catch (err) {
       log.error({ label: this.label, err }, "AnthropicSession: Engine B compaction failed");
+      const msg = err instanceof Error ? err.message : String(err);
+      yield {
+        type: "compaction_failed",
+        compactionFailed: {
+          engine: "fallback",
+          reason: `summarizer call failed: ${msg.slice(0, 300)}`,
+          tokensBefore,
+        },
+      };
     }
   }
 

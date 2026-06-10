@@ -127,6 +127,20 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
             session: msg.target,
           });
           break;
+        // compaction_failed is published by JarvisCore / main.ts runCompaction
+        // when Engine B fails (summarizer error, empty summary, backup write
+        // failure). History is preserved — the UI replaces the pending banner
+        // with a failure entry. Not in the public AIStreamMessage union — cast.
+        case "compaction_failed" as any:
+          this.broadcast(msg.target, {
+            type: "compaction_failed",
+            engine: (msg as any).compactionFailed?.engine,
+            tokensBefore: (msg as any).compactionFailed?.tokensBefore,
+            reason: (msg as any).compactionFailed?.reason,
+            source,
+            session: msg.target,
+          });
+          break;
         // pending_queue is published by JarvisCore.broadcastPendingQueue.
         // Not declared in AIStreamMessage.event union (intentionally — kept
         // out of the public type surface to avoid forcing plugin updates),

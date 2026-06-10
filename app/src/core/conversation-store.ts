@@ -128,6 +128,75 @@ export function clearConversation(sessionLabel: string): void {
   }
 }
 
+// ─── Pre-compaction backup ──────────────────────────────────────────────
+
+/** Newest backups kept per session label — older ones are pruned. */
+const PRECOMPACT_KEEP = 5;
+
+/**
+ * Archive the FULL in-memory message history before compaction replaces it.
+ *
+ * WHY: compaction is the only operation that destroys history irreversibly.
+ * On 2026-06-10 a forced compaction received an empty summary and replaced
+ * 734k tokens of context with nothing — unrecoverable because nothing was
+ * archived first. This backup makes that class of loss impossible.
+ *
+ * Contract:
+ * - Does NOT trim to MAX_MESSAGES (unlike saveConversation) — the whole point
+ *   is preserving exactly what compaction is about to discard.
+ * - Returns false on any write failure. doCompact ABORTS compaction in that
+ *   case: an oversized context is recoverable, destroyed history is not.
+ * - Paths resolved lazily (no module-level const) so JARVIS_HOME set at
+ *   runtime (tests) is respected.
+ * - Prunes to the newest PRECOMPACT_KEEP backups per label (ISO timestamps
+ *   sort lexicographically = chronologically).
+ */
+export function archivePreCompactBackup(sessionLabel: string, messages: unknown[]): boolean {
+  try {
+    const archiveDir = jarvisPath("sessions", "archive");
+    if (!existsSync(archiveDir)) {
+      mkdirSync(archiveDir, { recursive: true });
+    }
+    const safe = sessionLabel.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const path = join(archiveDir, `${safe}_precompact_${stamp}.json`);
+    writeFileSync(
+      path,
+      JSON.stringify(
+        {
+          sessionId: sessionLabel,
+          archivedAt: new Date().toISOString(),
+          reason: "pre-compaction backup",
+          messageCount: messages.length,
+          messages,
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    // Prune older backups for this label only.
+    const prefix = `${safe}_precompact_`;
+    const backups = readdirSync(archiveDir)
+      .filter((f) => f.startsWith(prefix) && f.endsWith(".json"))
+      .sort();
+    for (const f of backups.slice(0, Math.max(0, backups.length - PRECOMPACT_KEEP))) {
+      try {
+        unlinkSync(join(archiveDir, f));
+      } catch {
+        /* best-effort prune — never fail the backup over it */
+      }
+    }
+
+    log.info({ sessionLabel, path, messageCount: messages.length }, "ConversationStore: pre-compaction backup written");
+    return true;
+  } catch (err) {
+    log.error({ sessionLabel, err }, "ConversationStore: pre-compaction backup FAILED");
+    return false;
+  }
+}
+
 // ─── Route state (ModelRouter sticky per session) ──────────────────────
 // Stored separately from the conversation file. Conversation gets trimmed
 // to MAX_MESSAGES, archived, restored across providers — route state has

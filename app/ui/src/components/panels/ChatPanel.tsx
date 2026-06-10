@@ -356,6 +356,29 @@ export function ChatPanel({
             startedAt: Date.now(),
           }])
           break
+        case 'compaction_failed':
+          if (!features.compaction) break
+          // Engine B failed — history is preserved (doCompact failure
+          // semantics). Replace the pending ⏳ banner with a failure entry so
+          // it doesn't hang forever; append if no banner exists (e.g. failure
+          // event arrived after a reconnect dropped the start event).
+          setEntries(prev => {
+            const failEntry = {
+              kind: 'compaction_failed' as const,
+              engine: 'fallback' as const,
+              tokensBefore: data.tokensBefore ?? 0,
+              reason: data.reason ?? 'unknown error',
+            }
+            for (let idx = prev.length - 1; idx >= 0; idx--) {
+              if (prev[idx].kind === 'compaction_pending') {
+                const next = prev.slice()
+                next[idx] = failEntry
+                return next
+              }
+            }
+            return [...prev, failEntry]
+          })
+          break
         case 'compaction':
           if (!features.compaction) break
           setIsThinking(false)

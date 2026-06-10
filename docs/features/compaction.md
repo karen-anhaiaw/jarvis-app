@@ -109,9 +109,48 @@ The `chars/4` heuristic underestimates by 3-4x for sessions with many tool calls
 Used to compute the delta for abrupt-growth detection. Reset to 0 after compaction (since
 history is replaced, the "previous" baseline is no longer meaningful).
 
+## Failure Semantics — history must never be destroyed
+
+> Added after the 2026-06-10 incident: a forced compaction (`POST /chat/compact`) on a
+> 734k-token session received an empty summarizer response (`summaryLength: 0`) and
+> replaced the entire history with it, unrecoverably. Four compounding gaps: no
+> empty-summary guard, the summarizer call skipped `sanitizeMessages` (an earlier
+> auto-compact had 400'd on an orphan `tool_use` and was silently swallowed), no
+> response diagnostics (the call also bypassed `usage.log`), and no failure event
+> (the UI banner hung forever).
+
+`doCompact` either produces a usable summary or changes NOTHING:
+
+1. **Sanitize first** — the message copy sent to the summarizer goes through
+   `sanitizeMessages` (it was the only API call site that didn't). The in-memory
+   history is not mutated by this pass.
+2. **Diagnostics always** — every summarizer round-trip logs `stop_reason`, content
+   block types, and summary length, and records token usage to `usage.log`
+   (`logUsage`), so failures are diagnosable and billed usage is visible.
+3. **Thinking-exhaustion retry** — `stop_reason === "max_tokens"` with zero text
+   (adaptive-thinking models can burn the entire budget on thinking blocks) triggers
+   exactly ONE retry with a 4x budget clamped to `getMaxOutput(model)`.
+4. **Empty/short guard** — empty (post-trim) summaries are ALWAYS failures.
+   Non-empty summaries shorter than `MIN_SUMMARY_CHARS` (50) are failures when
+   `tokensBefore > LARGE_CONTEXT_TOKENS` (10k) — small sessions may legitimately
+   summarize to a short sentence.
+5. **Pre-compact backup** — the FULL untrimmed history is archived to
+   `sessions/archive/<label>_precompact_<timestamp>.json` (`archivePreCompactBackup`,
+   newest 5 kept per label) BEFORE replacement. If the backup write fails, compaction
+   ABORTS — an oversized context is recoverable, destroyed history is not.
+6. **Visible failure** — every failure path yields `compaction_failed`
+   (`{ engine, reason, tokensBefore }`). JarvisCore and `main.ts runCompaction`
+   forward it to `ai.stream` (cast, like `compaction_start`) + `system.event`;
+   ChatPiece flattens it over SSE; ChatPanel replaces the pending ⏳ banner with a
+   red "Compaction failed — history preserved" entry.
+
 ## Invariants
 
 - Engine A is permanently disabled. Do not re-enable without a visible summary mechanism.
+- `doCompact` NEVER replaces history with an empty or unusable summary — failure paths leave `this.messages` untouched and emit `compaction_failed`.
+- The pre-compact backup is written BEFORE history replacement; backup failure aborts compaction.
+- The summarizer call always goes through `sanitizeMessages` and always records usage + `stop_reason` diagnostics.
+- The `max_tokens` empty-text retry runs at most once per compaction attempt.
 - Sliding window NEVER runs while `stop_reason === "tool_use"` — only at logical turn ends. Threshold and growth still run on every API response (they protect against overflow regardless of turn structure).
 - After full compaction (`doCompact`), `injectedContextCount` and `previousRealInputTokens` are reset to 0.
 - Sliding window does NOT reset `injectedContextCount` or `previousRealInputTokens` — it preserves recent turns.

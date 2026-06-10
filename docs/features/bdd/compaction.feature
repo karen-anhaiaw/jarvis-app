@@ -159,3 +159,93 @@ Feature: Session Compaction
     And this.messages is reconstructed as [user(summary_2), assistant(ack), ...remaining_turns]
     And there is exactly ONE summary block at position [0] (summary_1 is gone)
     And the message count decreases by the number of turns compacted
+
+  # ── Failure semantics — history must never be destroyed ────────────────────
+  # Added after the 2026-06-10 incident: a forced compaction on a 734k-token
+  # session received an empty summarizer response (summaryLength: 0) and
+  # replaced the entire history with it. These scenarios pin the contract:
+  # compaction either produces a usable summary or changes NOTHING.
+
+  Scenario: Empty summary aborts compaction and preserves history
+    Given the session has 50 messages
+    And the summarizer responds with zero text blocks
+    When doCompact runs (any trigger)
+    Then the session messages are NOT replaced
+    And a compaction_failed event is emitted with engine "fallback" and a reason mentioning "empty"
+    And no compaction event is emitted
+
+  Scenario: Whitespace-only summary is treated as empty
+    Given the summarizer responds with whitespace-only text
+    When doCompact runs
+    Then the session messages are NOT replaced
+    And a compaction_failed event is emitted
+
+  Scenario: Suspiciously short summary for a large context aborts compaction
+    Given tokensBefore is 700,000 (above the 10,000-token floor-activation threshold)
+    And the summarizer returns a summary below the 50-char floor
+    When doCompact runs
+    Then the session messages are NOT replaced
+    And a compaction_failed event is emitted with a reason mentioning "short"
+
+  Scenario: Short summary for a small context is accepted
+    Given tokensBefore is 800 (below the 10,000-token floor-activation threshold)
+    And the summarizer returns a 20-char summary
+    When doCompact runs
+    Then compaction completes normally (small sessions can have tiny summaries)
+
+  Scenario: max_tokens exhaustion with no text triggers exactly one retry with a larger budget
+    Given the summarizer first responds with stop_reason "max_tokens" and only thinking blocks (no text)
+    And the second call returns a valid summary
+    When doCompact runs
+    Then the summarizer is called exactly twice
+    And the second call uses a 4x max_tokens budget clamped to the model's output ceiling
+    And compaction completes with the retry's summary
+
+  Scenario: Retry also empty — compaction fails without touching history
+    Given both summarizer calls return stop_reason "max_tokens" with zero text
+    When doCompact runs
+    Then the summarizer is called exactly twice (no infinite retry)
+    And the session messages are NOT replaced
+    And a compaction_failed event is emitted
+
+  Scenario: Summarizer API error emits compaction_failed instead of silent swallow
+    Given the summarizer call rejects with a 400 error
+    When doCompact runs
+    Then the error is logged
+    And a compaction_failed event is emitted with the error message in the reason
+    And the session messages are NOT replaced
+
+  Scenario: doCompact sanitizes history before the summarizer call
+    Given the session history contains an orphan tool_use without a matching tool_result
+    When doCompact runs
+    Then the messages sent to the summarizer contain a synthetic tool_result placeholder for the orphan
+    And the in-memory session history is not mutated by the sanitization
+
+  Scenario: Pre-compact backup is written before history replacement
+    Given the summarizer returns a valid summary
+    When doCompact runs
+    Then the full pre-compaction history is written to sessions/archive/<label>_precompact_<timestamp>.json
+    And the backup is NOT trimmed to MAX_MESSAGES
+    And only then are the session messages replaced
+
+  Scenario: Backup write failure aborts compaction
+    Given the pre-compact backup write fails
+    When doCompact runs
+    Then the session messages are NOT replaced
+    And a compaction_failed event is emitted with a reason mentioning "backup"
+
+  Scenario: Old pre-compact backups are pruned
+    Given 6 pre-compact backups already exist for the session label
+    When a new backup is written
+    Then only the newest 5 backups remain for that label
+
+  Scenario: Summarizer usage is recorded with diagnostics
+    Given the summarizer returns any response
+    When doCompact runs
+    Then stop_reason, content block types, and summary length are logged
+    And the summarizer token usage is appended to usage.log
+
+  Scenario: compaction_failed resolves the pending banner in the UI
+    Given a compaction_pending banner is displayed (Engine B started)
+    When a compaction_failed event arrives via SSE
+    Then the pending banner is replaced by a failure banner stating history was preserved
