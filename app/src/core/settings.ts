@@ -63,6 +63,12 @@ export interface Settings {
   compaction?: CompactionSettings;
   theme?: string; // active theme name (maps to ~/.jarvis/themes/<name>/theme.json)
   cron?: CronSettings;
+  /** Delegate worker defaults (delegate_read_task, cron delegate mode).
+   *  defaultRole: role id from ~/.jarvis/roles/ used when the caller omits
+   *  one. Personal/site-specific roles belong in settings.user.json — the
+   *  code fallback is the stack-agnostic "generic" role (F3.13: the old
+   *  hardcoded default leaked a personal role name into core). */
+  delegate?: { defaultRole?: string };
 }
 
 const SETTINGS_DIR = jarvisHome();

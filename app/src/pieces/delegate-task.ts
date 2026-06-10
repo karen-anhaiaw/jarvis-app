@@ -19,7 +19,7 @@
 //     SessionManager (it's truly ephemeral, lifecycle scoped to one call).
 //   - Tools available to the worker = same tool registry as the main session.
 //     The role's system prompt should constrain the worker to read-only ops
-//     (we use the existing `nu-discovery-agent` role by default; configurable).
+//     (default role comes from settings delegate.defaultRole; fallback "generic").
 //   - Tool calls inside the worker still flow through the bus normally
 //     (capability.request / capability.result), so file reads, greps, etc.
 //     work the same as in main.
@@ -40,6 +40,7 @@ import type { CapabilityRegistry } from "../capabilities/registry.js";
 import type { AISessionFactory, AIStreamEvent, CapabilityCall, CapabilityResult } from "../ai/types.js";
 import { AnthropicSessionFactory } from "../ai/anthropic/factory.js";
 import { getProviderForModel } from "../config/index.js";
+import { load as loadSettings } from "../core/settings.js";
 import { log } from "../logger/index.js";
 
 export interface DelegateTaskOptions {
@@ -142,7 +143,7 @@ export class DelegateTaskPiece implements Piece {
           },
           role: {
             type: "string",
-            description: "Optional role to use as the worker's system prompt (file in ~/.jarvis/roles/). Defaults to 'nu-discovery-agent' (read-only research).",
+            description: "Optional role to use as the worker's system prompt (file in ~/.jarvis/roles/). Defaults to settings delegate.defaultRole (fallback 'generic').",
           },
           timeout_seconds: {
             type: "number",
@@ -178,7 +179,10 @@ export class DelegateTaskPiece implements Piece {
     const task = String(input.task ?? "").trim();
     if (!task) return { error: "task is required" };
 
-    const roleId = String(input.role ?? "nu-discovery-agent");
+    // Default role: settings-driven (settings.user.json → delegate.defaultRole)
+    // with a stack-agnostic fallback. Personal role names must never be
+    // hardcoded in core (F3.13).
+    const roleId = String(input.role ?? loadSettings().delegate?.defaultRole ?? "generic");
     const modelArg = input.model ? String(input.model) : undefined;
     const timeoutMs = Math.min(600, Math.max(10, Number(input.timeout_seconds ?? DEFAULT_TIMEOUT_S))) * 1000;
 
