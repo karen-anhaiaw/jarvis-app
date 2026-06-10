@@ -6,6 +6,7 @@ import type { AIRequestMessage, AIStreamMessage, HudUpdateMessage, ChatAnchorMes
 import type { CapabilityRegistry } from "../capabilities/registry.js";
 import type { SessionManager } from "../core/session-manager.js";
 import { log } from "../logger/index.js";
+import { DEFAULT_SESSION } from "../core/constants.js";
 import { newTraceId, preview } from "../logger/trace.js";
 import { consumePendingGreeting } from "../core/conversation-store.js";
 
@@ -229,14 +230,14 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
     this.bus.publish({
       channel: "hud.update", source: this.id, action: "add", pieceId: "chat-output",
       piece: { pieceId: "chat-output", type: "panel", name: "Chat", status: "running",
-        data: { sessionId: "main", assistantLabel: "JARVIS" },
+        data: { sessionId: DEFAULT_SESSION, assistantLabel: "JARVIS" },
         position: { x: 10, y: 480 }, size: { width: 1660, height: 280 } },
     });
 
     this.bus.publish({
       channel: "hud.update", source: this.id, action: "add", pieceId: "chat-input",
       piece: { pieceId: "chat-input", type: "panel", name: "Input", status: "running",
-        data: { sessionId: "main", assistantLabel: "JARVIS" },
+        data: { sessionId: DEFAULT_SESSION, assistantLabel: "JARVIS" },
         position: { x: 10, y: 768 }, size: { width: 1660, height: 44 } },
     });
 
@@ -414,7 +415,7 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
       const entries = parseMessagesToHistory(rawMessages);
       // Append startup greeting if one is pending (set by consumeStartupPrompt on boot).
       // Consumed once so subsequent history requests don't repeat it.
-      const greeting = sid === "main" ? consumePendingGreeting() : null;
+      const greeting = sid === DEFAULT_SESSION ? consumePendingGreeting() : null;
       if (greeting) {
         entries.push({ kind: "message", role: "assistant", text: greeting, source: "jarvis" });
       }

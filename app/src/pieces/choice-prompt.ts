@@ -115,6 +115,14 @@ export class ChoicePromptPiece implements Piece {
     this.bus = bus;
     this.registerCapabilities();
 
+    // Session lifecycle eviction (F3.14): pending choice anchors of a closed
+    // session can never be answered — drop them (they leaked before).
+    this.bus.subscribe("system.event", (msg: any) => {
+      if (msg.event !== "session.closed") return;
+      const sessionId = msg.data?.sessionId as string | undefined;
+      if (sessionId) this.pendingBySession.delete(sessionId);
+    });
+
     // Observe ai.request — when the user replies with the "[choice]" prefix,
     // drop the oldest pending anchor for that session. The frontend already
     // removes optimistically on submit; this is the authoritative removal

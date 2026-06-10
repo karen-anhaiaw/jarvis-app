@@ -7,6 +7,7 @@ import { execSync, exec } from "node:child_process";
 import type { ChatPiece } from "./input/chat-piece.js";
 import { load as loadSettings, save as saveSettings } from "./core/settings.js";
 import { log, getLogBuffer, onLogEntry } from "./logger/index.js";
+import { DEFAULT_SESSION } from "./core/constants.js";
 
 const THEMES_DIR = join(homedir(), ".jarvis", "themes");
 
@@ -692,13 +693,13 @@ export class HttpServer {
 
         // Bash is a global side-effect — broadcast to the root session only.
         // Actor/other-session bash would need its own endpoint carrying sessionId.
-        this.chatPiece.broadcastEvent("main", {
+        this.chatPiece.broadcastEvent(DEFAULT_SESSION, {
           type: "bash_result",
           command,
           output,
           exitCode,
           ms,
-          session: "main",
+          session: DEFAULT_SESSION,
         });
       });
     });

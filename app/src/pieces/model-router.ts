@@ -190,6 +190,17 @@ export class ModelRouterPiece implements Piece {
     this.bus = bus;
     bus.subscribe<AIRequestMessage>("ai.request", (msg) => this.onRequest(msg));
 
+    // Session lifecycle eviction (F3.14): sticky routes and pending overrides
+    // for closed sessions leaked forever (review 2026-06-10). Dropping them
+    // also prevents persisting dead routes to disk on stop().
+    bus.subscribe("system.event", (msg: any) => {
+      if (msg.event !== "session.closed") return;
+      const sessionId = msg.data?.sessionId as string | undefined;
+      if (!sessionId) return;
+      this.routes.delete(sessionId);
+      this.pendingOverrides.delete(sessionId);
+    });
+
     // Hook: when a brand-new session is created by SessionManager, apply any
     // override we computed earlier but couldn't dispatch (sticky from disk,
     // prefix from the very first message, etc).

@@ -5,6 +5,7 @@ import type { Piece } from "../../core/piece.js";
 import { config, getMaxContext } from "../../config/index.js";
 import type { AnthropicSessionFactory } from "./factory.js";
 import { log } from "../../logger/index.js";
+import { DEFAULT_SESSION } from "../../core/constants.js";
 
 const STREAMING_VERBS = [
   "Analyzing", "Bloviating", "Cogitating", "Deliberating", "Elaborating",
@@ -89,7 +90,7 @@ export class AnthropicMetricsHud implements Piece {
     // Emitted by AnthropicSession.streamFromAPI after every API response.
     this.unsubs.push(this.bus.subscribe<SystemEventMessage>("system.event", (msg) => {
       if (msg.event !== "api.anthropic.usage") return;
-      const sessionId = (msg.data.sessionId as string) ?? "main";
+      const sessionId = (msg.data.sessionId as string) ?? DEFAULT_SESSION;
       this.recordUsage(sessionId, msg.data);
     }));
 
@@ -117,7 +118,9 @@ export class AnthropicMetricsHud implements Piece {
 
     // Track streaming state from ai.stream events (main session only — visual feedback)
     this.unsubs.push(this.bus.subscribe<AIStreamMessage>("ai.stream", (msg) => {
-      if (msg.target !== "main") return;
+      // NOTE: streaming indicator still tracks only the default session —
+      // multi-session streaming state is F6 (HUD truth) territory.
+      if (msg.target !== DEFAULT_SESSION) return;
 
       switch (msg.event) {
         case "delta":

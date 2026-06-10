@@ -30,6 +30,7 @@ import { log } from "../logger/index.js";
 import { newTraceId, preview } from "../logger/trace.js";
 import { config } from "../config/index.js";
 import { graphRegistry } from "./graph-registry.js";
+import { DEFAULT_SESSION } from "./constants.js";
 
 // ─── Inter-session dispatch text (attribution + reply routing) ────────────
 // WHY: when session A publishes ai.request into session B, B's LLM must know
@@ -325,11 +326,6 @@ export class JarvisCore implements Piece {
   async start(bus: EventBus): Promise<void> {
     this.bus = bus;
 
-    // Register actor-* sessions as owned — JarvisCore is the sole stream
-    // processor for ALL sessions. The actor-runner plugin only manages
-    // lifecycle (create/destroy/configure); it does not intercept ai.request.
-    this.registerSessionPattern(/^actor-/);
-
     this.bus.subscribe<AIRequestMessage>("ai.request", (msg) => {
       if (msg.target) {
         return this.handlePrompt(msg);
@@ -351,6 +347,23 @@ export class JarvisCore implements Piece {
     this.bus.subscribe<CapabilityResultMessage>("capability.result", (msg) => {
       // Handle capability results for any session we manage
       if (msg.target) return this.handleToolResult(msg);
+    });
+
+    // Session lifecycle eviction (F3.14): when SessionManager closes a
+    // session, drop every per-session entry this piece holds. Without this,
+    // pendingPrompts / pendingReplyTo / currentTrace / sessionStates kept
+    // entries for dead sessions forever (review 2026-06-10: orphan state).
+    this.bus.subscribe<SystemEventMessage>("system.event", (msg) => {
+      if ((msg as any).event !== "session.closed") return;
+      const sessionId = (msg as any).data?.sessionId as string | undefined;
+      if (!sessionId) return;
+      const hadQueue = this.pendingPrompts.delete(sessionId);
+      this.pendingReplyTo.delete(sessionId);
+      this.currentTrace.delete(sessionId);
+      this.sessionStates.delete(sessionId);
+      this.deriveGlobalState();
+      this.updateHud();
+      log.debug({ sessionId, hadQueue }, "JarvisCore: per-session state evicted on session.closed");
     });
 
     // Register HUD piece
@@ -440,7 +453,7 @@ export class JarvisCore implements Piece {
     this.bus.publish({
       channel: "ai.stream",
       source: "jarvis-core",
-      target: "main",
+      target: DEFAULT_SESSION,
       event: "complete",
       text: "Back online, Sir.",
       usage: { input_tokens: 0, output_tokens: 0 },
@@ -474,7 +487,7 @@ export class JarvisCore implements Piece {
     this.bus.publish({
       channel: "ai.request",
       source: "system",
-      target: "main",
+      target: DEFAULT_SESSION,
       text: contextMessage,
     });
     log.info("JarvisCore: startup prompt ai.request published");
@@ -1413,7 +1426,7 @@ export class JarvisCore implements Piece {
    */
   private deriveGlobalState(): void {
     const prev = this.globalState;
-    const mainState = this.sessionStates.get("main");
+    const mainState = this.sessionStates.get(DEFAULT_SESSION);
     if (mainState === "waiting_tools") {
       this.globalState = "waiting_tools";
     } else if (mainState === "processing") {
