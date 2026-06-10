@@ -14,6 +14,7 @@ import type { PersistedCronJob } from "./settings.js";
 import type { DelegateTaskPiece, DelegateRunOptions } from "../pieces/delegate-task.js";
 import { load as loadSettings, save as saveSettings, invalidateCache } from "./settings.js";
 import { graphRegistry } from "./graph-registry.js";
+import { DEFAULT_SESSION } from "./constants.js";
 import { log } from "../logger/index.js";
 
 // NOTE: PieceManager is responsible for registering this piece as a core graph node.
@@ -39,6 +40,43 @@ interface CronJob {
   reply_to?: string;
   // catch-up: if true, runs immediately when a missed execution is detected
   catchUp?: boolean;
+  // in-memory only: set after the first dead-target warning so a recurring
+  // job with a dead target warns ONCE instead of spamming the default session
+  deadWarned?: boolean;
+}
+
+// ─── Fire-time target validation (phantom prevention, G2) ──────────────────
+// WHY: cron targets are persisted at creation. If the target session dies
+// (killed actor, old grpc session), publishing ai.request to it would make
+// JarvisCore lazily CREATE a phantom session with the DEFAULT system prompt
+// — not the role the id originally had — which then persists to disk and
+// resurrects on every subsequent fire. Pure functions so they are unit-
+// testable without touching settings persistence.
+// See docs/features/bdd/phantom-sessions.feature (G2).
+
+export type PromptFirePlan = { action: "fire" } | { action: "skip-warn" };
+
+/** Decide whether a prompt-mode job may fire at its persisted target.
+ *  DEFAULT_SESSION is always legitimate (created on demand by design). */
+export function planPromptFire(
+  target: string,
+  isAlive: (id: string) => boolean,
+): PromptFirePlan {
+  if (target === DEFAULT_SESSION || isAlive(target)) return { action: "fire" };
+  return { action: "skip-warn" };
+}
+
+/** Decide where a delegate-mode result is delivered. Dead reply_to falls
+ *  back to DEFAULT_SESSION with `redirected: true` so the message can carry
+ *  a note about the original target. */
+export function planDelegateReply(
+  requested: string,
+  isAlive: (id: string) => boolean,
+): { target: string; redirected: boolean } {
+  if (requested === DEFAULT_SESSION || isAlive(requested)) {
+    return { target: requested, redirected: false };
+  }
+  return { target: DEFAULT_SESSION, redirected: true };
 }
 
 // ─── Cron parsing ─────────────────────────────────────────────────────────────
@@ -217,6 +255,9 @@ export class CronPiece implements Piece {
   private jobs = new Map<string, CronJob>();
   private counter = 0;
   private delegatePiece?: DelegateTaskPiece;
+  /** Minimal view over SessionManager used for fire-time target validation.
+   *  Optional: when absent (tests, legacy embedding) validation is permissive. */
+  private sessionResolver?: { has(id: string): boolean };
 
   constructor(registry: CapabilityRegistry) {
     this.registry = registry;
@@ -225,6 +266,12 @@ export class CronPiece implements Piece {
   /** Inject delegate piece after both are started. Called from main.ts. */
   setDelegatePiece(piece: DelegateTaskPiece): void {
     this.delegatePiece = piece;
+  }
+
+  /** Inject the session resolver (SessionManager satisfies the shape).
+   *  Called from main.ts. Enables dead-target detection at fire time (G2). */
+  setSessionResolver(resolver: { has(id: string): boolean }): void {
+    this.sessionResolver = resolver;
   }
 
   systemContext(): string {
@@ -404,12 +451,19 @@ export class CronPiece implements Piece {
     if (job.mode === "delegate") {
       this.executeDelegateJob(job);
     } else {
-      this.bus.publish({
-        channel: "ai.request",
-        source: "cron",
-        target: job.target,
-        text: `[CRON job "${job.id}"] ${job.prompt}`,
-      } as any);
+      // Fire-time target validation (G2): never publish into a dead session —
+      // that would materialize a phantom with the default prompt.
+      const plan = planPromptFire(job.target, (id) => this.isSessionAlive(id));
+      if (plan.action === "skip-warn") {
+        this.warnDeadTarget(job);
+      } else {
+        this.bus.publish({
+          channel: "ai.request",
+          source: "cron",
+          target: job.target,
+          text: `[CRON job "${job.id}"] ${job.prompt}`,
+        } as any);
+      }
     }
 
     // Persist lastRun immediately
@@ -432,28 +486,63 @@ export class CronPiece implements Piece {
       return;
     }
 
-    const replyTo = job.reply_to ?? job.target;
+    const requestedReplyTo = job.reply_to ?? job.target;
 
     this.delegatePiece.runDelegate({
       task: job.prompt,
       role: job.role,
       model: job.model,
     }).then(({ summary, error }) => {
+      // Re-validate at COMPLETION time (not fire time) — the target can die
+      // while the delegate runs. Dead reply_to → redirect to default session
+      // with an explicit note instead of materializing a phantom (G2).
+      const reply = planDelegateReply(requestedReplyTo, (id) => this.isSessionAlive(id));
+      const redirectNote = reply.redirected
+        ? ` (redirected: session "${requestedReplyTo}" no longer exists)`
+        : "";
       const text = error
-        ? `[CRON delegate "${job.id}" ERROR] ${error}`
-        : `[CRON delegate "${job.id}"] ${summary}`;
+        ? `[CRON delegate "${job.id}"${redirectNote} ERROR] ${error}`
+        : `[CRON delegate "${job.id}"${redirectNote}] ${summary}`;
 
       this.bus.publish({
         channel: "ai.request",
         source: "cron",
-        target: replyTo,
+        target: reply.target,
         text,
       } as any);
 
-      log.info({ jobId: job.id, replyTo, chars: summary.length, error }, "CronPiece: delegate job completed");
+      log.info({ jobId: job.id, replyTo: reply.target, redirected: reply.redirected, chars: summary.length, error }, "CronPiece: delegate job completed");
     }).catch((err: unknown) => {
       log.error({ jobId: job.id, err }, "CronPiece: delegate job crashed");
     });
+  }
+
+  /** True when the session exists in the SessionManager (in-memory).
+   *  No resolver wired (tests, legacy embedding) ⇒ permissive: behave as before. */
+  private isSessionAlive(sessionId: string): boolean {
+    if (!this.sessionResolver) return true;
+    return this.sessionResolver.has(sessionId);
+  }
+
+  /** One-time warning to the default session about a job whose target died.
+   *  The LLM receiving it is instructed to ask the user keep-vs-delete.
+   *  Warns once per job (deadWarned flag) — recurring jobs would otherwise
+   *  spam the default session on every fire. */
+  private warnDeadTarget(job: CronJob): void {
+    log.warn({ jobId: job.id, target: job.target, runs: job.runs }, "CronPiece: target session no longer exists — fire skipped");
+    if (job.deadWarned) return;
+    job.deadWarned = true;
+    this.bus.publish({
+      channel: "ai.request",
+      source: "cron",
+      target: DEFAULT_SESSION,
+      text: [
+        `[CRON job "${job.id}"] SKIPPED — target session "${job.target}" no longer exists.`,
+        `The job's prompt was NOT executed and will keep being skipped while the target is gone.`,
+        `Ask the user whether to keep this job or delete it via cron_delete("${job.id}").`,
+        `Job prompt (first 200 chars): ${job.prompt.slice(0, 200)}`,
+      ].join("\n"),
+    } as any);
   }
 
   private scheduleJob(job: CronJob, parsed?: ParsedCron, catchUpDelayMs?: number): void {

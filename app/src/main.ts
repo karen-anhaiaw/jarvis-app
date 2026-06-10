@@ -366,6 +366,9 @@ async function main() {
 
   // Wire delegate into cron so cron jobs can run in delegate mode directly.
   cronPiece.setDelegatePiece(delegateTaskPiece);
+  // Fire-time target validation (phantom prevention G2): cron checks the
+  // SessionManager before publishing into a persisted target.
+  cronPiece.setSessionResolver(sessions);
 
   // Plugin manager
   const pluginManager = new PluginManager(capabilityRegistry);
