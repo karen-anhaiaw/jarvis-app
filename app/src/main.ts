@@ -49,6 +49,7 @@ import { ProviderRouter } from "./ai/provider.js";
 import { createAnthropicProvider } from "./ai/anthropic/provider.js";
 import { createOpenAIProvider } from "./ai/openai/provider.js";
 import { AnthropicSessionFactory } from "./ai/anthropic/factory.js";
+import { abortRegistry } from "./capabilities/abort-registry.js";
 import { registerSessionInspectorTools } from "./ai/anthropic/session-inspector.js";
 import { HudCoreNodePiece } from "./core/hud-core-node.js";
 import { DiffViewerPiece } from "./pieces/diff-viewer.js";
@@ -84,6 +85,10 @@ async function main() {
   ensureUiBuildIntegrity();
 
   const bus = new EventBus();
+  // Shared per-tool abort registry — single ai.stream "aborted" subscription
+  // for ALL tool executors (filesystem capabilities, MCP calls). Keyed by
+  // (sessionId, toolUseId) so ESC aborts every parallel tool of the session.
+  abortRegistry.wire(bus);
   const capabilityRegistry = new CapabilityRegistry();
 
   const chatPiece = new ChatPiece();

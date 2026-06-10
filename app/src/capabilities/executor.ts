@@ -77,8 +77,11 @@ export class CapabilityExecutor implements Piece {
     const t0 = Date.now();
     log.info({ sessionId, traceId, count: calls.length, names: calls.map(c => c.name) }, "CapabilityExecutor: executing");
 
-    // Inject sessionId into inputs so capabilities know the calling context
-    const enrichedCalls = calls.map(c => ({ ...c, input: { ...c.input, __sessionId: sessionId } }));
+    // Inject sessionId + toolUseId into inputs so capabilities know the
+    // calling context. __toolUseId lets handlers register per-tool abort
+    // controllers in the AbortRegistry (parallel tools must not collide —
+    // registry.execute runs calls via Promise.all).
+    const enrichedCalls = calls.map(c => ({ ...c, input: { ...c.input, __sessionId: sessionId, __toolUseId: c.id } }));
 
     // Progress callback — publishes tool_progress on ai.stream so the chat
     // timeline can show live stdout while the tool is running.

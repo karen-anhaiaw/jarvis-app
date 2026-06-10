@@ -7,6 +7,7 @@ import type { EventBus } from "../core/bus.js";
 import type { Piece } from "../core/piece.js";
 import type { HudUpdateMessage } from "../core/types.js";
 import type { CapabilityRegistry } from "./registry.js";
+import { abortRegistry } from "./abort-registry.js";
 import { log } from "../logger/index.js";
 
 const execFileAsync = promisify(execFile);
@@ -30,7 +31,6 @@ export class CapabilityLoaderPiece implements Piece {
   private bus!: EventBus;
   private registry: CapabilityRegistry;
   private loaded: string[] = [];
-  private abortControllers = new Map<string, AbortController>();
 
   systemContext(): string {
     return `## Capability Loader Piece
@@ -47,16 +47,8 @@ The user's home directory is ${process.env.HOME}. Current working directory is $
     this.bus = bus;
     this.loadCapabilities();
 
-    // Listen for abort events to kill running processes
-    this.bus.subscribe("ai.stream", (msg: any) => {
-      if (msg.event === "aborted" && msg.target) {
-        const ctrl = this.abortControllers.get(msg.target);
-        if (ctrl) {
-          ctrl.abort();
-          this.abortControllers.delete(msg.target);
-        }
-      }
-    });
+    // Abort wiring lives in the shared AbortRegistry (wired once in main.ts).
+    // This piece only registers/releases per-tool controllers in handlers.
 
     this.bus.publish({
       channel: "hud.update",
@@ -247,9 +239,10 @@ The user's home directory is ${process.env.HOME}. Current working directory is $
       supportsProgress: true,
       handler: async (input, onProgress) => {
         const sessionId = input.__sessionId as string | undefined;
-        const ctrl = new AbortController();
-        if (sessionId) this.abortControllers.set(sessionId, ctrl);
-        const signal = ctrl.signal;
+        const toolUseId = input.__toolUseId as string | undefined;
+        // Per-tool abort: keyed (sessionId, toolUseId) so parallel tools in
+        // the same turn each get their own controller (ESC aborts ALL).
+        const signal = sessionId ? abortRegistry.register(sessionId, toolUseId) : new AbortController().signal;
         // Expand ~ and substitute ${param} in args
         const expand = (s: string) => s.replace(/^~/, process.env.HOME ?? "~");
         const args = (config.args ?? []).map(arg =>
@@ -281,7 +274,7 @@ The user's home directory is ${process.env.HOME}. Current working directory is $
             exitCode: err.code,
           };
         } finally {
-          if (sessionId) this.abortControllers.delete(sessionId);
+          if (sessionId) abortRegistry.release(sessionId, toolUseId);
         }
       },
     });

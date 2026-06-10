@@ -20,12 +20,15 @@ import { AnthropicSession } from "./session.js";
 // ---------------------------------------------------------------------------
 
 function buildSession(): AnthropicSession {
-  return new AnthropicSession(
-    "test-label",
-    "test-session-id",
-    "claude-fable-5",
-    /* contextInjector */ undefined,
-  );
+  // Constructor takes a single options object (see session.ts:106). The tests
+  // below exercise placeMessageCacheBreakpoint() via reflection and inject
+  // messages directly, so a minimal valid construction is all we need.
+  return new AnthropicSession({
+    model: "claude-fable-5",
+    systemPrompt: "test system prompt",
+    getTools: () => [],
+    label: "test-label",
+  });
 }
 
 // ---------------------------------------------------------------------------
