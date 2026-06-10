@@ -39,6 +39,7 @@ import { getProviderForModel, getCurrentProvider } from "../config/index.js";
 // Used ONLY for cost estimates in banners — actual billing is whatever
 // LiteLLM/Anthropic charges. Ratios are correct for relative comparison.
 const PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
+  "claude-fable-5":              { input: 10.00, output: 50.00, cacheWrite: 12.50, cacheRead: 1.00 },
   "claude-opus-4-8":             { input: 5.00,  output: 25.00, cacheWrite: 6.25,  cacheRead: 0.50 },
   "claude-opus-4-7":             { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
   "claude-opus-4-6":             { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
@@ -71,13 +72,19 @@ interface RoutingConfig {
   };
 }
 
+// Tier structure (2026-06, post Fable 5 launch):
+//   heavy   = claude-fable-5   — Mythos-class, max capability, $10/$50 per MTok
+//   default = claude-opus-4-8  — complex reasoning, agentic coding, $5/$25 per MTok
+//   light   = claude-sonnet-4-6 — speed + intelligence balance, $3/$15 per MTok
+//   utility = claude-haiku-4-5  — fastest, cheapest, for subtasks, $1/$5 per MTok
 const DEFAULTS: RoutingConfig = {
   enabled: true,
-  default: "claude-sonnet-4-6",
-  heavy:   "claude-opus-4-8",
-  light:   "claude-haiku-4-5",
+  default: "claude-opus-4-8",
+  heavy:   "claude-fable-5",
+  light:   "claude-sonnet-4-6",
   utility: "claude-haiku-4-5",
   aliases: {
+    fable:  "claude-fable-5",
     opus:   "claude-opus-4-8",
     sonnet: "claude-sonnet-4-6",
     haiku:  "claude-haiku-4-5",
@@ -519,8 +526,10 @@ export class ModelRouterPiece implements Piece {
 }
 
 function shortName(model: string): string {
-  if (model.includes("opus")) return "Opus";
+  if (model.includes("fable"))  return "Fable";
+  if (model.includes("mythos")) return "Mythos";
+  if (model.includes("opus"))   return "Opus";
   if (model.includes("sonnet")) return "Sonnet";
-  if (model.includes("haiku")) return "Haiku";
+  if (model.includes("haiku"))  return "Haiku";
   return model;
 }

@@ -37,6 +37,12 @@ interface SessionBucket {
   lastCacheRead: number;
   lastCacheCreate: number;
   lastModel: string | null;
+  /** Timestamp of the last usage event that set lastModel. Drives the
+   *  "most recent model across buckets" aggregation — without it, the
+   *  aggregate picked the last-INSERTED bucket's model (Map iteration
+   *  order), showing stale models when background sessions (actors,
+   *  mnemosyne) ran on a different model than the active chat session. */
+  lastModelAt: number;
   requestHistory: RequestSnapshot[];
 }
 
@@ -215,6 +221,7 @@ export class AnthropicMetricsHud implements Piece {
         lastCacheRead: 0,
         lastCacheCreate: 0,
         lastModel: null,
+        lastModelAt: 0,
         requestHistory: [],
       };
       this.buckets.set(sessionId, b);
@@ -236,7 +243,10 @@ export class AnthropicMetricsHud implements Piece {
     b.lastRequestTokens = reqInput + reqCacheCreate + reqCacheRead;
     b.lastCacheRead = reqCacheRead;
     b.lastCacheCreate = reqCacheCreate;
-    if (d.model) b.lastModel = d.model as string;
+    if (d.model) {
+      b.lastModel = d.model as string;
+      b.lastModelAt = Date.now();
+    }
     b.requestCount++;
 
     b.requestHistory.push({
@@ -378,9 +388,16 @@ export class AnthropicMetricsHud implements Piece {
       agg.lastCacheCreate = last.cacheCreation;
     }
 
-    // lastModel = most recently seen model across all buckets
+    // lastModel = model from the bucket with the most RECENT usage event.
+    // Comparing by lastModelAt (not Map insertion order) — otherwise any
+    // later-created background bucket (actor, mnemosyne) would shadow the
+    // active session's model in the HUD display.
+    let newestAt = -1;
     for (const b of this.buckets.values()) {
-      if (b.lastModel) agg.lastModel = b.lastModel;
+      if (b.lastModel && b.lastModelAt > newestAt) {
+        newestAt = b.lastModelAt;
+        agg.lastModel = b.lastModel;
+      }
     }
 
     return agg;
@@ -397,6 +414,7 @@ export class AnthropicMetricsHud implements Piece {
       lastCacheRead: 0,
       lastCacheCreate: 0,
       lastModel: null,
+      lastModelAt: 0,
       requestHistory: [],
     };
   }

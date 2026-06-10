@@ -1,18 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useHudPiece } from '../../hooks/useHudStream'
 
-// Known models with display labels
-const MODEL_LABELS: Record<string, { label: string; note: string }> = {
-  'claude-opus-4-8':    { label: 'Opus 4.8',   note: '1M · Max' },
-  'claude-opus-4-7':    { label: 'Opus 4.7',   note: '1M · Max' },
-  'claude-opus-4-6':    { label: 'Opus 4.6',   note: '1M · Max' },
-  'claude-sonnet-4-6':  { label: 'Sonnet 4.6', note: '1M · High' },
-  'claude-haiku-4-5':   { label: 'Haiku 4.5',  note: '200K · Fast' },
-  'gpt-4o':             { label: 'GPT-4o',     note: 'OpenAI' },
-  'gpt-4o-mini':        { label: 'GPT-4o Mini',note: 'OpenAI · Fast' },
-  'gpt-4.1':            { label: 'GPT-4.1',    note: 'OpenAI' },
-  'o3':                 { label: 'o3',          note: 'OpenAI · Reason' },
-  'o4-mini':            { label: 'o4-mini',     note: 'OpenAI · Fast' },
+interface ModelMeta {
+  id: string
+  label: string
+  note: string
+  provider: string
 }
 
 interface ModelPickerProps {
@@ -22,7 +15,7 @@ interface ModelPickerProps {
 
 export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
   const [open, setOpen] = useState(false)
-  const [available, setAvailable] = useState<string[]>([])
+  const [catalog, setCatalog] = useState<ModelMeta[]>([])
   const [sessionModel, setSessionModel] = useState<string | null>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
@@ -54,9 +47,12 @@ export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
 
   const currentModel = sessionModel ?? globalModel
 
-  // Populate model list from known config (mirrors getValidModels() in config/index.ts)
+  // Fetch model catalog from backend — single source of truth from config/index.ts
   useEffect(() => {
-    setAvailable(Object.keys(MODEL_LABELS))
+    fetch('/chat/models')
+      .then(r => r.json())
+      .then((data: ModelMeta[]) => setCatalog(data))
+      .catch(() => {})
   }, [])
 
   // Close dropdown when clicking outside
@@ -81,7 +77,7 @@ export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
     }).catch(() => {})
   }, [sessionId, sendUrl])
 
-  const meta = MODEL_LABELS[currentModel]
+  const meta = catalog.find(m => m.id === currentModel)
   const displayLabel = meta?.label ?? currentModel
   const displayNote = meta?.note ?? ''
 
@@ -104,8 +100,7 @@ export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
             <span className="modelPickerSearchLabel">Select model</span>
           </div>
           <div className="modelPickerList">
-            {available.map(id => {
-              const m = MODEL_LABELS[id]
+            {catalog.map(({ id, label, note }) => {
               const isActive = id === currentModel
               return (
                 <button
@@ -113,8 +108,8 @@ export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
                   className={`modelPickerItem${isActive ? ' active' : ''}`}
                   onClick={() => selectModel(id)}
                 >
-                  <span className="modelPickerItemLabel">{m?.label ?? id}</span>
-                  {m?.note && <span className="modelPickerItemNote">{m.note}</span>}
+                  <span className="modelPickerItemLabel">{label}</span>
+                  {note && <span className="modelPickerItemNote">{note}</span>}
                   {isActive && <span className="modelPickerItemCheck">✓</span>}
                 </button>
               )

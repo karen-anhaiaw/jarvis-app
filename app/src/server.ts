@@ -210,6 +210,19 @@ export class HttpServer {
       return;
     }
 
+    if (req.url === "/chat/models" && req.method === "GET") {
+      // Import is synchronous-safe here: config/index.ts is already loaded at
+      // startup. We use a dynamic import only to avoid circular-ref issues at
+      // module level; the Promise resolves immediately from the module cache.
+      import("./config/index.js").then(({ getModelCatalog }) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(getModelCatalog()));
+      }).catch(() => {
+        res.writeHead(500); res.end();
+      });
+      return;
+    }
+
     if (req.url === "/hud/hide" && req.method === "POST") {
       let body = "";
       req.on("data", (chunk) => { body += chunk; });
