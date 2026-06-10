@@ -219,6 +219,11 @@ export function ChatPanel({
           setStreamingText(prev => {
             if (prev) {
               setEntries(msgs => [...msgs, { kind: 'message', role: 'assistant', text: prev, source: data.source, session: data.session }])
+            } else if (data.fullText) {
+              // No deltas accumulated (slash commands, non-streaming paths) —
+              // render the payload's fullText directly. Without this branch the
+              // result of /model, /compact etc. was silently dropped.
+              setEntries(msgs => [...msgs, { kind: 'message', role: 'assistant', text: data.fullText, source: data.source, session: data.session }])
             }
             return ''
           })

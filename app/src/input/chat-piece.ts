@@ -324,8 +324,14 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
           slashCmd.handler(cmdArgs?.trim() ?? "", { sessionId: sid }).then((result) => {
             if (result.message) this.broadcast(sid, { type: "done", fullText: result.message, source: "system", session: sid });
             if (result.inject) log.info({ cmd: cmdName, injectLength: result.inject.length }, "ChatPiece: slash command injected content");
+            // Slash commands never reach JarvisCore, so no session_state:idle is
+            // ever emitted for them. The UI sets isThinking=true on the 'user'
+            // event and ONLY session_state clears it (done doesn't, by design) —
+            // without this, the chat shows "thinking..." forever after any slash.
+            this.broadcast(sid, { type: "session_state", state: "idle", session: sid });
           }).catch((err) => {
             this.broadcast(sid, { type: "error", error: `Slash command error: ${err}`, source: "system", session: sid });
+            this.broadcast(sid, { type: "session_state", state: "idle", session: sid });
           });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true }));
