@@ -155,6 +155,7 @@ async function main() {
   // clear_session — clears only the calling session (memory + disk), archives first
   capabilityRegistry.register({
     name: "clear_session",
+    category: "system",
     description: "Archive and clear saved conversation history. Sessions are rolled to sessions/archive/ with timestamps before clearing. Next restart will start fresh with no memory of previous messages.",
     input_schema: { type: "object", properties: {} },
     handler: async (input) => {
@@ -171,6 +172,7 @@ async function main() {
   // Model management tools — now provider-aware
   capabilityRegistry.register({
     name: "model_set",
+    category: "model",
     description: `Switch the AI model. Examples: claude-sonnet-4-6, claude-opus-4-8, claude-opus-4-7, gpt-4o, gpt-4o-mini, o3. Anthropic models use Claude, others use OpenAI-compatible API.`,
     input_schema: {
       type: "object",
@@ -190,6 +192,7 @@ async function main() {
   });
   capabilityRegistry.register({
     name: "model_get",
+    category: "model",
     description: "Get the current AI model and provider being used.",
     input_schema: { type: "object", properties: {} },
     handler: async () => ({

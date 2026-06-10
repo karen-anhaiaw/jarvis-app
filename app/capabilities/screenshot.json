@@ -1,9 +1,12 @@
 {
   "name": "hud_screenshot",
+  "category": "hud",
   "description": "Take a screenshot of the JARVIS HUD window. Returns the image as PNG for visual analysis.",
   "type": "script",
   "command": "bash",
-  "args": ["capabilities/scripts/screenshot.sh"],
+  "args": [
+    "capabilities/scripts/screenshot.sh"
+  ],
   "input_schema": {
     "type": "object",
     "properties": {}

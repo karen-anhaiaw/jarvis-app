@@ -1,16 +1,33 @@
 {
   "name": "read_file",
+  "category": "filesystem",
   "description": "Read a file. For text files: returns numbered lines with offset/limit support. For images (PNG, JPG, GIF, WebP): returns the image for visual analysis. For PDFs: extracts text content. Use absolute paths.",
   "type": "script",
   "command": "bash",
-  "args": ["capabilities/scripts/read-file.sh", "${path}", "${offset}", "${limit}"],
+  "args": [
+    "capabilities/scripts/read-file.sh",
+    "${path}",
+    "${offset}",
+    "${limit}"
+  ],
   "input_schema": {
     "type": "object",
     "properties": {
-      "path": { "type": "string", "description": "Absolute path to the file" },
-      "offset": { "type": "number", "description": "Start reading from this line (0-based). Default: 0" },
-      "limit": { "type": "number", "description": "Max number of lines to return. Default: 2000" }
+      "path": {
+        "type": "string",
+        "description": "Absolute path to the file"
+      },
+      "offset": {
+        "type": "number",
+        "description": "Start reading from this line (0-based). Default: 0"
+      },
+      "limit": {
+        "type": "number",
+        "description": "Max number of lines to return. Default: 2000"
+      }
     },
-    "required": ["path"]
+    "required": [
+      "path"
+    ]
   }
 }

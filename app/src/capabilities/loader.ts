@@ -20,6 +20,9 @@ interface CapabilityConfig {
   args?: string[];
   stdin?: string;
   input_schema: Record<string, unknown>;
+  /** Slash-menu category, declared in the tool's JSON definition (F3.15).
+   *  Lives WITH the tool definition so the registry stays name-agnostic. */
+  category?: string;
 }
 
 const CAPABILITIES_DIR = join(process.cwd(), "capabilities");
@@ -236,6 +239,7 @@ The user's home directory is ${process.env.HOME}. Current working directory is $
       name: config.name,
       description: config.description,
       input_schema: config.input_schema,
+      category: config.category,
       supportsProgress: true,
       handler: async (input, onProgress) => {
         const sessionId = input.__sessionId as string | undefined;

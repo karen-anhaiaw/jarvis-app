@@ -552,6 +552,8 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
 
       this.registry.register({
         name: toolName,
+        // Explicit for clarity — the `mcp__` prefix fallback would also apply.
+        category: "mcp",
         description: tool.description ?? `Tool ${tool.name} from MCP server ${server.name}`,
         input_schema: (tool.inputSchema as Record<string, unknown>) ?? { type: "object", properties: {} },
         handler: async (input) => {
@@ -591,6 +593,7 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
   private registerManagementTools(): void {
     this.registry.register({
       name: "mcp_list",
+      category: "mcp",
       description: "List all configured MCP servers with their connection status",
       input_schema: { type: "object", properties: {}, required: [] },
       handler: async () => {
@@ -606,6 +609,7 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
 
     this.registry.register({
       name: "mcp_connect",
+      category: "mcp",
       description: "Connect to a configured MCP server by name",
       input_schema: {
         type: "object",
@@ -617,6 +621,7 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
 
     this.registry.register({
       name: "mcp_login",
+      category: "mcp",
       description: "Authenticate with an MCP server that requires OAuth login. Opens browser for auth flow.",
       input_schema: {
         type: "object",
@@ -628,6 +633,7 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
 
     this.registry.register({
       name: "mcp_disconnect",
+      category: "mcp",
       description: "Disconnect from a connected MCP server",
       input_schema: {
         type: "object",
@@ -639,6 +645,7 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
 
     this.registry.register({
       name: "mcp_refresh",
+      category: "mcp",
       description: "Reload mcp.json config — picks up new servers or removes deleted ones without restarting JARVIS",
       input_schema: { type: "object", properties: {}, required: [] },
       handler: async () => this.refreshConfig(),

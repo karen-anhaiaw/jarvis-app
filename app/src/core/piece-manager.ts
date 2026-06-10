@@ -17,6 +17,7 @@ import type { CapabilityRegistry } from "../capabilities/registry.js";
 import { load, save, getPieceSettings, setPieceSettings, isProtected, type Settings } from "./settings.js";
 import { graphRegistry } from "./graph-registry.js";
 import { log } from "../logger/index.js";
+import { DEFAULT_SESSION } from "./constants.js";
 
 export class PieceManager {
   readonly pieces: Map<string, Piece>;
@@ -87,7 +88,7 @@ export class PieceManager {
       const text = isDockerIssue
         ? `[SYSTEM] **${name}** não conseguiu iniciar — Docker não está disponível ou o container não existe.\n\n${err}\n\nInicie o Docker e rode \`jarvis_reset\` para tentar novamente.`
         : `[SYSTEM] Piece **${name}** (${id}) failed to start: ${err}\n\nThe piece has been isolated. JARVIS continues normally without it.`;
-      this.bus.publish({ channel: "ai.request", source: "system", target: "main", text } as any);
+      this.bus.publish({ channel: "ai.request", source: "system", target: DEFAULT_SESSION, text } as any);
     }
     this.startupFailures = [];
   }
@@ -267,6 +268,7 @@ export class PieceManager {
   private registerTools(): void {
     this.registry.register({
       name: "piece_list",
+      category: "hud",
       description: "List all JARVIS pieces with their enabled/running/visible status.",
       input_schema: { type: "object", properties: {} },
       handler: async () => {
@@ -283,6 +285,7 @@ export class PieceManager {
 
     this.registry.register({
       name: "piece_enable",
+      category: "hud",
       description: "Enable and start a JARVIS piece. Use piece_list to see available pieces.",
       input_schema: {
         type: "object",
@@ -294,6 +297,7 @@ export class PieceManager {
 
     this.registry.register({
       name: "piece_disable",
+      category: "hud",
       description: "Disable and stop a JARVIS piece. Protected pieces cannot be disabled.",
       input_schema: {
         type: "object",
@@ -305,6 +309,7 @@ export class PieceManager {
 
     this.registry.register({
       name: "hud_show",
+      category: "hud",
       description: "Show a HUD panel that was previously hidden.",
       input_schema: {
         type: "object",
@@ -316,6 +321,7 @@ export class PieceManager {
 
     this.registry.register({
       name: "hud_hide",
+      category: "hud",
       description: "Hide a HUD panel without disabling the piece.",
       input_schema: {
         type: "object",
@@ -327,6 +333,7 @@ export class PieceManager {
 
     this.registry.register({
       name: "hud_layout",
+      category: "hud",
       description: "Set position and size of a HUD panel. Persists to settings so it survives restarts.",
       input_schema: {
         type: "object",

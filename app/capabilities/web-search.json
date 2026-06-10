@@ -1,15 +1,28 @@
 {
   "name": "web_search",
+  "category": "web",
   "description": "Search the web using DuckDuckGo and return results with titles, URLs, and snippets. Use for current events, documentation lookups, or any information beyond your training data.",
   "type": "script",
   "command": "bash",
-  "args": ["capabilities/scripts/web-search.sh", "${query}", "${max_results}"],
+  "args": [
+    "capabilities/scripts/web-search.sh",
+    "${query}",
+    "${max_results}"
+  ],
   "input_schema": {
     "type": "object",
     "properties": {
-      "query": { "type": "string", "description": "Search query" },
-      "max_results": { "type": "number", "description": "Maximum number of results to return (default: 5, max: 10)" }
+      "query": {
+        "type": "string",
+        "description": "Search query"
+      },
+      "max_results": {
+        "type": "number",
+        "description": "Maximum number of results to return (default: 5, max: 10)"
+      }
     },
-    "required": ["query"]
+    "required": [
+      "query"
+    ]
   }
 }

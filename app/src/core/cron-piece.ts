@@ -589,6 +589,7 @@ export class CronPiece implements Piece {
   private registerTools(): void {
     this.registry.register({
       name: "cron_create",
+      category: "cron",
       description: "Schedule a prompt to run on a timer. Two modes: 'prompt' (default) sends the prompt to the calling session's LLM; 'delegate' spawns a cheap ephemeral worker (Haiku/Sonnet) directly with no LLM in the loop and posts the result to reply_to. Supports '*/N * * * *' (interval), 'once:Ns/Nm' (one-shot), 'HH:MM' or '0 H * * *' (daily), 'M H * * 1-5' (weekly). Target is always the calling session — never passed by the LLM. Use catch_up:true for daily/weekly jobs that must not miss executions across restarts.",
       input_schema: {
         type: "object",
@@ -597,7 +598,7 @@ export class CronPiece implements Piece {
           prompt: { type: "string", description: "The prompt or task description to execute at each trigger" },
           recurring: { type: "boolean", description: "true for recurring (default), false for one-shot" },
           mode: { type: "string", enum: ["prompt", "delegate"], description: "'prompt' (default): sends prompt to the calling session's LLM. 'delegate': runs an ephemeral worker (DelegateTaskPiece) directly — no LLM in the loop, result posted to reply_to session." },
-          role: { type: "string", description: "delegate mode only: role for the worker (default: nu-discovery-agent)" },
+          role: { type: "string", description: "delegate mode only: role for the worker (default: settings delegate.defaultRole, fallback 'generic')" },
           model: { type: "string", description: "delegate mode only: model override for the worker (e.g. 'haiku', 'sonnet')" },
           reply_to: { type: "string", description: "delegate mode only: session to receive the result (default: calling session)" },
           catch_up: { type: "boolean", description: "If true, runs immediately on restore if a scheduled slot was missed (daily/weekly only). Default: false." },
@@ -651,6 +652,7 @@ export class CronPiece implements Piece {
 
     this.registry.register({
       name: "cron_list",
+      category: "cron",
       description: "List all scheduled cron jobs.",
       input_schema: { type: "object", properties: {} },
       handler: async () => ({
@@ -669,6 +671,7 @@ export class CronPiece implements Piece {
 
     this.registry.register({
       name: "cron_delete",
+      category: "cron",
       description: "Delete a scheduled cron job by ID.",
       input_schema: {
         type: "object",

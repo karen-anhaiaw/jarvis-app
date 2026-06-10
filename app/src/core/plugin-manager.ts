@@ -22,6 +22,7 @@ interface HttpServerLike {
 import { load as loadSettings, save as saveSettings, removeKey, type PluginSettings } from "./settings.js";
 import { graphRegistry } from "./graph-registry.js";
 import { log } from "../logger/index.js";
+import { DEFAULT_SESSION } from "./constants.js";
 
 const PLUGINS_DIR = join(process.env.HOME ?? "~", ".jarvis", "plugins");
 
@@ -180,7 +181,7 @@ export class PluginManager implements Piece {
       this.bus.publish({
         channel: "ai.request",
         source: "system",
-        target: "main",
+        target: DEFAULT_SESSION,
         text: `[SYSTEM] Plugin **${name}** failed to load: ${err}\n\nThe plugin has been skipped. JARVIS continues normally without it.`,
       } as any);
     }
@@ -309,6 +310,9 @@ export class PluginManager implements Piece {
             name: config.name,
             description: `[${manifest.name}] ${config.description}`,
             input_schema: config.input_schema,
+            // Declarative category pass-through (F3.15): plugin JSON tools may
+            // declare their own slash-menu group; omitted → registry fallback.
+            category: config.category,
             handler: this.createToolHandler(config, pluginDir),
           });
           loaded.tools.push(config.name);
@@ -550,6 +554,7 @@ export class PluginManager implements Piece {
   private registerTools(): void {
     this.registry.register({
       name: "plugin_install",
+      category: "plugins",
       description: "Install a JARVIS plugin from a GitHub repo. Clones to ~/.jarvis/plugins/ and loads tools/prompts. IMPORTANT: Installation is NOT considered successful until the relevant functional tests from functional-test.md have been executed and pass. After calling this tool, you MUST read the plugin's functional-test.md and execute ALL BDD scenarios — every single one, no exceptions, no skipping.",
       input_schema: {
         type: "object",
@@ -561,6 +566,7 @@ export class PluginManager implements Piece {
 
     this.registry.register({
       name: "plugin_list",
+      category: "plugins",
       description: "List all installed JARVIS plugins.",
       input_schema: { type: "object", properties: {} },
       handler: async () => {
@@ -584,6 +590,7 @@ export class PluginManager implements Piece {
 
     this.registry.register({
       name: "plugin_update",
+      category: "plugins",
       description: "Update a plugin by pulling latest from git.",
       input_schema: {
         type: "object",
@@ -595,6 +602,7 @@ export class PluginManager implements Piece {
 
     this.registry.register({
       name: "plugin_enable",
+      category: "plugins",
       description: "Enable a disabled plugin.",
       input_schema: {
         type: "object",
@@ -615,6 +623,7 @@ export class PluginManager implements Piece {
 
     this.registry.register({
       name: "plugin_disable",
+      category: "plugins",
       description: "Disable an installed plugin (keeps files, stops loading).",
       input_schema: {
         type: "object",
@@ -644,6 +653,7 @@ export class PluginManager implements Piece {
 
     this.registry.register({
       name: "plugin_remove",
+      category: "plugins",
       description: "Remove a plugin completely (deletes files and settings).",
       input_schema: {
         type: "object",
@@ -705,7 +715,7 @@ export class PluginManager implements Piece {
       this.bus.publish({
         channel: "ai.request",
         source: this.id,
-        target: "main",
+        target: DEFAULT_SESSION,
         text: msg,
       });
       log.info({ outdated }, "PluginManager: outdated plugins found");

@@ -5,6 +5,11 @@ export interface CapabilityDefinition {
   description: string;
   input_schema: Record<string, unknown>;
   handler: CapabilityHandler;
+  /** Optional slash-menu grouping (e.g. "filesystem", "hud", "mcp").
+   *  Declared by the registrar; when omitted the registry applies structural
+   *  fallbacks: `mcp__`-prefixed names → "mcp", else "general".
+   *  Added in 0.7.0 — optional, older plugins keep working without it. */
+  category?: string;
 }
 
 export interface CapabilityCall {

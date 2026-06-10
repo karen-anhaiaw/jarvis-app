@@ -1,9 +1,12 @@
 {
   "name": "multi_edit_file",
+  "category": "filesystem",
   "description": "Apply multiple edits atomically to one or more files. All edits succeed or all are rolled back. Supports str_replace, insert (by line number), and delete_lines. Use dry_run=true to preview changes without applying. Returns unified diff and before/after content for each file. Set show_diff=true to present the diff to the user in the HUD for review — they can Accept or Reject, and you receive a [SYSTEM] message with their decision. The edits are applied immediately; show_diff is for user visibility and feedback, not gating.",
   "type": "script",
   "command": "python3",
-  "args": ["capabilities/scripts/multi-edit-file.py"],
+  "args": [
+    "capabilities/scripts/multi-edit-file.py"
+  ],
   "stdin": "${__json_input__}",
   "input_schema": {
     "type": "object",
@@ -26,7 +29,11 @@
                 "properties": {
                   "type": {
                     "type": "string",
-                    "enum": ["str_replace", "insert", "delete_lines"],
+                    "enum": [
+                      "str_replace",
+                      "insert",
+                      "delete_lines"
+                    ],
                     "description": "Operation type"
                   },
                   "old_string": {
@@ -54,11 +61,16 @@
                     "description": "For delete_lines: last line to delete (1-indexed, inclusive)"
                   }
                 },
-                "required": ["type"]
+                "required": [
+                  "type"
+                ]
               }
             }
           },
-          "required": ["path", "operations"]
+          "required": [
+            "path",
+            "operations"
+          ]
         }
       },
       "dry_run": {
@@ -70,6 +82,8 @@
         "description": "If true, automatically show the diff in the HUD panel (default: false)"
       }
     },
-    "required": ["edits"]
+    "required": [
+      "edits"
+    ]
   }
 }
