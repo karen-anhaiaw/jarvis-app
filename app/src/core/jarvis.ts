@@ -91,6 +91,47 @@ export function buildDispatchText(opts: {
   return reminder + opts.text;
 }
 
+// ─── Queue drain planning (segmented drain, F2.6) ──────────────────────
+// WHY: drainQueue combines N queued messages into ONE API call for token
+// efficiency. One API call yields ONE response — request-reply messages
+// cannot share a combined turn (whose replyTo would win?), and inter-session
+// attribution preambles are per-message. Pre-mission bug: drain DISCARDED
+// replyTo (request-reply to a busy session never routed back) and skipped
+// attribution. The planner segments the queue: a head message needing solo
+// semantics dispatches alone; otherwise the longest plain prefix combines.
+// The remainder stays queued — consumeStream re-drains after each turn.
+
+export interface QueuedDrainItem {
+  text: string;
+  source: string;
+  replyTo?: string;
+  images?: AIRequestMessage["images"];
+  systems: string[];
+}
+
+export type QueueDrainPlan =
+  | { mode: "solo"; item: QueuedDrainItem }
+  | { mode: "combine"; items: QueuedDrainItem[] };
+
+export function planQueueDrain(
+  queue: QueuedDrainItem[],
+  isLiveSession: (id: string) => boolean,
+): QueueDrainPlan {
+  const needsSolo = (m: QueuedDrainItem): boolean => {
+    const internal = m.source === "chat-input" || m.source === "jarvis-core" || m.source === "cron";
+    // replyTo always demands a dedicated turn (one reply route per API call).
+    // A live-session source demands per-message origin attribution.
+    return !!m.replyTo || (!internal && isLiveSession(m.source));
+  };
+  if (needsSolo(queue[0])) return { mode: "solo", item: queue[0] };
+  const items: QueuedDrainItem[] = [];
+  for (const m of queue) {
+    if (needsSolo(m)) break;
+    items.push(m);
+  }
+  return { mode: "combine", items };
+}
+
 /**
  * Produces a compact, human-readable summary of a tool call's arguments
  * for display in the HUD timeline and chat panel.
@@ -1176,71 +1217,85 @@ export class JarvisCore implements Piece {
     const queue = this.pendingPrompts.get(sessionId);
     if (!queue || queue.length === 0) return;
 
-    // Snapshot the original queued messages BEFORE combining, so the
-    // timeline can render one user entry per original message (preserving
-    // each message's source/label). The backend still combines them into
-    // a single API call to save tokens.
-    const items = queue.map(m => ({
+    // Snapshot queued messages including replyTo (F2.6 — previously DISCARDED
+    // here, breaking request-reply to busy sessions). The planner decides:
+    // solo dispatch (replyTo / inter-session attribution) vs plain combine.
+    const drainItems: QueuedDrainItem[] = queue.map(m => ({
       text: m.text ?? "",
       source: m.source,
+      replyTo: m.replyTo,
       images: (m as any).images,
       systems: Array.isArray((m as any).systems) ? (m as any).systems as string[] : [],
     }));
-    // Compose per-message: each queued msg's reminders prefix its own text,
-    // then all are joined. This preserves the source→reminder coupling — a
-    // voice STT message keeps its `voice_say`-forcing reminder right next to
-    // the transcript that needs it, even when combined with sibling prompts.
-    const combined = items
-      .map(i => {
-        const r = i.systems.length > 0
-          ? i.systems.map(s => `<system-reminder>\n${s}\n</system-reminder>`).join("\n\n") + "\n\n"
-          : "";
-        return r + i.text;
-      })
-      .join("\n\n");
-    const allImages = items.flatMap(i => i.images ?? []);
-    queue.length = 0;
-    // NOTE: do NOT broadcastPendingQueue here — the empty broadcast would
-    // wipe the UI queue display before the messages are actually processed.
-    // The caller (abortSession or consumeStream) already broadcast the
-    // pre-drain snapshot. The UI will clear naturally when items drain.
+    const plan = planQueueDrain(drainItems, (id) => this.sessions.has(id));
 
-    // Drain starts a fresh turn — generate a new traceId so logs separate
-    // the previous turn's tail from this combined dispatch.
+    // Drain starts a fresh turn — new traceId separates it in the logs.
     const traceId = newTraceId();
     this.currentTrace.set(sessionId, traceId);
 
-    log.info({
-      traceId,
-      sessionId,
-      items: items.length,
-      combinedLength: combined.length,
-      images: allImages.length,
-    }, "JarvisCore: draining queued prompts");
+    const composeReminders = (systems: string[]): string => systems.length > 0
+      ? systems.map(s => `<system-reminder>\n${s}\n</system-reminder>`).join("\n\n") + "\n\n"
+      : "";
+
+    let dispatchText: string | import("../ai/types.js").PromptBlock[];
+    let dispatchedItems: QueuedDrainItem[];
+    let images: AIRequestMessage["images"];
+
+    if (plan.mode === "solo") {
+      // Full handlePrompt semantics for ONE message: reply routing +
+      // origin attribution. Remainder stays queued — re-drained when this
+      // turn completes (consumeStream → drainQueue), order preserved.
+      queue.shift();
+      const item = plan.item;
+      if (item.replyTo) this.pendingReplyTo.set(sessionId, item.replyTo);
+      else this.pendingReplyTo.delete(sessionId);
+      dispatchText = buildDispatchText({
+        text: item.text,
+        source: item.source,
+        replyTo: item.replyTo,
+        reminderBlock: composeReminders(item.systems),
+        sourceIsLiveSession: this.sessions.has(item.source),
+      });
+      dispatchedItems = [item];
+      images = item.images;
+      log.info({ traceId, sessionId, source: item.source, replyTo: item.replyTo, remaining: queue.length }, "JarvisCore: draining queued prompt (solo — reply/attribution semantics)");
+    } else {
+      // Plain combine — same token optimization as before. Per-message
+      // reminders prefix their own text (source→reminder coupling: a voice
+      // STT message keeps its voice_say-forcing reminder next to its
+      // transcript even when combined with sibling prompts).
+      queue.splice(0, plan.items.length);
+      // Combined turns have no reply route — clear any stale entry.
+      this.pendingReplyTo.delete(sessionId);
+      dispatchText = plan.items.map(i => composeReminders(i.systems) + i.text).join("\n\n");
+      dispatchedItems = plan.items;
+      const allImages = plan.items.flatMap(i => i.images ?? []);
+      images = allImages.length > 0 ? allImages : undefined;
+      log.info({ traceId, sessionId, items: plan.items.length, remaining: queue.length }, "JarvisCore: draining queued prompts (combined)");
+    }
 
     // Signal "processing" to the frontend BEFORE emitting prompt_dispatched
     // so the thinking indicator lights up before the user entry appears.
     // We do NOT push onto the stack here — dispatchToSession will push.
-    // Only update the HUD-side sessionStates map and broadcast SSE; the
-    // SessionManager stack is left for dispatchToSession to manage.
-    log.info({ sessionId, traceId, queueItems: items.length }, "JarvisCore: drainQueue — pre-broadcast processing (no stack push)");
     this.setSessionState(sessionId, "processing");
     this.updateHud();
     this.broadcastSessionState(sessionId, "processing");
 
-    // Emit one prompt_dispatched per original queued message — the timeline
-    // renders each as its own user entry with its own source label.
-    this.broadcastPromptDispatched(sessionId, items);
+    // One prompt_dispatched per dispatched message — timeline renders each
+    // as its own user entry with its own source label.
+    this.broadcastPromptDispatched(sessionId, dispatchedItems.map(i => ({
+      text: i.text,
+      source: i.source,
+      images: i.images,
+    })));
 
-    // Queue is now empty — tell the UI to clear the pending list.
+    // Broadcast the post-splice snapshot — possibly non-empty (segmented
+    // drain leaves the remainder queued for the next turn).
     this.broadcastPendingQueue(sessionId);
 
-    // Send the combined prompt to the AI. We bypass handlePrompt because
-    // (a) the queue branch would re-queue (session is already processing),
-    // and (b) prompt_dispatched was already emitted above for the original
-    // items. dispatchToSession will call setState("processing") again at its
-    // top — that is a no-op since we already set it here.
-    void this.dispatchToSession(sessionId, combined, allImages.length > 0 ? allImages : undefined);
+    // Bypass handlePrompt: (a) queue branch would re-queue (session already
+    // processing), (b) prompt_dispatched already emitted for these items.
+    void this.dispatchToSession(sessionId, dispatchText, images);
   }
 
   /**

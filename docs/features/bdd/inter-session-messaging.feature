@@ -47,3 +47,36 @@ Feature: Inter-session message attribution and reply routing
     Given an ai.request with source "actor-alice", replyTo "main", text "hi" and one system reminder "be brief"
     When the dispatch text is built
     Then block 1 starts with the <system-reminder> block followed by "hi"
+
+  # ── Queued messages (drainQueue) — F2.6 ─────────────────────────────────
+  # WHY: drainQueue combines N queued messages into ONE API call for token
+  # efficiency. But one API call produces ONE response — request-reply
+  # messages cannot share a combined turn (whose replyTo wins?), and
+  # inter-session attribution is per-message. Pre-mission bug: drain
+  # DISCARDED replyTo entirely (request-reply to a busy session never
+  # routed back) and skipped attribution. Fix: segmented drain.
+
+  Scenario: Plain user messages still combine into one API call
+    Given a session queue with 3 messages from "chat-input" and no replyTo
+    When the queue is drained
+    Then all 3 messages combine into a single dispatch
+
+  Scenario: A queued message with replyTo dispatches SOLO with reply routing
+    Given a session queue whose head message has source "actor-alice" and replyTo "main"
+    When the queue is drained
+    Then the head message dispatches alone
+    And its replyTo routing is registered (the response will be routed to "main")
+    And its dispatch text carries the origin + reply instruction preamble
+
+  Scenario: A queued inter-session fire-and-forget message dispatches SOLO with attribution
+    Given a session queue whose head message has a live-session source and no replyTo
+    When the queue is drained
+    Then the head message dispatches alone
+    And its dispatch text carries the origin-only preamble
+
+  Scenario: Mixed queue drains in segments preserving order
+    Given a session queue with [plain, plain, replyTo-message, plain]
+    When the queue is drained
+    Then the first dispatch combines the 2 plain messages
+    And the remaining [replyTo-message, plain] stay queued for the next drain
+    # consumeStream re-drains after each turn completes — order is preserved.
