@@ -104,31 +104,31 @@ Table linking to the four child pages with one-line descriptions each.
 
 **Audience:** Engineer wanting to run JARVIS today  
 **Tone:** Step-by-step guide  
+**Scope:** Core JARVIS only — no plugins
 
 ### Sections
 1. **Pré-requisitos** — Node 18+, Git, API key (Anthropic or OpenAI)
 2. **Instalação** — `git clone` + `./setup.sh` walkthrough
 3. **Configurar provider** — Anthropic vs OpenAI, how to switch at runtime
 4. **Trocar modelo** — ask JARVIS directly ("switch to gpt-4o")
-5. **Instalar plugin de voz** — voice plugin quick-install
-6. **MCP servers** — `mcp.json` config, connecting external services
-7. **settings.json vs settings.user.json** — two-layer settings system
-8. **macOS app** — creating JARVIS.app in Applications folder
+5. **settings.json vs settings.user.json** — two-layer settings system
+6. **macOS app** — creating JARVIS.app in Applications folder
 
 ---
 
 ## Child Page 3: `Plugins & Capabilities`
 
-**Audience:** Engineer wanting to install or discover extensions  
+**Audience:** Engineer wanting to install, configure, or discover extensions  
 **Tone:** Reference + discovery  
+**Scope:** Everything that extends JARVIS beyond the core
 
 ### Sections
 1. **O que é um Plugin** — GitHub repo with `plugin.json`, hot-loaded, no build step
 2. **Como instalar** — ask JARVIS or register in `settings.user.json`
-3. **Marketplace** — available plugins (voice, skills, etc.)
+3. **Marketplace** — available plugins (voice, skills, etc.) with install command for each
 4. **Capabilities built-in** — filesystem (bash, read/write/edit, glob, grep), web (search, fetch), scheduling (cron), model switching, restart
 5. **Skills** — what they are, how to invoke, how to create in `~/.jarvis/skills/`
-6. **MCP** — connecting external services (Slack, Jira, Prometheus, etc.)
+6. **MCP** — `mcp.json` config, connecting external services (Slack, Jira, Prometheus, etc.)
 
 ---
 
