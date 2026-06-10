@@ -8,6 +8,7 @@ import type { Piece } from "../core/piece.js";
 import type { HudUpdateMessage } from "../core/types.js";
 import type { CapabilityRegistry } from "./registry.js";
 import { abortRegistry } from "./abort-registry.js";
+import { stripExecutorContext } from "./executor.js";
 import { log } from "../logger/index.js";
 
 const execFileAsync = promisify(execFile);
@@ -254,10 +255,13 @@ The user's home directory is ${process.env.HOME}. Current working directory is $
         );
 
         // Resolve stdin template if defined
-        // Special case: ${__json_input__} sends the entire input as JSON
+        // Special case: ${__json_input__} sends the entire input as JSON —
+        // minus executor context fields (__sessionId/__toolUseId/__traceId):
+        // scripts receive only declared tool arguments (F4.17; verified no
+        // script in capabilities/scripts reads the __ fields).
         const stdinData = config.stdin
           ? config.stdin === "${__json_input__}"
-            ? JSON.stringify(input)
+            ? JSON.stringify(stripExecutorContext(input))
             : config.stdin.replace(/\$\{(\w+)\}/g, (_, key) => String(input[key] ?? ""))
           : undefined;
 

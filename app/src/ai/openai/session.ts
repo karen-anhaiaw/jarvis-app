@@ -23,6 +23,9 @@ export class OpenAISession implements AISession {
   private getTools: () => CapabilityDef[];
   private messages: Message[] = [];
   private label: string;
+  /** Trace id of the CURRENT turn — set by JarvisCore (duck-typed, F4.17).
+   *  Mirrors AnthropicSession; log-correlation only, not on AISession. */
+  private turnTraceId?: string;
   private abortController?: AbortController;
 
   // ── Model routing (ModelRouter support) ──────────────────────────────
@@ -63,6 +66,12 @@ export class OpenAISession implements AISession {
     this.label = opts.label;
     this.bus = opts.bus;
     log.info({ label: this.label, sessionId: this.sessionId }, "OpenAISession: created");
+  }
+
+  /** Set the trace id for the upcoming turn (F4.17). Called by JarvisCore via
+   *  duck-typing; pass undefined to clear. Used purely for log correlation. */
+  setTurnTraceId(traceId: string | undefined): void {
+    this.turnTraceId = traceId;
   }
 
   // ── Model routing ─────────────────────────────────────────────────────
@@ -225,7 +234,7 @@ export class OpenAISession implements AISession {
     // Pick a streaming verb for this request
     const streamingVerb = STREAMING_VERBS[Math.floor(Math.random() * STREAMING_VERBS.length)];
 
-    log.info({ label: this.label, model, messageCount: this.messages.length, toolCount: tools.length }, "OpenAISession: calling API");
+    log.info({ label: this.label, traceId: this.turnTraceId, model, messageCount: this.messages.length, toolCount: tools.length }, "OpenAISession: calling API");
 
     // Announce streaming start (verb + model for the metrics HUD).
     // Internal event — intentionally NOT in the public AIStreamMessage
@@ -355,7 +364,7 @@ export class OpenAISession implements AISession {
         yield { type: "error", error: "aborted" };
         return;
       }
-      log.error({ label: this.label, err }, "OpenAISession: API error");
+      log.error({ label: this.label, traceId: this.turnTraceId, err }, "OpenAISession: API error");
       yield { type: "error", error: String(err) };
     }
   }

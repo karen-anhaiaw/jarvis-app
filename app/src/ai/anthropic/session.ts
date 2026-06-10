@@ -61,6 +61,11 @@ export class AnthropicSession implements AISession {
   private toolFilter?: (toolName: string) => boolean;
   private messages: MessageParam[] = [];
   private label: string;
+  /** Trace id of the CURRENT turn — set by JarvisCore (duck-typed, F4.17)
+   *  right before sendAndStream/continueAndStream so session-internal logs
+   *  correlate with the bus/core logs of the same turn. Deliberately NOT on
+   *  the AISession interface: app-internal concern, no plugin contract. */
+  private turnTraceId?: string;
   /** High-effort tier flag — set once at construction by the FACTORY (F3.12).
    *  true → API effort "max" + usage-log tier "xhigh"; false → "high".
    *  Immutable: effort policy is session-creation policy, never per-turn. */
@@ -209,6 +214,12 @@ export class AnthropicSession implements AISession {
     this.contextInjector = injector;
   }
 
+  /** Set the trace id for the upcoming turn (F4.17). Called by JarvisCore via
+   *  duck-typing; pass undefined to clear. Used purely for log correlation. */
+  setTurnTraceId(traceId: string | undefined): void {
+    this.turnTraceId = traceId;
+  }
+
   /**
    * Resolve the model to use for the NEXT API call. Priority:
    *   1. nextModelOverride (per-call, consumed after read)
@@ -279,6 +290,7 @@ export class AnthropicSession implements AISession {
 
     log.info({
       label: this.label,
+      traceId: this.turnTraceId,
       promptLength: promptBlocks.reduce((n, b) => n + b.text.length, 0),
       promptPreview: promptPreviewText,
       promptBlocks: promptBlocks.length,
@@ -1121,6 +1133,7 @@ export class AnthropicSession implements AISession {
     const ctx = this.measureContext();
     log.info({
       label: this.label,
+      traceId: this.turnTraceId,
       messageCount: ctx.messageCount,
       toolCount: toolNames.length,
       context: {
@@ -1390,6 +1403,7 @@ export class AnthropicSession implements AISession {
       const ctxAfter = this.measureContext();
       log.info({
         label: this.label,
+        traceId: this.turnTraceId,
         ms: Date.now() - t0,
         stopReason: message.stop_reason,
         toolCalls: toolCalls.length,
@@ -1433,7 +1447,7 @@ export class AnthropicSession implements AISession {
         log.warn({ label: this.label }, "AnthropicSession: no images found to strip despite image error");
       }
 
-      log.error({ label: this.label, err }, "AnthropicSession: API error");
+      log.error({ label: this.label, traceId: this.turnTraceId, err }, "AnthropicSession: API error");
       // Build a human-readable error string from the Anthropic SDK error shape.
       // err.status  → HTTP status code (e.g. 529, 529, 400)
       // err.error   → { type: 'error', error: { type: '...', message: '...' } }

@@ -741,6 +741,9 @@ export class JarvisCore implements Piece {
       }, "JarvisCore: *** API CALL START ***");
 
       const images = msgImages?.map(i => ({ label: i.label, base64: i.base64, mediaType: i.mediaType }));
+      // Hand the turn's traceId to the session (duck-typed, F4.17) so
+      // session-internal logs (API call, complete, error) carry it too.
+      (managed.session as { setTurnTraceId?: (id?: string) => void }).setTurnTraceId?.(traceId);
       const stream = managed.session.sendAndStream(text, images);
       await this.consumeStream(sessionId, stream);
     } catch (err: any) {
@@ -870,6 +873,9 @@ export class JarvisCore implements Piece {
     }, "JarvisCore: continuing stream after tool results");
 
     try {
+      // Tool-loop continuation belongs to the SAME turn — refresh the trace
+      // on the session (it may have been cleared or reused meanwhile).
+      (managed.session as { setTurnTraceId?: (id?: string) => void }).setTurnTraceId?.(traceId);
       const stream = managed.session.continueAndStream();
       await this.consumeStream(sessionId, stream);
     } catch (err: any) {

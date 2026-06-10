@@ -16,6 +16,7 @@ import { load as loadSettings, save as saveSettings, invalidateCache } from "./s
 import { graphRegistry } from "./graph-registry.js";
 import { DEFAULT_SESSION } from "./constants.js";
 import { log } from "../logger/index.js";
+import { newTraceId } from "../logger/trace.js";
 
 // NOTE: PieceManager is responsible for registering this piece as a core graph node.
 
@@ -443,25 +444,32 @@ export class CronPiece implements Piece {
   private executeJob(job: CronJob): void {
     job.runs++;
     job.lastRun = Date.now();
+    // One traceId per FIRE (F4.17): the fire log and every publish caused by
+    // this fire (prompt request, delegate result, dead-target warning) share
+    // the same id, so a scheduled turn is filterable end-to-end like a chat
+    // turn. Without this the bus would auto-fill a DIFFERENT id per publish,
+    // breaking the linkage between "executing job" and the downstream turn.
+    const traceId = newTraceId();
     log.info(
-      { jobId: job.id, mode: job.mode ?? "prompt", prompt: job.prompt.slice(0, 50), runs: job.runs, lastRun: new Date(job.lastRun).toISOString() },
+      { jobId: job.id, traceId, mode: job.mode ?? "prompt", prompt: job.prompt.slice(0, 50), runs: job.runs, lastRun: new Date(job.lastRun).toISOString() },
       "CronPiece: executing job",
     );
 
     if (job.mode === "delegate") {
-      this.executeDelegateJob(job);
+      this.executeDelegateJob(job, traceId);
     } else {
       // Fire-time target validation (G2): never publish into a dead session —
       // that would materialize a phantom with the default prompt.
       const plan = planPromptFire(job.target, (id) => this.isSessionAlive(id));
       if (plan.action === "skip-warn") {
-        this.warnDeadTarget(job);
+        this.warnDeadTarget(job, traceId);
       } else {
         this.bus.publish({
           channel: "ai.request",
           source: "cron",
           target: job.target,
           text: `[CRON job "${job.id}"] ${job.prompt}`,
+          traceId,
         } as any);
       }
     }
@@ -480,9 +488,9 @@ export class CronPiece implements Piece {
     }
   }
 
-  private executeDelegateJob(job: CronJob): void {
+  private executeDelegateJob(job: CronJob, traceId: string): void {
     if (!this.delegatePiece) {
-      log.warn({ jobId: job.id }, "CronPiece: delegate mode but DelegateTaskPiece not injected — skipping");
+      log.warn({ jobId: job.id, traceId }, "CronPiece: delegate mode but DelegateTaskPiece not injected — skipping");
       return;
     }
 
@@ -509,11 +517,12 @@ export class CronPiece implements Piece {
         source: "cron",
         target: reply.target,
         text,
+        traceId,
       } as any);
 
-      log.info({ jobId: job.id, replyTo: reply.target, redirected: reply.redirected, chars: summary.length, error }, "CronPiece: delegate job completed");
+      log.info({ jobId: job.id, traceId, replyTo: reply.target, redirected: reply.redirected, chars: summary.length, error }, "CronPiece: delegate job completed");
     }).catch((err: unknown) => {
-      log.error({ jobId: job.id, err }, "CronPiece: delegate job crashed");
+      log.error({ jobId: job.id, traceId, err }, "CronPiece: delegate job crashed");
     });
   }
 
@@ -528,14 +537,15 @@ export class CronPiece implements Piece {
    *  The LLM receiving it is instructed to ask the user keep-vs-delete.
    *  Warns once per job (deadWarned flag) — recurring jobs would otherwise
    *  spam the default session on every fire. */
-  private warnDeadTarget(job: CronJob): void {
-    log.warn({ jobId: job.id, target: job.target, runs: job.runs }, "CronPiece: target session no longer exists — fire skipped");
+  private warnDeadTarget(job: CronJob, traceId: string): void {
+    log.warn({ jobId: job.id, traceId, target: job.target, runs: job.runs }, "CronPiece: target session no longer exists — fire skipped");
     if (job.deadWarned) return;
     job.deadWarned = true;
     this.bus.publish({
       channel: "ai.request",
       source: "cron",
       target: DEFAULT_SESSION,
+      traceId,
       text: [
         `[CRON job "${job.id}"] SKIPPED — target session "${job.target}" no longer exists.`,
         `The job's prompt was NOT executed and will keep being skipped while the target is gone.`,

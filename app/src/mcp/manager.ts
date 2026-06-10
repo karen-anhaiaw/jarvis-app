@@ -11,6 +11,7 @@ import type { EventBus } from "../core/bus.js";
 import type { SystemEventMessage, HudUpdateMessage } from "../core/types.js";
 import type { CapabilityRegistry } from "../capabilities/registry.js";
 import { abortRegistry } from "../capabilities/abort-registry.js";
+import { stripExecutorContext } from "../capabilities/executor.js";
 import type { Piece } from "../core/piece.js";
 import { log } from "../logger/index.js";
 import { JarvisOAuthProvider } from "./oauth.js";
@@ -559,9 +560,11 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
         handler: async (input) => {
           const sessionId = input.__sessionId as string | undefined;
           const toolUseId = input.__toolUseId as string | undefined;
+          const traceId = input.__traceId as string | undefined;
           // Strip executor-injected context fields — MCP servers must only
-          // receive the tool's declared arguments.
-          const { __sessionId: _, __toolUseId: __, ...args } = input;
+          // receive the tool's declared arguments (shared helper, F4.17).
+          const args = stripExecutorContext(input);
+          log.debug({ tool: toolName, sessionId, traceId }, "McpManager: tool call");
           // Per-tool abort: parallel MCP calls each get their own controller.
           const signal = sessionId ? abortRegistry.register(sessionId, toolUseId) : new AbortController().signal;
           try {

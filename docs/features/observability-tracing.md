@@ -46,12 +46,17 @@ writes). Functional greps keep working — `msg` content still matches.
 | Provider sessions (Anthropic, OpenAI) | Duck-typed optional `setTurnTraceId(id)` on the concrete session classes, called by JarvisCore before `sendAndStream`/`continueAndStream`. Session includes it in key logs (entry, API call, complete, error). Deliberately NOT added to the `AISession` interface in @jarvis/core — app-internal concern; promote only if plugins need it |
 | SessionManager | NO signature changes — state transitions are already logged by JarvisCore's per-turn child (item 18) with traceId. Changing `setState(...)` would ripple the public SessionManager interface for marginal gain |
 
-### 5. Per-turn child logger in JarvisCore (item 18)
+### 5. Per-turn correlation in JarvisCore (item 18) — SATISFIED AS-IS
 
-`handlePrompt`/`dispatchToSession`/`consumeStream` derive
-`turnLog = log.child({ traceId, sessionId })` once per turn and use it for all
-turn-scoped logs — removes ~15 hand-threaded `traceId` fields and guarantees
-no turn log is missing correlation. Depends on (2).
+Original plan: refactor to `turnLog = log.child({ traceId, sessionId })`.
+Decision (2026-06-11): NOT implemented. Evidence: ef362f8 already hand-threads
+`traceId` + `sessionId` into every turn-scoped log call in jarvis.ts, and (1)
+now delivers those fields to the ring buffer as `ctx`. The BDD goal ("every
+JarvisCore log line of the turn carries ctx.traceId and ctx.sessionId") is met
+by existing code + item 1. A child-logger sweep across ~40 call sites in a
+1500-line state machine is cosmetic DRY with real regression risk — rejected.
+Revisit only if new turn-scoped logs start missing the fields (the proxied
+child() from item 2 is ready if we ever want it).
 
 ## Invariants
 

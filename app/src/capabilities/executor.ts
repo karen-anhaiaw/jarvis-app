@@ -5,6 +5,22 @@ import type { CapabilityRequestMessage, CapabilityResultMessage, HudUpdateMessag
 import type { Piece } from "../core/piece.js";
 import { log } from "../logger/index.js";
 
+/**
+ * Remove executor-injected context fields (`__sessionId`, `__toolUseId`,
+ * `__traceId`) from a tool input. MUST be applied before forwarding the
+ * input to anything outside the process boundary — MCP servers, spawned
+ * scripts (`__json_input__` stdin), HTTP bodies — so internal correlation
+ * ids never leak into external systems (F4.17, invariant 2 of
+ * docs/features/observability-tracing.md). Shared by mcp/manager and
+ * capabilities/loader; single source of truth for the strip list.
+ */
+export function stripExecutorContext(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const { __sessionId: _s, __toolUseId: _t, __traceId: _tr, ...rest } = input;
+  return rest;
+}
+
 export class CapabilityExecutor implements Piece {
   readonly id = "capability-executor";
   readonly name = "Capability Executor";
@@ -77,11 +93,22 @@ export class CapabilityExecutor implements Piece {
     const t0 = Date.now();
     log.info({ sessionId, traceId, count: calls.length, names: calls.map(c => c.name) }, "CapabilityExecutor: executing");
 
-    // Inject sessionId + toolUseId into inputs so capabilities know the
-    // calling context. __toolUseId lets handlers register per-tool abort
+    // Inject sessionId + toolUseId + traceId into inputs so capabilities know
+    // the calling context. __toolUseId lets handlers register per-tool abort
     // controllers in the AbortRegistry (parallel tools must not collide —
-    // registry.execute runs calls via Promise.all).
-    const enrichedCalls = calls.map(c => ({ ...c, input: { ...c.input, __sessionId: sessionId, __toolUseId: c.id } }));
+    // registry.execute runs calls via Promise.all). __traceId (F4.17) lets
+    // handler-side logs correlate with the originating turn; handlers MUST
+    // strip all __ fields before forwarding input to external processes /
+    // MCP servers — use stripExecutorContext().
+    const enrichedCalls = calls.map(c => ({
+      ...c,
+      input: {
+        ...c.input,
+        __sessionId: sessionId,
+        __toolUseId: c.id,
+        ...(traceId ? { __traceId: traceId } : {}),
+      },
+    }));
 
     // Progress callback — publishes tool_progress on ai.stream so the chat
     // timeline can show live stdout while the tool is running.
@@ -107,7 +134,10 @@ export class CapabilityExecutor implements Piece {
       source: "capability-executor",
       target: sessionId,
       results,
-    });
+      // Propagate the turn's traceId on the result leg (F4.17) so the
+      // request→execute→result chain shares one id end-to-end.
+      ...(traceId ? { traceId } : {}),
+    } as any);
 
     this.bus.publish({
       channel: "hud.update",
