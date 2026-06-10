@@ -61,6 +61,10 @@ export class AnthropicSession implements AISession {
   private toolFilter?: (toolName: string) => boolean;
   private messages: MessageParam[] = [];
   private label: string;
+  /** High-effort tier flag — set once at construction by the FACTORY (F3.12).
+   *  true → API effort "max" + usage-log tier "xhigh"; false → "high".
+   *  Immutable: effort policy is session-creation policy, never per-turn. */
+  private readonly highEffort: boolean;
   private abortController?: AbortController;
   private contextInjector?: (sessionId: string) => string[] | Promise<string[]>;
   private bus?: EventBus;
@@ -113,8 +117,14 @@ export class AnthropicSession implements AISession {
      *  otherwise generate a fresh one. Either way, it is fixed for the lifetime
      *  of this session and embedded in defaultHeaders below. */
     restoredSessionId?: string;
+    /** High-effort tier: "xhigh" reasoning + "max" output effort. Set by the
+     *  FACTORY (policy lives there, next to other session-creation policy) —
+     *  the provider must not know magic session names (F3.12: the old code
+     *  hardcoded `label === "main"` here). Default: false (standard tier). */
+    highEffort?: boolean;
   }) {
     this._sessionId = opts.restoredSessionId ?? crypto.randomUUID();
+    this.highEffort = opts.highEffort ?? false;
     // One Anthropic client per session, with NuLLM/LiteLLM identity headers
     // mirroring Claude Code CLI so traffic is attributed to the `claude_code`
     // bucket in nullm_vendor_usage_by_event (AI Tools Dashboard pipeline).
@@ -163,7 +173,7 @@ export class AnthropicSession implements AISession {
     logUsage({
       sessionId: this.label,
       instanceId: this.sessionId,
-      effort: this.label === "main" ? "xhigh" : "high",
+      effort: this.highEffort ? "xhigh" : "high",
       model: modelUsed,
       input_tokens: usage.input_tokens,
       output_tokens: usage.output_tokens,
@@ -1155,10 +1165,11 @@ export class AnthropicSession implements AISession {
         betas.push("effort-2025-11-24");
       }
 
-      // effort: "max" for main session (highest available), "high" for actors/subagents.
-      // NOTE: some models don't support "xhigh" — use "max" which is universally
-      // accepted by all models that support the effort-2025-11-24 beta header.
-      const effort = modelSupportsEffort ? (this.label === "main" ? "max" : "high") : undefined;
+      // effort: "max" for high-effort sessions (factory marks the default
+      // session), "high" for actors/subagents. NOTE: some models don't support
+      // "xhigh" — use "max" which is universally accepted by all models that
+      // support the effort-2025-11-24 beta header.
+      const effort = modelSupportsEffort ? (this.highEffort ? "max" : "high") : undefined;
 
       // metadata.user_id: mirrors CC pattern — session_id for backend cache optimization
       const metadata = { user_id: JSON.stringify({ session_id: this.sessionId }) };

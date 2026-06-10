@@ -5,6 +5,7 @@ import type { AISession, AISessionFactory, CreateWithPromptOptions } from "../ty
 import type { EventBus } from "../../core/bus.js";
 import { AnthropicSession } from "./session.js";
 import { config } from "../../config/index.js";
+import { DEFAULT_SESSION } from "../../core/constants.js";
 import { log } from "../../logger/index.js";
 
 type CapabilityDef = { name: string; description: string; input_schema: Record<string, unknown> };
@@ -96,6 +97,10 @@ export class AnthropicSessionFactory implements AISessionFactory {
       label,
       bus: this.bus,
       restoredSessionId,
+      // Effort policy (F3.12): the human-facing default session gets the top
+      // tier; actors/subagents run "high". Policy lives HERE — the provider
+      // session must not interpret magic label names.
+      highEffort: label === DEFAULT_SESSION,
     });
   }
 
@@ -167,6 +172,8 @@ export class AnthropicSessionFactory implements AISessionFactory {
       label,
       bus: this.bus,
       restoredSessionId: options?.restoredSessionId,
+      // Effort policy (F3.12): see createWithPrompt — same rule, one place.
+      highEffort: label === DEFAULT_SESSION,
     });
 
     if (options?.restoreMessages && options.restoreMessages.length > 0) {
