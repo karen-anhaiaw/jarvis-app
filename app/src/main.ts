@@ -225,6 +225,54 @@ async function main() {
     },
   });
 
+  /**
+   * Drives a session's forceCompact() stream to completion, forwarding
+   * compaction events to the bus (chat banner + metrics) and saving the
+   * compacted session. Shared by the /compact slash command and the HTTP
+   * compact endpoint — previously two verbatim copies of this loop (review
+   * finding D1, mission jarvis-fix F2.5). Caller-specific guards (session
+   * exists, provider support, idle check) and result delivery (return
+   * message vs broadcastEvent) stay at the call sites.
+   */
+  const runCompaction = async (sessionId: string): Promise<void> => {
+    const managed = sessions.get(sessionId);
+    const stream = managed.session.forceCompact!();
+    for await (const event of stream) {
+      if (event.type === "compaction_start" && event.compactionStart) {
+        bus.publish({
+          channel: "ai.stream",
+          source: "jarvis-core",
+          target: sessionId,
+          event: "compaction_start",
+          compactionStart: event.compactionStart,
+        } as any);
+      } else if (event.type === "compaction" && event.compaction) {
+        // ai.stream → chat timeline banner; system.event → metrics HUD
+        bus.publish({
+          channel: "ai.stream",
+          source: "jarvis-core",
+          target: sessionId,
+          event: "compaction",
+          compaction: event.compaction,
+        } as any);
+        bus.publish({
+          channel: "system.event",
+          source: "jarvis-core",
+          event: "compaction",
+          data: {
+            sessionId,
+            engine: event.compaction.engine,
+            tokensBefore: event.compaction.tokensBefore,
+            tokensAfter: event.compaction.tokensAfter,
+            summaryLength: event.compaction.summary.length,
+          },
+        });
+      }
+    }
+    // Persist the compacted history (skips ephemeral sessions)
+    sessions.save(sessionId);
+  };
+
   // /compact slash command — force context compaction (Engine B) on the CALLING session.
   // Handler receives ctx.sessionId from ChatPiece, so it acts on whichever session
   // typed the slash (main, actor-X, etc) instead of hardcoding "main".
@@ -250,43 +298,7 @@ async function main() {
 
       chatPiece.broadcastEvent(sessionId, { type: "system", text: "⏳ Compacting context…", session: sessionId });
 
-      const stream = managed.session.forceCompact();
-      for await (const event of stream) {
-        if (event.type === "compaction_start" && event.compactionStart) {
-          bus.publish({
-            channel: "ai.stream",
-            source: "jarvis-core",
-            target: sessionId,
-            event: "compaction_start",
-            compactionStart: event.compactionStart,
-          } as any);
-        } else if (event.type === "compaction" && event.compaction) {
-          // Publish compaction events to the bus so metrics and chat timeline update
-          bus.publish({
-            channel: "ai.stream",
-            source: "jarvis-core",
-            target: sessionId,
-            event: "compaction",
-            compaction: event.compaction,
-          } as any);
-
-          bus.publish({
-            channel: "system.event",
-            source: "jarvis-core",
-            event: "compaction",
-            data: {
-              sessionId,
-              engine: event.compaction.engine,
-              tokensBefore: event.compaction.tokensBefore,
-              tokensAfter: event.compaction.tokensAfter,
-              summaryLength: event.compaction.summary.length,
-            },
-          });
-        }
-      }
-
-      // Save the compacted session (skips ephemeral)
-      sessions.save(sessionId);
+      await runCompaction(sessionId);
 
       return { message: `✅ Context compacted successfully (${sessionId}).` };
     },
@@ -436,41 +448,8 @@ async function main() {
 
     chatPiece.broadcastEvent(sessionId, { type: "system", text: "⏳ Compacting context…", session: sessionId });
 
-    const stream = managed.session.forceCompact();
-    for await (const event of stream) {
-      if (event.type === "compaction_start" && event.compactionStart) {
-        bus.publish({
-          channel: "ai.stream",
-          source: "jarvis-core",
-          target: sessionId,
-          event: "compaction_start",
-          compactionStart: event.compactionStart,
-        } as any);
-      } else if (event.type === "compaction" && event.compaction) {
-        bus.publish({
-          channel: "ai.stream",
-          source: "jarvis-core",
-          target: sessionId,
-          event: "compaction",
-          compaction: event.compaction,
-        } as any);
+    await runCompaction(sessionId);
 
-        bus.publish({
-          channel: "system.event",
-          source: "jarvis-core",
-          event: "compaction",
-          data: {
-            sessionId,
-            engine: event.compaction.engine,
-            tokensBefore: event.compaction.tokensBefore,
-            tokensAfter: event.compaction.tokensAfter,
-            summaryLength: event.compaction.summary.length,
-          },
-        });
-      }
-    }
-
-    sessions.save(sessionId);
     chatPiece.broadcastEvent(sessionId, { type: "system", text: "✅ Context compacted.", session: sessionId });
   });
   pluginManager.setHttpServer(server);
