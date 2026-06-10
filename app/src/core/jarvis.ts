@@ -246,6 +246,37 @@ export class JarvisCore implements Piece {
     return this.turns;
   }
 
+  /**
+   * Reactor state for the HUD orb, derived DIRECTLY from globalState — the
+   * source of truth (F6 hud-truth, design decision #3). HudState pulls this
+   * via setReactorSource instead of reading its own jarvis-core panel copy
+   * (which arrives via hud.update and can lag or drop).
+   */
+  getReactorState(): { status: string; coreLabel: string; coreSubLabel: string } {
+    return {
+      status: this.globalState,
+      coreLabel: this.globalState.toUpperCase().replace("_", " "),
+      coreSubLabel: "",
+    };
+  }
+
+  /**
+   * Current desired HUD panel state — the reconciliation producer snapshot
+   * (F6). MUST mirror the `add` published in start() so a reconcile re-add
+   * heals to an identical panel.
+   */
+  getHudSnapshot(): import("./piece.js").HudPieceData {
+    return {
+      pieceId: this.id,
+      type: "overlay",
+      name: this.name,
+      status: this.globalState,
+      data: this.getData(),
+      position: { x: 650, y: 30 },
+      size: { width: 220, height: 260 },
+    };
+  }
+
   private getTrace(sessionId: string): string | undefined {
     return this.currentTrace.get(sessionId);
   }

@@ -44,8 +44,8 @@ These are consumed by plugins and must remain backward compatible:
 - `window.__JARVIS_HUD_HOOKS` — `{ useHudState, useHudPiece, useHudReactor }` (added in 2.0)
 
 #### HTTP Endpoints (consumed by plugins via `registerRoute` and `fetch`)
-- `GET /hud` — full HUD state snapshot (JSON)
-- `GET /hud-stream` — SSE delta stream (added in 2.0)
+- `GET /hud` — full HUD state snapshot (JSON). Components additionally carry `rev` (per-panel monotonic revision) and `updatedAt` (epoch ms of last content change) since app F6 — additive, safe to ignore.
+- `GET /hud-stream` — SSE delta stream (added in 2.0). Deltas additionally carry `rev` since app F6 — additive; clients without rev logic keep working.
 - `POST /chat/send` — body `{ sessionId, prompt, images? }` — **sessionId required (0.2.2)**
 - `GET /chat-stream?sessionId=X` — SSE chat event stream scoped to `sessionId` — **required (0.2.2)**
 - `GET /chat/history?sessionId=X` — message history for UI hydration — **sessionId required (0.2.2)**

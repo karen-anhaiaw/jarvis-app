@@ -416,6 +416,15 @@ async function main() {
 
   const hudState = new HudState(bus);
 
+  // ─── HUD truth (F6) ───
+  // Reactor pull-direct: the orb reads JarvisCore.globalState — the source
+  // of truth — instead of HudState's panel copy (which can lag/drop).
+  hudState.setReactorSource(() => jarvisCore.getReactorState());
+  // Reconciliation: jarvis-core registers as the first producer; lost adds
+  // and content drift self-heal every ~10s. Other pieces opt in as needed.
+  hudState.registerProducer("jarvis-core", () => jarvisCore.getHudSnapshot());
+  hudState.startReconciliation();
+
   // Activate initial provider AFTER HudState exists (so metrics HUD registers)
   await providerRouter.switchTo(getCurrentProvider(), bus);
   sessions.updateFactory(providerRouter.getFactory());
@@ -547,6 +556,7 @@ async function main() {
     shuttingDown = true;
     log.info({ reason }, "Shutting down...");
     try {
+      hudState.stopReconciliation();
       sessions.stopAutoSave();
       // Stop pieces FIRST — actor-runner cleans up ephemeral sessions before we save
       await pieceManager.stopAll();

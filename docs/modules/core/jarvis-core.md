@@ -145,6 +145,12 @@ Called by the Piece orchestrator after ALL pieces have started. Transitions `glo
 
 ---
 
+### `getReactorState()` / `getHudSnapshot()` (F6 hud-truth)
+
+`getReactorState()` derives the HUD orb state DIRECTLY from `globalState` — HudState pulls it via `setReactorSource` instead of trusting its panel copy. `getHudSnapshot()` returns the current desired jarvis-core panel (mirrors the start() `add`) — registered as the first reconciliation producer in main.ts. See `docs/modules/core/hud-state.md`.
+
+---
+
 ### `abortSession(sessionId: string): void`
 
 Aborts the current turn for a session. Called by `POST /chat/abort` (user pressing ESC).
