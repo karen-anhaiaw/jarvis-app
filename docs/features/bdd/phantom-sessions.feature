@@ -57,20 +57,32 @@ Feature: Phantom session prevention
     And the message notes it was redirected from "actor-dead"
 
   # ── G3: bus_publish target validation ───────────────────────────────────
+  # NOTE: bus_publish is registered by jarvis-plugin-actors (actor-pool.ts),
+  # not by app core. Validation is implemented THERE (target + reply_to are
+  # checked against SessionManager.has(); errors list active sessions).
+  # These scenarios document the contract the plugin must uphold; they are
+  # exercised by the plugin's functional-test.md, not by app unit tests.
 
   Scenario: bus_publish to an existing session passes through
     Given a session named "actor-alice" exists
     When bus_publish is called with channel "ai.request" and target "actor-alice"
     Then the message is published
 
-  Scenario: bus_publish to an unknown ai.request target is rejected
+  Scenario: bus_publish to an unknown target is rejected (any channel)
     Given no session named "actor-alic" exists
-    When bus_publish is called with channel "ai.request" and target "actor-alic"
-    Then the call returns an error mentioning "does not exist"
+    When bus_publish is called with target "actor-alic"
+    Then the call returns ok false with an error mentioning "Session not found"
     And the error lists the active session ids
     And no message is published
     And no session named "actor-alic" was created
 
-  Scenario: bus_publish to non-ai.request channels is not target-validated
-    When bus_publish is called with channel "system.event" and target "anything"
+  Scenario: bus_publish to an unknown reply_to is rejected
+    Given no session named "actor-ghost" exists
+    When bus_publish is called with a valid target and reply_to "actor-ghost"
+    Then the call returns ok false with an error mentioning "reply_to session not found"
+
+  Scenario: bus_publish to "main" is always allowed even before it materializes
+    Given the default session has not been created yet (fresh restart)
+    When bus_publish is called with channel "ai.request" and target "main"
     Then the message is published
+    # "main" owns the default prompt — creating it on demand is by design.
