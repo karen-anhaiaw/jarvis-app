@@ -134,7 +134,20 @@ function mergeSections<T>(
   return result;
 }
 
-function deepMerge(base: Settings, override: Settings): Settings {
+/**
+ * FIELD-EXPLICIT merge of the two settings layers (default + user).
+ *
+ * ⚠️ MAINTENANCE TRAP: this is NOT a generic deep merge — every top-level
+ * Settings field MUST be listed here explicitly or it is silently DROPPED
+ * from load() even when present in the JSON files. Proven in production:
+ * `delegate` was added to the interface (F3.13) but not here, so the user's
+ * settings.user.json value vanished (caught in F3 live validation,
+ * 2026-06-11). When adding a field to `Settings`, add it here AND to
+ * settings-merge.test.ts.
+ *
+ * Exported for unit tests only — not part of any public plugin API.
+ */
+export function deepMerge(base: Settings, override: Settings): Settings {
   return {
     pieces: mergeSections(base.pieces, override.pieces),
     plugins: mergeSections(base.plugins, override.plugins),
@@ -147,6 +160,7 @@ function deepMerge(base: Settings, override: Settings): Settings {
     cron: {
       jobs: { ...base.cron?.jobs, ...override.cron?.jobs },
     },
+    delegate: override.delegate ?? base.delegate,
   };
 }
 
