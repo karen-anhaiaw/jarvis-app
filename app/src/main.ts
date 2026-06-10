@@ -55,6 +55,7 @@ import { HudCoreNodePiece } from "./core/hud-core-node.js";
 import { DiffViewerPiece } from "./pieces/diff-viewer.js";
 import { ChoicePromptPiece } from "./pieces/choice-prompt.js";
 import { ModelRouterPiece } from "./pieces/model-router.js";
+import { TurnInspectorPiece } from "./pieces/turn-inspector.js";
 import { DelegateTaskPiece } from "./pieces/delegate-task.js";
 import { load as loadSettingsForSlash } from "./core/settings.js";
 import { ensureUiBuildIntegrity } from "./server.js";
@@ -117,6 +118,7 @@ async function main() {
     new CapabilityLoaderPiece(capabilityRegistry),
     new McpManager(capabilityRegistry),
     new GrpcPiece(capabilityRegistry),
+    new TurnInspectorPiece(),
     chatPiece,
   ];
 

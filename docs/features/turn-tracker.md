@@ -150,15 +150,17 @@ dispatch/continuation catch ──error──▶ close (outcome=error) → publi
 
 ## Files
 
-- `app/src/core/turn-tracker.ts` — tracker (new)
-- `app/src/core/turn-tracker.test.ts` — unit tests vs BDD (new)
-- `app/src/core/jarvis.ts` — hook calls (begin/firstDelta/roundTrip/tools*/complete/abort/error)
-- `app/src/ai/types.ts` — `CapabilityResult.durationMs?`
-- `app/src/capabilities/registry.ts` — fill `durationMs` per call
+- `app/src/core/turn-tracker.ts` — tracker (new); exports `nearestRankPercentile`
+- `app/src/core/turn-tracker.test.ts` — tracker + pricing unit tests vs BDD (new)
+- `app/src/core/jarvis.ts` — hook calls (begin/textDelta/roundTrip/tools*/complete/abort/error)
+- `app/src/ai/types.ts` + `packages/core/src/tools.ts` — `CapabilityResult.durationMs?`
+- `app/src/capabilities/registry.ts` — fill `durationMs` per call (+ registry.test.ts scenarios)
 - `app/src/ai/pricing.ts` — family pricing + `estimateCostUsd` (new)
-- `app/src/pieces/turn-inspector.ts` — HUD piece (new)
-- `app/ui/src/components/renderers/TurnInspectorRenderer.tsx` — panel renderer (new)
-- `packages/core/src/types.ts` — `TurnSummary`, `TurnToolStat` (MINOR 2.1.0)
+- `app/src/pieces/turn-inspector.ts` — HUD piece (new, + turn-inspector.test.ts)
+- `app/ui/src/components/renderers/TurnInspectorRenderer.tsx` — panel renderer (new, registered in renderers/index.ts)
+- `app/src/main.ts` — TurnInspectorPiece in the pieces array
+- `packages/core/src/types.ts` — `TurnSummary`, `TurnToolStat` (MINOR 0.8.0)
+- `docs/modules/core/turn-tracker.md` + `docs/modules/pieces/turn-inspector.md` — module docs
 
 ## BDD
 

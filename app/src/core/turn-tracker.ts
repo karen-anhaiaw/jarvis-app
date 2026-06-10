@@ -61,6 +61,17 @@ export interface TurnTrackerOptions {
 
 const DEFAULT_CAPACITY = 50;
 
+/**
+ * Nearest-rank percentile over an ASCENDING-sorted array.
+ * Exported pure helper — shared by the tracker and the turn-inspector piece
+ * (which keeps its own buffer and must derive the same metrics).
+ * Returns undefined for empty input.
+ */
+export function nearestRankPercentile(sortedAsc: number[], p: number): number | undefined {
+  if (sortedAsc.length === 0) return undefined;
+  return sortedAsc[Math.max(0, Math.ceil(p * sortedAsc.length) - 1)];
+}
+
 export class TurnTracker {
   private open = new Map<string, OpenTurn>(); // sessionId → open turn
   private buffer: TurnSummary[] = [];          // newest LAST internally
@@ -204,8 +215,11 @@ export class TurnTracker {
       .filter((d): d is number => typeof d === "number")
       .sort((a, b) => a - b);
     if (durations.length === 0) return { count: 0 };
-    const rank = (p: number) => durations[Math.max(0, Math.ceil(p * durations.length) - 1)];
-    return { p50: rank(0.5), p95: rank(0.95), count: durations.length };
+    return {
+      p50: nearestRankPercentile(durations, 0.5),
+      p95: nearestRankPercentile(durations, 0.95),
+      count: durations.length,
+    };
   }
 
   // ─── Internals ───────────────────────────────────────────────────────
