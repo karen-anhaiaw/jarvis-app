@@ -44,7 +44,7 @@ import type { Piece } from "./core/piece.js";
 import { log } from "./logger/index.js";
 import { clearAllConversations } from "./core/conversation-store.js";
 import { launchHud } from "./transport/hud/electron.js";
-import { config, setModel, getValidModels, getCurrentProvider } from "./config/index.js";
+import { config, setModel, getValidModels, getCurrentProvider, getProviderForModel } from "./config/index.js";
 import { ProviderRouter } from "./ai/provider.js";
 import { createAnthropicProvider } from "./ai/anthropic/provider.js";
 import { createOpenAIProvider } from "./ai/openai/provider.js";
@@ -314,9 +314,16 @@ async function main() {
       const aliases = { opus: "claude-opus-4-8", sonnet: "claude-sonnet-4-6", haiku: "claude-haiku-4-5", ...(cfg.aliases ?? {}) };
       const target = aliases[arg.toLowerCase()] ?? arg;
 
-      // If the target model belongs to a different provider, switch it first
-      const switchResult = setModel(target);
-      if (switchResult.providerChanged) {
+      // Same-provider switches are SESSION-SCOPED: only the sticky route for
+      // this session changes — config.model / settings.model stay untouched so
+      // other sessions and the new-session default keep their own models.
+      // Cross-provider needs the global switch (factory swap is process-wide).
+      // Bug fixed 2026-06-10: setModel() ran unconditionally here, so every
+      // /model (incl. the UI picker) leaked the choice globally — new sessions
+      // and unpinned factory sessions silently inherited it.
+      const targetProvider = getProviderForModel(target);
+      if (targetProvider !== getCurrentProvider()) {
+        const switchResult = setModel(target);
         await providerRouter.switchTo(switchResult.provider, bus);
         sessions.updateFactory(providerRouter.getFactory());
         sessions.setProvider(switchResult.provider);
