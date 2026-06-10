@@ -404,20 +404,44 @@ export class AnthropicSession implements AISession {
    *   Total: 4 — exactly Anthropic's limit, all stable.
    */
   private placeMessageCacheBreakpoint(): void {
+    // Block types that do NOT support cache_control — Anthropic API rejects
+    // cache_control on thinking/redacted_thinking blocks (returns 400
+    // "Extra inputs are not permitted"). This surfaces when claude-fable-5 or
+    // other thinking-capable models leave a thinking block as the last content
+    // block in an assistant message.
+    const NON_CACHEABLE_BLOCK_TYPES = new Set(["thinking", "redacted_thinking"]);
+
     // Find the most recent assistant message (scan from the end).
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const m = this.messages[i];
       if (m.role !== "assistant") continue;
       if (!Array.isArray(m.content) || m.content.length === 0) continue;
-      const lastBlock = m.content[m.content.length - 1] as any;
-      if (lastBlock && typeof lastBlock === "object") {
-        lastBlock.cache_control = { type: "ephemeral" };
+
+      // Walk backwards through blocks to find the last cacheable one.
+      // Thinking/redacted_thinking blocks don't accept cache_control.
+      let anchorBlock: any | undefined;
+      for (let j = m.content.length - 1; j >= 0; j--) {
+        const block = m.content[j] as any;
+        if (block && typeof block === "object" && !NON_CACHEABLE_BLOCK_TYPES.has(block.type)) {
+          anchorBlock = block;
+          break;
+        }
+      }
+
+      if (anchorBlock) {
+        anchorBlock.cache_control = { type: "ephemeral" };
         log.debug({
           label: this.label,
           anchorMsgIdx: i,
-          anchorBlockType: lastBlock.type,
+          anchorBlockType: anchorBlock.type,
           msgsAfterAnchor: this.messages.length - 1 - i,
         }, "AnthropicSession: placed message cache breakpoint");
+      } else {
+        // All blocks are non-cacheable (all thinking) — skip this message.
+        log.debug({
+          label: this.label,
+          anchorMsgIdx: i,
+        }, "AnthropicSession: skipping message cache breakpoint (all blocks are non-cacheable thinking blocks)");
       }
       return;
     }
