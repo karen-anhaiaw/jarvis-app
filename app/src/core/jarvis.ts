@@ -31,6 +31,7 @@ import { newTraceId, preview } from "../logger/trace.js";
 import { config } from "../config/index.js";
 import { graphRegistry } from "./graph-registry.js";
 import { DEFAULT_SESSION } from "./constants.js";
+import { TurnTracker } from "./turn-tracker.js";
 
 // ─── Inter-session dispatch text (attribution + reply routing) ────────────
 // WHY: when session A publishes ai.request into session B, B's LLM must know
@@ -229,6 +230,22 @@ export class JarvisCore implements Piece {
    *  continuation) so the whole turn shares one id in the logs. */
   private currentTrace = new Map<string, string>();
 
+  /**
+   * Per-turn lifecycle aggregator (F5, Pillar B). Instantiated in start()
+   * with the live bus. Called DIRECTLY at the turn hook sites (begin /
+   * textDelta / roundTrip / toolsDispatched / toolsCompleted / complete /
+   * abort / error) — see docs/features/turn-tracker.md for why it is not
+   * a bus subscriber. Public via the getter for introspection (jarvis_eval,
+   * turn-inspector initial snapshot).
+   */
+  private turns!: TurnTracker;
+
+  /** Turn tracker — exposed for introspection (jarvis_eval) and the
+   *  turn-inspector piece's initial snapshot. Available after start(). */
+  get turnTracker(): TurnTracker {
+    return this.turns;
+  }
+
   private getTrace(sessionId: string): string | undefined {
     return this.currentTrace.get(sessionId);
   }
@@ -325,6 +342,9 @@ export class JarvisCore implements Piece {
    */
   async start(bus: EventBus): Promise<void> {
     this.bus = bus;
+    this.turns = new TurnTracker({
+      publish: (m) => this.bus.publish(m as Parameters<EventBus["publish"]>[0]),
+    });
 
     this.bus.subscribe<AIRequestMessage>("ai.request", (msg) => {
       if (msg.target) {
@@ -562,6 +582,10 @@ export class JarvisCore implements Piece {
       traceId,
     } as any);
 
+    // Close the open turn as aborted (no traceId needed — closes whatever
+    // is open for this session; idempotent if already closed).
+    this.turns.abort(sessionId);
+
     // Trace ends — clear so the next turn starts with a fresh id.
     this.currentTrace.delete(sessionId);
 
@@ -637,6 +661,8 @@ export class JarvisCore implements Piece {
     }
 
     this.currentTrace.set(sessionId, traceId);
+    // Turn opens here — one TurnSummary per traceId (F5).
+    this.turns.begin(sessionId, traceId, msg.source);
 
     /**
      * Compose optional per-turn system reminders (msg.systems?: string[]).
@@ -748,6 +774,10 @@ export class JarvisCore implements Piece {
       await this.consumeStream(sessionId, stream);
     } catch (err: any) {
       log.info({ sessionId, traceId }, "JarvisCore: dispatchToSession error — popState");
+      // Close the turn as error; fall back to abort-style close when the
+      // trace was already cleared (defensive — keeps the one-summary invariant).
+      if (traceId) this.turns.error(sessionId, traceId, String(err));
+      else this.turns.abort(sessionId);
       this.sessions.popState(sessionId);
       this.setSessionState(sessionId, "idle");
       this.updateHud();
@@ -832,6 +862,16 @@ export class JarvisCore implements Piece {
 
     managed.session.addToolResults(pendingCalls, results);
 
+    // Stamp per-tool durations/errors on the turn (durationMs measured by
+    // the registry per call — see CapabilityResult.durationMs).
+    if (traceId) {
+      this.turns.toolsCompleted(sessionId, traceId, results.map(r => ({
+        tool_use_id: r.tool_use_id,
+        is_error: r.is_error,
+        durationMs: r.durationMs,
+      })));
+    }
+
     // Notify chat of tool completion with output preview
     for (const tc of pendingCalls) {
       const result = results.find(r => r.tool_use_id === tc.id);
@@ -897,6 +937,9 @@ export class JarvisCore implements Piece {
         err: err?.message ?? String(err),
         stack: err?.stack,
       }, "JarvisCore: tool continuation failed");
+      // Close the turn as error (same defensive fallback as dispatchToSession).
+      if (traceId) this.turns.error(sessionId, traceId, String(err));
+      else this.turns.abort(sessionId);
     }
   }
 
@@ -945,6 +988,9 @@ export class JarvisCore implements Piece {
           case "text_delta":
             fullText += event.text ?? "";
             deltaCount++;
+            // Turn-level TTFT + text accumulation. Stale traceIds (turn
+            // aborted and superseded) are ignored inside the tracker.
+            if (traceId) this.turns.textDelta(sessionId, traceId, (event.text ?? "").length);
             if (firstDeltaAt === undefined) {
               firstDeltaAt = Date.now();
               log.info({ traceId, sessionId, ttftMs: firstDeltaAt - tStream0 }, "JarvisCore: first delta received");
@@ -972,6 +1018,18 @@ export class JarvisCore implements Piece {
             break;
           case "message_complete":
             usage = event.usage;
+            // One API round-trip done — accumulate usage on the open turn.
+            // Model: prefer the session's effective model (sticky/override
+            // aware via peekModel) over config.model, which ignores both.
+            if (traceId) {
+              this.turns.roundTrip(
+                sessionId,
+                traceId,
+                event.usage,
+                (event as any).stopReason,
+                this.sessions.peek(sessionId)?.session.peekModel?.() ?? config.model,
+              );
+            }
             log.info({
               traceId,
               sessionId,
@@ -1143,6 +1201,12 @@ export class JarvisCore implements Piece {
 
       const managed = this.sessions.get(sessionId);
       managed.pendingToolCalls = toolCalls;
+      // Register pending tools on the turn (durations stamped on result).
+      // Shortened names — matches the chat timeline display convention.
+      if (traceId) {
+        this.turns.toolsDispatched(sessionId, traceId,
+          toolCalls.map(tc => ({ id: tc.id, name: shortenToolName(tc.name) })));
+      }
       // Pop processing, push waiting_tools — API done, now waiting for tools.
       log.info({
         traceId,
@@ -1227,6 +1291,9 @@ export class JarvisCore implements Piece {
         traceId,
       } as any);
 
+      // Turn closes — exactly one TurnSummary per traceId (F5).
+      if (traceId) this.turns.complete(sessionId, traceId);
+
       // Trace ends here for this turn — clear so a new turn starts fresh.
       this.currentTrace.delete(sessionId);
 
@@ -1288,6 +1355,10 @@ export class JarvisCore implements Piece {
     // Drain starts a fresh turn — new traceId separates it in the logs.
     const traceId = newTraceId();
     this.currentTrace.set(sessionId, traceId);
+    // Turn opens here (drain path). Combined drains merge N messages into
+    // one API call — there is no single source, so they are attributed to
+    // the synthetic "drain:combined" (documented in TurnSummary.source).
+    this.turns.begin(sessionId, traceId, plan.mode === "solo" ? plan.item.source : "drain:combined");
 
     const composeReminders = (systems: string[]): string => systems.length > 0
       ? systems.map(s => `<system-reminder>\n${s}\n</system-reminder>`).join("\n\n") + "\n\n"

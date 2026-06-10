@@ -20,6 +20,7 @@ This package follows **Semantic Versioning (semver)**:
 | **0.5.0** | + `AISession.setStickyModelOverride?` + `AISession.setToolFilter?` | ✅ Unchanged | Additive. Both optional — plugins that don't call them keep working. Actor-runner uses them to apply per-role model + tool restrictions. |
 | **0.6.0** | + `BusMessage.traceId?` | ✅ Unchanged | Additive optional field. Plugins that don't set it keep working — bus auto-fills a fresh id per publish. Plugins that DO set it on the originating publish (and propagate it on follow-ups) get end-to-end log correlation across chat→bus→core→provider→stream. |
 | **0.7.0** | + `CapabilityDefinition.category?` | ✅ Unchanged | Additive optional field. Declarative slash-menu grouping per tool (F3.15). Tools without it fall back to "mcp" (`mcp__` prefix) or "general". Old plugins keep working unchanged. |
+| **0.8.0** | + `TurnSummary` / `TurnToolStat` types + `system.event: turn.summary` | ✅ Unchanged | Additive. jarvis-core emits one summary per turn traceId; plugins MAY subscribe. No existing shape changed (F5). |
 
 ## Public API Surface
 
@@ -36,6 +37,7 @@ These are consumed by plugins and must remain backward compatible:
 - `CapabilityRegistry` — `register(def)`, `getDefinitions()`, `execute(calls)`, `registerSlashCommand`, `unregisterSlashCommand`, `getSlashCommands()`, `names`, `size`
 - Bus channels: `ai.request`, `ai.stream`, `capability.request`, `capability.result`, `hud.update`, `system.event`
 - All message types: `AIRequestMessage`, `AIStreamMessage`, `CapabilityRequestMessage`, `CapabilityResultMessage`, `HudUpdateMessage`, `SystemEventMessage`
+- `system.event` payloads: `turn.summary` → `data: TurnSummary` (with `TurnToolStat`) — one per turn traceId (added in 0.8.0)
 
 #### Window Globals (consumed by plugin renderers)
 - `window.__JARVIS_REACT` — React instance (`createElement`, `Fragment`, all hooks)

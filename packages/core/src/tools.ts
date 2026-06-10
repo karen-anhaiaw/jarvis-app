@@ -26,6 +26,14 @@ export interface CapabilityResult {
   tool_use_id: string;
   content: ToolResultContent;
   is_error?: boolean;
+  /**
+   * Wall time of THIS call, measured by the registry (added in 0.8.0, F5
+   * turn-tracker). Per-call — NOT the Promise.all batch time. Absent when
+   * the call never ran (unknown capability fast-fail). Carried on the
+   * capability.result bus message; providers build API tool_result blocks
+   * field-explicitly, so it never reaches provider payloads.
+   */
+  durationMs?: number;
 }
 
 export interface SlashCommand {

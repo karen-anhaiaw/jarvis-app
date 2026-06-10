@@ -53,6 +53,13 @@ export interface CapabilityResult {
   tool_use_id: string;
   content: ToolResultContent;
   is_error?: boolean;
+  /**
+   * Wall time of THIS call, measured by the registry (F5 turn-tracker).
+   * Per-call — NOT the Promise.all batch time. Absent when the call never
+   * ran (unknown capability fast-fail). Providers build API tool_result
+   * blocks field-explicitly, so this never reaches the provider payload.
+   */
+  durationMs?: number;
 }
 
 export interface CapabilityCall {

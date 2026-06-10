@@ -76,3 +76,66 @@ describe("CapabilityRegistry — declarative tool categories (F3.15)", () => {
     expect(categoryOf(r, "my-skill")).toBe("skills");
   });
 });
+
+// ─── Per-call durationMs (F5 turn-tracker) ─────────────────────────────
+// BDD: docs/features/bdd/turn-tracker.feature — "Tool duration plumbing"
+
+describe("CapabilityRegistry — per-call durationMs (F5)", () => {
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+  it("stamps per-call durationMs on success results", async () => {
+    const r = new CapabilityRegistry();
+    r.register({
+      name: "sleepy",
+      description: "x",
+      input_schema: { type: "object", properties: {} },
+      handler: async () => { await sleep(50); return { ok: true }; },
+    });
+    const [res] = await r.execute([{ id: "tu1", name: "sleepy", input: {} }]);
+    expect(res.durationMs).toBeGreaterThanOrEqual(45); // timer slack
+    expect(res.is_error).toBeUndefined();
+  });
+
+  it("durations are independent per call in a parallel batch", async () => {
+    const r = new CapabilityRegistry();
+    r.register({
+      name: "fast",
+      description: "x",
+      input_schema: { type: "object", properties: {} },
+      handler: async () => ({ ok: true }),
+    });
+    r.register({
+      name: "slow",
+      description: "x",
+      input_schema: { type: "object", properties: {} },
+      handler: async () => { await sleep(80); return { ok: true }; },
+    });
+    const [fast, slow] = await r.execute([
+      { id: "f", name: "fast", input: {} },
+      { id: "s", name: "slow", input: {} },
+    ]);
+    // The fast tool must NOT inherit the batch (Promise.all) wall time.
+    expect(fast.durationMs!).toBeLessThan(50);
+    expect(slow.durationMs!).toBeGreaterThanOrEqual(75);
+  });
+
+  it("stamps durationMs on handler errors too", async () => {
+    const r = new CapabilityRegistry();
+    r.register({
+      name: "boom",
+      description: "x",
+      input_schema: { type: "object", properties: {} },
+      handler: async () => { throw new Error("boom"); },
+    });
+    const [res] = await r.execute([{ id: "b", name: "boom", input: {} }]);
+    expect(res.is_error).toBe(true);
+    expect(typeof res.durationMs).toBe("number");
+  });
+
+  it("unknown capability fast-fail has NO durationMs (never ran)", async () => {
+    const r = new CapabilityRegistry();
+    const [res] = await r.execute([{ id: "u", name: "nope", input: {} }]);
+    expect(res.is_error).toBe(true);
+    expect(res.durationMs).toBeUndefined();
+  });
+});

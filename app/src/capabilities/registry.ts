@@ -90,16 +90,18 @@ export class CapabilityRegistry {
           if (Array.isArray(result) && result.length > 0 && result[0]?.type && ["image", "text", "document"].includes(result[0].type)) {
             log.info({ tool: tc.name, contentBlocks: result.length, types: result.map((b: any) => b.type) }, "CapabilityRegistry: result (content blocks)");
             for (const l of this.listeners) l(tc.name, false, Date.now() - t0);
-            return { tool_use_id: tc.id, content: result };
+            // durationMs: per-call wall time for turn-tracker (F5) — additive,
+            // stripped by providers' field-explicit block construction.
+            return { tool_use_id: tc.id, content: result, durationMs: Date.now() - t0 };
           }
           const content = JSON.stringify(result);
           log.info({ tool: tc.name, resultLength: content.length, preview: content.slice(0, 200) }, "CapabilityRegistry: result (text)");
           for (const l of this.listeners) l(tc.name, false, Date.now() - t0);
-          return { tool_use_id: tc.id, content };
+          return { tool_use_id: tc.id, content, durationMs: Date.now() - t0 };
         } catch (err) {
           log.error({ tool: tc.name, input: tc.input, err }, "CapabilityRegistry: handler error");
           for (const l of this.listeners) l(tc.name, true, Date.now() - t0);
-          return { tool_use_id: tc.id, content: JSON.stringify({ error: String(err) }), is_error: true };
+          return { tool_use_id: tc.id, content: JSON.stringify({ error: String(err) }), is_error: true, durationMs: Date.now() - t0 };
         }
       })
     );
