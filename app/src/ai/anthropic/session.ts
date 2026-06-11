@@ -811,11 +811,12 @@ export class AnthropicSession implements AISession {
       const toCompact = sanitizeMessages(this.messages.slice(0, splitAt));
       const remaining = this.messages.slice(splitAt);
 
-      // Ensure toCompact ends with a user message (API requirement for the summary call)
-      const msgs = [...toCompact];
-      if (msgs.length > 0 && msgs[msgs.length - 1].role === 'assistant') {
-        msgs.push({ role: 'user', content: 'Please summarize the conversation above.' });
-      }
+      // Same prompt-shape hardening as doCompact (F-compact-2.2/2.3):
+      // instruction guaranteed as final user content + <summary> prefill.
+      // The sliding chunk can also end in a tool_result user message when the
+      // sanitized slice carries an orphan-patched tail — the conditional
+      // instruction bug applied here too.
+      const msgs = AnthropicSession.buildSummarizerTail(toCompact);
 
       const compactionModel = this.stickyModelOverride ?? this.getBaseModel();
       // Sliding-window prompt is purpose-built for token reduction, NOT narrative summary.
@@ -843,6 +844,8 @@ export class AnthropicSession implements AISession {
         max_tokens: 4096, // sliding summaries are partial — less content than full compaction
         system: SLIDING_SYSTEM_PROMPT,
         messages: msgs,
+        // Prefill requires thinking disabled — see buildSummarizerTail/doCompact.
+        thinking: { type: 'disabled' },
       });
 
       const summaryText = summaryResponse.content
@@ -850,8 +853,7 @@ export class AnthropicSession implements AISession {
         .map((b: any) => b.text)
         .join('\n');
 
-      const match = summaryText.match(/<summary>([\s\S]*?)<\/summary>/);
-      const summary = match ? match[1].trim() : summaryText.trim();
+      const summary = AnthropicSession.extractSummary(summaryText);
 
       // Prepend summary as a synthetic user/assistant pair, keep remaining messages intact.
       // The synthetic user message starts with plain text (NOT a tool_result), so it
@@ -962,6 +964,71 @@ export class AnthropicSession implements AISession {
     yield* this.doCompact(lastInputTokens, "growth");
   }
 
+  /** The instruction that MUST terminate every summarizer request's user content. */
+  private static readonly SUMMARIZE_INSTRUCTION = "Please summarize the conversation above.";
+
+  /** Assistant prefill that forces the summarizer into summary-continuation mode. */
+  private static readonly SUMMARY_PREFILL = "<summary>";
+
+  /**
+   * Guarantee the summarize instruction is the FINAL user content of a
+   * summarizer request, then terminate with the `<summary>` assistant prefill.
+   *
+   * WHY (incident #2, 2026-06-10): the old code only appended the instruction
+   * when the history happened to end with an assistant message. When sanitize
+   * stripped a trailing orphan tool_use, the history ended in a user
+   * tool_result, the instruction was silently skipped, and the summarizer
+   * role-played the conversation instead of summarizing — replacing 416k
+   * tokens of history with 84 chars of fiction containing a hallucinated
+   * user instruction.
+   *
+   * Three tail shapes, all producing NEW message objects (the input array
+   * shares message references with the live history — mutating them would
+   * corrupt `this.messages`):
+   *   - trailing assistant    → push a new user message with the instruction
+   *   - trailing user string  → merge the instruction into the string content
+   *   - trailing user blocks  → append a text block after the tool_results
+   *     (keeps the no-consecutive-user-message shape)
+   *
+   * The prefill makes roleplay structurally impossible: the model can only
+   * CONTINUE a summary. Prefill requires thinking to be disabled — the two
+   * API features are mutually exclusive (see callSummarizer).
+   */
+  private static buildSummarizerTail(msgs: MessageParam[]): MessageParam[] {
+    if (msgs.length === 0) return msgs; // degenerate — upstream guards prevent this
+    const out = [...msgs];
+    const last = out[out.length - 1];
+    if (last.role === "assistant") {
+      out.push({ role: "user", content: AnthropicSession.SUMMARIZE_INSTRUCTION });
+    } else if (typeof last.content === "string") {
+      out[out.length - 1] = { ...last, content: `${last.content}\n\n${AnthropicSession.SUMMARIZE_INSTRUCTION}` };
+    } else if (Array.isArray(last.content)) {
+      out[out.length - 1] = { ...last, content: [...last.content, { type: "text", text: AnthropicSession.SUMMARIZE_INSTRUCTION }] };
+    } else {
+      out.push({ role: "user", content: AnthropicSession.SUMMARIZE_INSTRUCTION });
+    }
+    out.push({ role: "assistant", content: AnthropicSession.SUMMARY_PREFILL });
+    return out;
+  }
+
+  /**
+   * Extract the summary body from a summarizer response.
+   *
+   * The request prefills the assistant turn with `<summary>`, so a
+   * well-behaved response contains ONLY the body + closing tag. Prepend the
+   * prefilled tag before matching so the regex sees a complete pair. Some
+   * models re-emit the opening tag anyway — strip leading duplicates from
+   * the captured body. No closing tag (max_tokens truncation, tag-averse
+   * model) → fall back to the raw trimmed text: with the prefill in place,
+   * the whole response IS summary content by construction.
+   */
+  private static extractSummary(text: string): string {
+    const combined = `${AnthropicSession.SUMMARY_PREFILL}${text}`;
+    const match = combined.match(/<summary>([\s\S]*?)<\/summary>/);
+    const body = match ? match[1] : text;
+    return body.replace(/^(\s*<summary>)+/i, "").trim();
+  }
+
   /**
    * Core compaction logic shared by fallbackCompact, growthCompact and
    * forceCompact. Sends messages to a summarizer, replaces history with the
@@ -1007,12 +1074,11 @@ export class AnthropicSession implements AISession {
     try {
       // Sanitize a COPY before the summarizer call (in-memory history is not
       // mutated — the main loop sanitizes independently right before its own
-      // API calls). Then ensure the sequence ends with a user message (API
-      // requirement for messages.create).
-      const msgs = sanitizeMessages([...this.messages]);
-      if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
-        msgs.push({ role: "user", content: "Please summarize the conversation above." });
-      }
+      // API calls). buildSummarizerTail then guarantees the summarize
+      // instruction is the final user content REGARDLESS of how the history
+      // ends, and appends the <summary> prefill (F-compact-2.2/2.3 — the
+      // conditional instruction was the root cause of incident #2's roleplay).
+      const msgs = AnthropicSession.buildSummarizerTail(sanitizeMessages([...this.messages]));
 
       // Use the session's current model for compaction — same client, same model.
       // The utility model (Haiku) was too weak for large contexts (~1M tokens)
@@ -1036,15 +1102,20 @@ export class AnthropicSession implements AISession {
           max_tokens: maxTokens,
           system: `You are a conversation summarizer. ${instructions}\nWrap your summary in <summary></summary> tags.`,
           messages: msgs,
+          // Prefill and extended thinking are mutually exclusive API features
+          // — and thinking burned the output budget here anyway (the
+          // max_tokens retry below exists for exactly that, kept as defense
+          // in depth for providers that ignore this flag).
+          thinking: { type: "disabled" },
         });
 
         const text = response.content
           .filter((b: any) => b.type === "text")
           .map((b: any) => b.text)
           .join("\n");
-        // Extract content between <summary> tags, or use full text
-        const match = text.match(/<summary>([\s\S]*?)<\/summary>/);
-        const summary = (match ? match[1] : text).trim();
+        // The request ends with the <summary> prefill — extraction prepends
+        // it back before matching (see extractSummary).
+        const summary = AnthropicSession.extractSummary(text);
 
         const stopReason = (response as any).stop_reason as string | undefined;
         const blockTypes = response.content.map((b: any) => b.type);
@@ -1095,16 +1166,18 @@ export class AnthropicSession implements AISession {
       }
 
       // ── Empty-summary guard ─────────────────────────────────────────────
-      // An empty summary is ALWAYS a failure. A non-empty but tiny summary is
-      // a failure only for large contexts — small sessions can legitimately
-      // summarize to a short sentence.
-      const MIN_SUMMARY_CHARS = 50;
+      // An empty summary is ALWAYS a failure. The short-summary floor is
+      // PROPORTIONAL to context size (F-compact-2.4) — a large context cannot
+      // legitimately summarize to a tweet. Incident #2: 84 chars passed the
+      // old absolute 50-char floor for a 416k-token context. Small sessions
+      // (≤10k tokens) keep no floor — they can summarize to a sentence.
       const LARGE_CONTEXT_TOKENS = 10_000;
+      const minSummaryChars = tokensBefore > 200_000 ? 800 : tokensBefore > 50_000 ? 300 : 50;
       const empty = result.summary.length === 0;
-      const tooShort = !empty && tokensBefore > LARGE_CONTEXT_TOKENS && result.summary.length < MIN_SUMMARY_CHARS;
+      const tooShort = !empty && tokensBefore > LARGE_CONTEXT_TOKENS && result.summary.length < minSummaryChars;
       if (empty || tooShort) {
         const failReason = `summarizer returned ${empty ? "an empty" : "a suspiciously short"} summary `
-          + `(${result.summary.length} chars for ~${tokensBefore} tokens, stop_reason=${result.stopReason ?? "?"}, `
+          + `(${result.summary.length} chars for ~${tokensBefore} tokens, floor=${minSummaryChars}, stop_reason=${result.stopReason ?? "?"}, `
           + `blocks=[${result.blockTypes.join(",")}]) — history preserved`;
         log.error(
           { label: this.label, tokensBefore, summaryLength: result.summary.length, stopReason: result.stopReason, blockTypes: result.blockTypes },
@@ -1178,10 +1251,27 @@ export class AnthropicSession implements AISession {
         ? sys.reduce((sum, b) => sum + ((b as any).text?.length ?? 0), 0)
         : 0;
 
-    // Messages size
+    // Messages size. Per-block accounting (F-compact-2.5):
+    //   - image blocks: flat 6,400 chars (≈1.6k tokens at chars/4). Anthropic
+    //     bills images by DIMENSIONS, not bytes — the base64 payload (100k+
+    //     chars for a screenshot) must never leak into the estimate.
+    //   - tool_result blocks: recurse into nested content (string or block
+    //     array). Before this, everything inside a tool_result contributed
+    //     ZERO chars, hiding tool-heavy histories from the heuristic.
+    //   - everything else: text length, or JSON length of tool_use input.
+    const IMAGE_BLOCK_EST_CHARS = 6_400;
+    const blockChars = (b: any): number => {
+      if (b?.type === "image") return IMAGE_BLOCK_EST_CHARS;
+      if (b?.type === "tool_result") {
+        if (typeof b.content === "string") return b.content.length;
+        if (Array.isArray(b.content)) return b.content.reduce((s: number, ib: any) => s + blockChars(ib), 0);
+        return 0;
+      }
+      return b?.text?.length ?? (b?.input ? JSON.stringify(b.input).length : 0);
+    };
     const messagesChars = this.messages.reduce((sum, m) => {
       if (typeof m.content === "string") return sum + m.content.length;
-      if (Array.isArray(m.content)) return sum + m.content.reduce((s, b: any) => s + (b.text?.length ?? (b.input ? JSON.stringify(b.input).length : 0)), 0);
+      if (Array.isArray(m.content)) return sum + m.content.reduce((s, b: any) => s + blockChars(b), 0);
       return sum;
     }, 0);
 
