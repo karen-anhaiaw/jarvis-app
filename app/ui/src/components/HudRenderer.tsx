@@ -405,6 +405,7 @@ export function HudRenderer({ state }: { state: HudState }) {
                 onClose={() => hidePanel(comp.id)}
                 onDetach={detachPanel}
                 persistLayout={!comp.ephemeral}
+                updatedAt={comp.updatedAt}
               >
                 <BuiltinRenderer state={comp} />
               </DraggablePanel>
@@ -429,6 +430,7 @@ export function HudRenderer({ state }: { state: HudState }) {
                   onClose={() => hidePanel(comp.id)}
                   onDetach={detachPanel}
                   persistLayout={!comp.ephemeral}
+                  updatedAt={comp.updatedAt}
                 >
                   <PluginErrorBoundary fallback={<GenericRenderer state={comp} />}>
                     <CoreRenderer state={comp} />
@@ -455,6 +457,7 @@ export function HudRenderer({ state }: { state: HudState }) {
                 onClose={() => hidePanel(comp.id)}
                 onDetach={detachPanel}
                 persistLayout={!comp.ephemeral}
+                updatedAt={comp.updatedAt}
               >
                 <PluginErrorBoundary fallback={<GenericRenderer state={comp} />}>
                 <Suspense fallback={<GenericRenderer state={comp} />}>
@@ -481,6 +484,7 @@ export function HudRenderer({ state }: { state: HudState }) {
                 onClose={() => hidePanel(comp.id)}
                 onDetach={detachPanel}
                 persistLayout={!comp.ephemeral}
+                updatedAt={comp.updatedAt}
               >
                 <GenericRenderer state={comp} />
               </DraggablePanel>

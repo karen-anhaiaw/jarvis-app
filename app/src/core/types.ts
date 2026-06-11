@@ -15,4 +15,6 @@ export type {
   ChatAnchorMessage,
   ChatTimelineEntry,
   ChatTimelineMessage,
+  TurnSummary,
+  TurnToolStat,
 } from "@jarvis/core";

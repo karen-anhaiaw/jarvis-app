@@ -7,6 +7,7 @@ import { execSync, exec } from "node:child_process";
 import type { ChatPiece } from "./input/chat-piece.js";
 import { load as loadSettings, save as saveSettings } from "./core/settings.js";
 import { log, getLogBuffer, onLogEntry } from "./logger/index.js";
+import { DEFAULT_SESSION } from "./core/constants.js";
 
 const THEMES_DIR = join(homedir(), ".jarvis", "themes");
 
@@ -207,6 +208,19 @@ export class HttpServer {
 
     if (req.url?.startsWith("/chat/session-info") && req.method === "GET") {
       this.chatPiece.handleSessionInfo(req, res);
+      return;
+    }
+
+    if (req.url === "/chat/models" && req.method === "GET") {
+      // Import is synchronous-safe here: config/index.ts is already loaded at
+      // startup. We use a dynamic import only to avoid circular-ref issues at
+      // module level; the Promise resolves immediately from the module cache.
+      import("./config/index.js").then(({ getModelCatalog }) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(getModelCatalog()));
+      }).catch(() => {
+        res.writeHead(500); res.end();
+      });
       return;
     }
 
@@ -679,13 +693,13 @@ export class HttpServer {
 
         // Bash is a global side-effect — broadcast to the root session only.
         // Actor/other-session bash would need its own endpoint carrying sessionId.
-        this.chatPiece.broadcastEvent("main", {
+        this.chatPiece.broadcastEvent(DEFAULT_SESSION, {
           type: "bash_result",
           command,
           output,
           exitCode,
           ms,
-          session: "main",
+          session: DEFAULT_SESSION,
         });
       });
     });

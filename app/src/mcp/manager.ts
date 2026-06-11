@@ -10,6 +10,8 @@ import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { EventBus } from "../core/bus.js";
 import type { SystemEventMessage, HudUpdateMessage } from "../core/types.js";
 import type { CapabilityRegistry } from "../capabilities/registry.js";
+import { abortRegistry } from "../capabilities/abort-registry.js";
+import { stripExecutorContext } from "../capabilities/executor.js";
 import type { Piece } from "../core/piece.js";
 import { log } from "../logger/index.js";
 import { JarvisOAuthProvider } from "./oauth.js";
@@ -71,8 +73,6 @@ export class McpManager implements Piece {
   private registry: CapabilityRegistry;
   private servers = new Map<string, McpServerState>();
   private configPath: string;
-  /** Per-session AbortControllers — aborted when ai.stream "aborted" fires. */
-  private abortControllers = new Map<string, AbortController>();
 
   systemContext(): string {
     const serverList = [...this.servers.entries()]
@@ -96,17 +96,8 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
     this.loadServers();
     this.registerManagementTools();
 
-    // Cancel in-flight MCP calls when the user aborts (ESC)
-    this.bus.subscribe("ai.stream", (msg: any) => {
-      if (msg.event === "aborted" && msg.target) {
-        const ctrl = this.abortControllers.get(msg.target);
-        if (ctrl) {
-          ctrl.abort();
-          this.abortControllers.delete(msg.target);
-          log.info({ sessionId: msg.target }, "McpManager: aborted in-flight MCP call");
-        }
-      }
-    });
+    // In-flight MCP call cancellation is handled by the shared AbortRegistry
+    // (wired once in main.ts). Handlers register/release per-tool controllers.
 
     this.bus.publish({
       channel: "hud.update",
@@ -562,18 +553,25 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
 
       this.registry.register({
         name: toolName,
+        // Explicit for clarity — the `mcp__` prefix fallback would also apply.
+        category: "mcp",
         description: tool.description ?? `Tool ${tool.name} from MCP server ${server.name}`,
         input_schema: (tool.inputSchema as Record<string, unknown>) ?? { type: "object", properties: {} },
         handler: async (input) => {
           const sessionId = input.__sessionId as string | undefined;
-          const { __sessionId: _, ...args } = input;
-          const ctrl = new AbortController();
-          if (sessionId) this.abortControllers.set(sessionId, ctrl);
+          const toolUseId = input.__toolUseId as string | undefined;
+          const traceId = input.__traceId as string | undefined;
+          // Strip executor-injected context fields — MCP servers must only
+          // receive the tool's declared arguments (shared helper, F4.17).
+          const args = stripExecutorContext(input);
+          log.debug({ tool: toolName, sessionId, traceId }, "McpManager: tool call");
+          // Per-tool abort: parallel MCP calls each get their own controller.
+          const signal = sessionId ? abortRegistry.register(sessionId, toolUseId) : new AbortController().signal;
           try {
             const result = await server.client!.callTool(
               { name: tool.name, arguments: args },
               undefined,
-              { signal: ctrl.signal },
+              { signal },
             );
             if (Array.isArray(result.content)) {
               return (result.content as Array<{ type: string; text?: string }>)
@@ -583,12 +581,12 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
             }
             return result.content;
           } catch (err: any) {
-            if (ctrl.signal.aborted || err?.name === "AbortError") {
+            if (signal.aborted || err?.name === "AbortError") {
               return { error: "aborted" };
             }
             throw err;
           } finally {
-            if (sessionId) this.abortControllers.delete(sessionId);
+            if (sessionId) abortRegistry.release(sessionId, toolUseId);
           }
         },
       });
@@ -598,6 +596,7 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
   private registerManagementTools(): void {
     this.registry.register({
       name: "mcp_list",
+      category: "mcp",
       description: "List all configured MCP servers with their connection status",
       input_schema: { type: "object", properties: {}, required: [] },
       handler: async () => {
@@ -613,6 +612,7 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
 
     this.registry.register({
       name: "mcp_connect",
+      category: "mcp",
       description: "Connect to a configured MCP server by name",
       input_schema: {
         type: "object",
@@ -624,6 +624,7 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
 
     this.registry.register({
       name: "mcp_login",
+      category: "mcp",
       description: "Authenticate with an MCP server that requires OAuth login. Opens browser for auth flow.",
       input_schema: {
         type: "object",
@@ -635,6 +636,7 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
 
     this.registry.register({
       name: "mcp_disconnect",
+      category: "mcp",
       description: "Disconnect from a connected MCP server",
       input_schema: {
         type: "object",
@@ -646,6 +648,7 @@ Connect servers on demand when the user needs external services (Jira, Slack, Co
 
     this.registry.register({
       name: "mcp_refresh",
+      category: "mcp",
       description: "Reload mcp.json config — picks up new servers or removes deleted ones without restarting JARVIS",
       input_schema: { type: "object", properties: {}, required: [] },
       handler: async () => this.refreshConfig(),

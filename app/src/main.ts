@@ -44,16 +44,18 @@ import type { Piece } from "./core/piece.js";
 import { log } from "./logger/index.js";
 import { clearAllConversations } from "./core/conversation-store.js";
 import { launchHud } from "./transport/hud/electron.js";
-import { config, setModel, getValidModels, getCurrentProvider } from "./config/index.js";
+import { config, setModel, getValidModels, getCurrentProvider, getProviderForModel } from "./config/index.js";
 import { ProviderRouter } from "./ai/provider.js";
 import { createAnthropicProvider } from "./ai/anthropic/provider.js";
 import { createOpenAIProvider } from "./ai/openai/provider.js";
 import { AnthropicSessionFactory } from "./ai/anthropic/factory.js";
+import { abortRegistry } from "./capabilities/abort-registry.js";
 import { registerSessionInspectorTools } from "./ai/anthropic/session-inspector.js";
 import { HudCoreNodePiece } from "./core/hud-core-node.js";
 import { DiffViewerPiece } from "./pieces/diff-viewer.js";
 import { ChoicePromptPiece } from "./pieces/choice-prompt.js";
 import { ModelRouterPiece } from "./pieces/model-router.js";
+import { TurnInspectorPiece } from "./pieces/turn-inspector.js";
 import { DelegateTaskPiece } from "./pieces/delegate-task.js";
 import { load as loadSettingsForSlash } from "./core/settings.js";
 import { ensureUiBuildIntegrity } from "./server.js";
@@ -84,6 +86,10 @@ async function main() {
   ensureUiBuildIntegrity();
 
   const bus = new EventBus();
+  // Shared per-tool abort registry — single ai.stream "aborted" subscription
+  // for ALL tool executors (filesystem capabilities, MCP calls). Keyed by
+  // (sessionId, toolUseId) so ESC aborts every parallel tool of the session.
+  abortRegistry.wire(bus);
   const capabilityRegistry = new CapabilityRegistry();
 
   const chatPiece = new ChatPiece();
@@ -112,6 +118,7 @@ async function main() {
     new CapabilityLoaderPiece(capabilityRegistry),
     new McpManager(capabilityRegistry),
     new GrpcPiece(capabilityRegistry),
+    new TurnInspectorPiece(),
     chatPiece,
   ];
 
@@ -150,6 +157,7 @@ async function main() {
   // clear_session — clears only the calling session (memory + disk), archives first
   capabilityRegistry.register({
     name: "clear_session",
+    category: "system",
     description: "Archive and clear saved conversation history. Sessions are rolled to sessions/archive/ with timestamps before clearing. Next restart will start fresh with no memory of previous messages.",
     input_schema: { type: "object", properties: {} },
     handler: async (input) => {
@@ -166,6 +174,7 @@ async function main() {
   // Model management tools — now provider-aware
   capabilityRegistry.register({
     name: "model_set",
+    category: "model",
     description: `Switch the AI model. Examples: claude-sonnet-4-6, claude-opus-4-8, claude-opus-4-7, gpt-4o, gpt-4o-mini, o3. Anthropic models use Claude, others use OpenAI-compatible API.`,
     input_schema: {
       type: "object",
@@ -185,6 +194,7 @@ async function main() {
   });
   capabilityRegistry.register({
     name: "model_get",
+    category: "model",
     description: "Get the current AI model and provider being used.",
     input_schema: { type: "object", properties: {} },
     handler: async () => ({
@@ -220,6 +230,77 @@ async function main() {
     },
   });
 
+  /**
+   * Drives a session's forceCompact() stream to completion, forwarding
+   * compaction events to the bus (chat banner + metrics) and saving the
+   * compacted session. Shared by the /compact slash command and the HTTP
+   * compact endpoint — previously two verbatim copies of this loop (review
+   * finding D1, mission jarvis-fix F2.5). Caller-specific guards (session
+   * exists, provider support, idle check) and result delivery (return
+   * message vs broadcastEvent) stay at the call sites.
+   */
+  const runCompaction = async (sessionId: string): Promise<void> => {
+    const managed = sessions.get(sessionId);
+    const stream = managed.session.forceCompact!();
+    for await (const event of stream) {
+      if (event.type === "compaction_start" && event.compactionStart) {
+        bus.publish({
+          channel: "ai.stream",
+          source: "jarvis-core",
+          target: sessionId,
+          event: "compaction_start",
+          compactionStart: event.compactionStart,
+        } as any);
+      } else if (event.type === "compaction" && event.compaction) {
+        // ai.stream → chat timeline banner; system.event → metrics HUD
+        bus.publish({
+          channel: "ai.stream",
+          source: "jarvis-core",
+          target: sessionId,
+          event: "compaction",
+          compaction: event.compaction,
+        } as any);
+        bus.publish({
+          channel: "system.event",
+          source: "jarvis-core",
+          event: "compaction",
+          data: {
+            sessionId,
+            engine: event.compaction.engine,
+            tokensBefore: event.compaction.tokensBefore,
+            tokensAfter: event.compaction.tokensAfter,
+            summaryLength: event.compaction.summary.length,
+          },
+        });
+      } else if (event.type === "compaction_failed" && event.compactionFailed) {
+        // Forced compaction failed — history preserved (doCompact failure
+        // semantics). Forward to ai.stream so the chat banner resolves, and
+        // to system.event for metrics/forensics. This path matters: the
+        // 2026-06-10 incident came through THIS loop (POST /chat/compact).
+        bus.publish({
+          channel: "ai.stream",
+          source: "jarvis-core",
+          target: sessionId,
+          event: "compaction_failed",
+          compactionFailed: event.compactionFailed,
+        } as any);
+        bus.publish({
+          channel: "system.event",
+          source: "jarvis-core",
+          event: "compaction_failed",
+          data: {
+            sessionId,
+            engine: event.compactionFailed.engine,
+            tokensBefore: event.compactionFailed.tokensBefore,
+            reason: event.compactionFailed.reason,
+          },
+        });
+      }
+    }
+    // Persist the compacted history (skips ephemeral sessions)
+    sessions.save(sessionId);
+  };
+
   // /compact slash command — force context compaction (Engine B) on the CALLING session.
   // Handler receives ctx.sessionId from ChatPiece, so it acts on whichever session
   // typed the slash (main, actor-X, etc) instead of hardcoding "main".
@@ -245,43 +326,7 @@ async function main() {
 
       chatPiece.broadcastEvent(sessionId, { type: "system", text: "⏳ Compacting context…", session: sessionId });
 
-      const stream = managed.session.forceCompact();
-      for await (const event of stream) {
-        if (event.type === "compaction_start" && event.compactionStart) {
-          bus.publish({
-            channel: "ai.stream",
-            source: "jarvis-core",
-            target: sessionId,
-            event: "compaction_start",
-            compactionStart: event.compactionStart,
-          } as any);
-        } else if (event.type === "compaction" && event.compaction) {
-          // Publish compaction events to the bus so metrics and chat timeline update
-          bus.publish({
-            channel: "ai.stream",
-            source: "jarvis-core",
-            target: sessionId,
-            event: "compaction",
-            compaction: event.compaction,
-          } as any);
-
-          bus.publish({
-            channel: "system.event",
-            source: "jarvis-core",
-            event: "compaction",
-            data: {
-              sessionId,
-              engine: event.compaction.engine,
-              tokensBefore: event.compaction.tokensBefore,
-              tokensAfter: event.compaction.tokensAfter,
-              summaryLength: event.compaction.summary.length,
-            },
-          });
-        }
-      }
-
-      // Save the compacted session (skips ephemeral)
-      sessions.save(sessionId);
+      await runCompaction(sessionId);
 
       return { message: `✅ Context compacted successfully (${sessionId}).` };
     },
@@ -314,9 +359,16 @@ async function main() {
       const aliases = { opus: "claude-opus-4-8", sonnet: "claude-sonnet-4-6", haiku: "claude-haiku-4-5", ...(cfg.aliases ?? {}) };
       const target = aliases[arg.toLowerCase()] ?? arg;
 
-      // If the target model belongs to a different provider, switch it first
-      const switchResult = setModel(target);
-      if (switchResult.providerChanged) {
+      // Same-provider switches are SESSION-SCOPED: only the sticky route for
+      // this session changes — config.model / settings.model stay untouched so
+      // other sessions and the new-session default keep their own models.
+      // Cross-provider needs the global switch (factory swap is process-wide).
+      // Bug fixed 2026-06-10: setModel() ran unconditionally here, so every
+      // /model (incl. the UI picker) leaked the choice globally — new sessions
+      // and unpinned factory sessions silently inherited it.
+      const targetProvider = getProviderForModel(target);
+      if (targetProvider !== getCurrentProvider()) {
+        const switchResult = setModel(target);
         await providerRouter.switchTo(switchResult.provider, bus);
         sessions.updateFactory(providerRouter.getFactory());
         sessions.setProvider(switchResult.provider);
@@ -354,12 +406,24 @@ async function main() {
 
   // Wire delegate into cron so cron jobs can run in delegate mode directly.
   cronPiece.setDelegatePiece(delegateTaskPiece);
+  // Fire-time target validation (phantom prevention G2): cron checks the
+  // SessionManager before publishing into a persisted target.
+  cronPiece.setSessionResolver(sessions);
 
   // Plugin manager
   const pluginManager = new PluginManager(capabilityRegistry);
   pieces.push(pluginManager);
 
   const hudState = new HudState(bus);
+
+  // ─── HUD truth (F6) ───
+  // Reactor pull-direct: the orb reads JarvisCore.globalState — the source
+  // of truth — instead of HudState's panel copy (which can lag/drop).
+  hudState.setReactorSource(() => jarvisCore.getReactorState());
+  // Reconciliation: jarvis-core registers as the first producer; lost adds
+  // and content drift self-heal every ~10s. Other pieces opt in as needed.
+  hudState.registerProducer("jarvis-core", () => jarvisCore.getHudSnapshot());
+  hudState.startReconciliation();
 
   // Activate initial provider AFTER HudState exists (so metrics HUD registers)
   await providerRouter.switchTo(getCurrentProvider(), bus);
@@ -421,41 +485,8 @@ async function main() {
 
     chatPiece.broadcastEvent(sessionId, { type: "system", text: "⏳ Compacting context…", session: sessionId });
 
-    const stream = managed.session.forceCompact();
-    for await (const event of stream) {
-      if (event.type === "compaction_start" && event.compactionStart) {
-        bus.publish({
-          channel: "ai.stream",
-          source: "jarvis-core",
-          target: sessionId,
-          event: "compaction_start",
-          compactionStart: event.compactionStart,
-        } as any);
-      } else if (event.type === "compaction" && event.compaction) {
-        bus.publish({
-          channel: "ai.stream",
-          source: "jarvis-core",
-          target: sessionId,
-          event: "compaction",
-          compaction: event.compaction,
-        } as any);
+    await runCompaction(sessionId);
 
-        bus.publish({
-          channel: "system.event",
-          source: "jarvis-core",
-          event: "compaction",
-          data: {
-            sessionId,
-            engine: event.compaction.engine,
-            tokensBefore: event.compaction.tokensBefore,
-            tokensAfter: event.compaction.tokensAfter,
-            summaryLength: event.compaction.summary.length,
-          },
-        });
-      }
-    }
-
-    sessions.save(sessionId);
     chatPiece.broadcastEvent(sessionId, { type: "system", text: "✅ Context compacted.", session: sessionId });
   });
   pluginManager.setHttpServer(server);
@@ -525,6 +556,7 @@ async function main() {
     shuttingDown = true;
     log.info({ reason }, "Shutting down...");
     try {
+      hudState.stopReconciliation();
       sessions.stopAutoSave();
       // Stop pieces FIRST — actor-runner cleans up ephemeral sessions before we save
       await pieceManager.stopAll();

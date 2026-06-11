@@ -14,6 +14,12 @@ export interface CapabilityDefinition {
   handler: CapabilityHandler;
   /** If true, the handler accepts a progress callback and will stream partial output. */
   supportsProgress?: boolean;
+  /** Slash-menu grouping, declared by the tool's OWNER at registration time
+   *  (F3.15). Replaces the old hardcoded per-tool string lists in
+   *  getSlashCommands — the registry must not know tool names. When omitted,
+   *  structural fallbacks apply: names with the `mcp__` prefix → "mcp",
+   *  everything else → "general". */
+  category?: string;
 }
 
 export type CapabilityExecutionListener = (toolName: string, isError: boolean, timeMs: number) => void;
@@ -84,16 +90,18 @@ export class CapabilityRegistry {
           if (Array.isArray(result) && result.length > 0 && result[0]?.type && ["image", "text", "document"].includes(result[0].type)) {
             log.info({ tool: tc.name, contentBlocks: result.length, types: result.map((b: any) => b.type) }, "CapabilityRegistry: result (content blocks)");
             for (const l of this.listeners) l(tc.name, false, Date.now() - t0);
-            return { tool_use_id: tc.id, content: result };
+            // durationMs: per-call wall time for turn-tracker (F5) — additive,
+            // stripped by providers' field-explicit block construction.
+            return { tool_use_id: tc.id, content: result, durationMs: Date.now() - t0 };
           }
           const content = JSON.stringify(result);
           log.info({ tool: tc.name, resultLength: content.length, preview: content.slice(0, 200) }, "CapabilityRegistry: result (text)");
           for (const l of this.listeners) l(tc.name, false, Date.now() - t0);
-          return { tool_use_id: tc.id, content };
+          return { tool_use_id: tc.id, content, durationMs: Date.now() - t0 };
         } catch (err) {
           log.error({ tool: tc.name, input: tc.input, err }, "CapabilityRegistry: handler error");
           for (const l of this.listeners) l(tc.name, true, Date.now() - t0);
-          return { tool_use_id: tc.id, content: JSON.stringify({ error: String(err) }), is_error: true };
+          return { tool_use_id: tc.id, content: JSON.stringify({ error: String(err) }), is_error: true, durationMs: Date.now() - t0 };
         }
       })
     );
@@ -124,22 +132,17 @@ export class CapabilityRegistry {
       hint: cmd.hint,
     }));
 
-    // Capability-derived commands (existing behavior)
-    const capCommands = [...this.tools.values()].map(({ name, description }) => {
-      let category = "general";
-      if (name.startsWith("mcp__")) category = "mcp";
-      else if (["bash", "read_file", "write_file", "edit_file", "multi_edit_file", "glob", "grep", "list_dir"].includes(name)) category = "filesystem";
-      else if (["web_fetch", "web_search"].includes(name)) category = "web";
-      else if (["model_set", "model_get"].includes(name)) category = "model";
-      else if (["piece_list", "piece_enable", "piece_disable", "hud_show", "hud_hide", "hud_layout", "hud_show_diff", "hud_show_file", "hud_compare_files", "hud_screenshot"].includes(name)) category = "hud";
-      else if (["bus_publish"].includes(name)) category = "bus";
-      else if (["cron_create", "cron_list", "cron_delete"].includes(name)) category = "cron";
-      else if (["plugin_install", "plugin_list", "plugin_update", "plugin_enable", "plugin_disable", "plugin_remove"].includes(name)) category = "plugins";
-      else if (["grpc_start", "grpc_stop", "grpc_status"].includes(name)) category = "grpc";
-      else if (["mcp_list", "mcp_connect", "mcp_disconnect", "mcp_login", "mcp_refresh"].includes(name)) category = "mcp";
-      else if (["clear_session", "jarvis_reset"].includes(name)) category = "system";
-      return { name, description, category };
-    });
+    // Capability-derived commands. Category is DECLARATIVE (F3.15): each
+    // tool's owner sets `category` at registration — the registry must not
+    // maintain per-tool name lists. Only two STRUCTURAL fallbacks remain:
+    //   - the `mcp__` name prefix (MCP tool convention) → "mcp", so dynamic
+    //     registrars that skip the field still group correctly;
+    //   - everything else → "general".
+    const capCommands = [...this.tools.values()].map(({ name, description, category }) => ({
+      name,
+      description,
+      category: category ?? (name.startsWith("mcp__") ? "mcp" : "general"),
+    }));
 
     return [...pluginCommands, ...capCommands];
   }

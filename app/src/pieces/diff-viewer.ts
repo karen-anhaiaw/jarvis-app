@@ -250,6 +250,7 @@ export class DiffViewerPiece implements Piece {
     // hud_show_diff — show diff data in HUD
     this.registry.register({
       name: "hud_show_diff",
+      category: "hud",
       description: "Show a before/after diff to the user in the HUD. Each call opens a new tab. Set interactive=true to add Accept/Reject buttons when you want user feedback — you'll receive a [SYSTEM] message with their decision. Without interactive, it's view-only (user can still close the tab). Use for showing changes, code reviews, proposals, or any comparison.",
       input_schema: {
         type: "object",
@@ -315,6 +316,7 @@ export class DiffViewerPiece implements Piece {
     // hud_show_file — show a file with syntax highlighting
     this.registry.register({
       name: "hud_show_file",
+      category: "hud",
       description: "Display a file to the user with syntax highlighting, line numbers, and optional annotations. Use to show relevant code, highlight important lines, or point out issues. Opens as a tab the user can review and dismiss. Read-only — no Accept/Reject buttons.",
       input_schema: {
         type: "object",
@@ -379,6 +381,7 @@ export class DiffViewerPiece implements Piece {
     // hud_compare_files — compare two files side by side
     this.registry.register({
       name: "hud_compare_files",
+      category: "hud",
       description: "Compare two files side by side in the HUD. Set interactive=true to add Accept/Reject buttons for user feedback. Without it, view-only.",
       input_schema: {
         type: "object",

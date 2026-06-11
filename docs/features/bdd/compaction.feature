@@ -159,3 +159,193 @@ Feature: Session Compaction
     And this.messages is reconstructed as [user(summary_2), assistant(ack), ...remaining_turns]
     And there is exactly ONE summary block at position [0] (summary_1 is gone)
     And the message count decreases by the number of turns compacted
+
+  # ── Failure semantics — history must never be destroyed ────────────────────
+  # Added after the 2026-06-10 incident: a forced compaction on a 734k-token
+  # session received an empty summarizer response (summaryLength: 0) and
+  # replaced the entire history with it. These scenarios pin the contract:
+  # compaction either produces a usable summary or changes NOTHING.
+
+  Scenario: Empty summary aborts compaction and preserves history
+    Given the session has 50 messages
+    And the summarizer responds with zero text blocks
+    When doCompact runs (any trigger)
+    Then the session messages are NOT replaced
+    And a compaction_failed event is emitted with engine "fallback" and a reason mentioning "empty"
+    And no compaction event is emitted
+
+  Scenario: Whitespace-only summary is treated as empty
+    Given the summarizer responds with whitespace-only text
+    When doCompact runs
+    Then the session messages are NOT replaced
+    And a compaction_failed event is emitted
+
+  # F-compact-2.4 (incident #2 2026-06-10): the absolute 50-char floor let an
+  # 84-char roleplay response pass for a 416k-token context. The floor is now
+  # PROPORTIONAL to context size — a big context cannot legitimately summarize
+  # to a tweet.
+  Scenario Outline: Summary floor is proportional to context size
+    Given tokensBefore is <tokensBefore>
+    And the summarizer returns a summary of <chars> chars
+    When doCompact runs
+    Then the compaction outcome is <outcome>
+
+    Examples:
+      | tokensBefore | chars | outcome  |
+      | 800          | 20    | accepted |
+      | 9000         | 20    | accepted |
+      | 11000        | 49    | rejected |
+      | 11000        | 60    | accepted |
+      | 60000        | 299   | rejected |
+      | 60000        | 350   | accepted |
+      | 416000       | 799   | rejected |
+      | 416000       | 900   | accepted |
+
+  Scenario: Suspiciously short summary for a large context aborts compaction
+    Given tokensBefore is 700,000 (above the 10,000-token floor-activation threshold)
+    And the summarizer returns a summary below the 800-char floor for >200k contexts
+    When doCompact runs
+    Then the session messages are NOT replaced
+    And a compaction_failed event is emitted with a reason mentioning "short"
+
+  Scenario: Short summary for a small context is accepted
+    Given tokensBefore is 800 (below the 10,000-token floor-activation threshold)
+    And the summarizer returns a 20-char summary
+    When doCompact runs
+    Then compaction completes normally (small sessions can have tiny summaries)
+
+  # ── Summarizer prompt-shape hardening (F-compact-2, incident #2 2026-06-10) ─
+  # Incident #2: sanitize stripped a trailing orphan tool_use, the history ended
+  # in a user tool_result, the "Please summarize" instruction was NOT appended
+  # (old code only appended it after an assistant message), and the summarizer
+  # role-played the conversation instead of summarizing — 84 chars of fiction
+  # containing a hallucinated user instruction. These scenarios pin the
+  # structural fixes: the instruction is ALWAYS the last user content, and the
+  # assistant response is prefilled with "<summary>" so the model can only
+  # continue a summary, never start a roleplay turn.
+
+  Scenario: Summarize instruction is appended after a trailing assistant message
+    Given the sanitized history ends with an assistant message
+    When doCompact builds the summarizer request
+    Then a new user message "Please summarize the conversation above." is appended
+    And the prefill assistant message "<summary>" follows it
+
+  Scenario: Summarize instruction is appended when history ends in a user tool_result
+    Given the sanitized history ends with a user message whose content is tool_result blocks
+    When doCompact builds the summarizer request
+    Then the instruction is appended to that user message as a trailing text block
+    And no consecutive-user-message shape is produced
+    And the prefill assistant message "<summary>" follows it
+
+  Scenario: Summarize instruction is appended when history ends in a plain-text user message
+    Given the sanitized history ends with a user message whose content is a string
+    When doCompact builds the summarizer request
+    Then the instruction is appended to that user message's string content
+    And the prefill assistant message "<summary>" follows it
+
+  Scenario: Summarizer call disables thinking
+    When doCompact calls the summarizer
+    Then the request carries thinking { type: "disabled" }
+    And no thinking blocks can consume the output budget
+
+  Scenario: Summary extraction accounts for the prefilled opening tag
+    Given the summarizer response text is "the summary body</summary>"
+    When doCompact extracts the summary
+    Then the summary is "the summary body"
+
+  Scenario: Summary extraction tolerates a model that re-emits the opening tag
+    Given the summarizer response text is "<summary>the summary body</summary>"
+    When doCompact extracts the summary
+    Then the summary is "the summary body"
+
+  Scenario: Summary extraction falls back to raw text when no closing tag exists
+    Given the summarizer response text is "an unclosed summary body"
+    When doCompact extracts the summary
+    Then the summary is "an unclosed summary body"
+
+  Scenario: Sliding-window summarizer uses the same hardening
+    When the sliding-window compaction calls its summarizer
+    Then the request carries thinking { type: "disabled" }
+    And the last request message is the prefill assistant "<summary>"
+    And the instruction is guaranteed to be the final user content
+
+  Scenario: max_tokens exhaustion with no text triggers exactly one retry with a larger budget
+    Given the summarizer first responds with stop_reason "max_tokens" and only thinking blocks (no text)
+    And the second call returns a valid summary
+    When doCompact runs
+    Then the summarizer is called exactly twice
+    And the second call uses a 4x max_tokens budget clamped to the model's output ceiling
+    And compaction completes with the retry's summary
+
+  Scenario: Retry also empty — compaction fails without touching history
+    Given both summarizer calls return stop_reason "max_tokens" with zero text
+    When doCompact runs
+    Then the summarizer is called exactly twice (no infinite retry)
+    And the session messages are NOT replaced
+    And a compaction_failed event is emitted
+
+  Scenario: Summarizer API error emits compaction_failed instead of silent swallow
+    Given the summarizer call rejects with a 400 error
+    When doCompact runs
+    Then the error is logged
+    And a compaction_failed event is emitted with the error message in the reason
+    And the session messages are NOT replaced
+
+  Scenario: doCompact sanitizes history before the summarizer call
+    Given the session history contains an orphan tool_use without a matching tool_result
+    When doCompact runs
+    Then the messages sent to the summarizer contain a synthetic tool_result placeholder for the orphan
+    And the in-memory session history is not mutated by the sanitization
+
+  Scenario: Pre-compact backup is written before history replacement
+    Given the summarizer returns a valid summary
+    When doCompact runs
+    Then the full pre-compaction history is written to sessions/archive/<label>_precompact_<timestamp>.json
+    And the backup is NOT trimmed to MAX_MESSAGES
+    And only then are the session messages replaced
+
+  Scenario: Backup write failure aborts compaction
+    Given the pre-compact backup write fails
+    When doCompact runs
+    Then the session messages are NOT replaced
+    And a compaction_failed event is emitted with a reason mentioning "backup"
+
+  Scenario: Old pre-compact backups are pruned
+    Given 6 pre-compact backups already exist for the session label
+    When a new backup is written
+    Then only the newest 5 backups remain for that label
+
+  Scenario: Summarizer usage is recorded with diagnostics
+    Given the summarizer returns any response
+    When doCompact runs
+    Then stop_reason, content block types, and summary length are logged
+    And the summarizer token usage is appended to usage.log
+
+  Scenario: compaction_failed resolves the pending banner in the UI
+    Given a compaction_pending banner is displayed (Engine B started)
+    When a compaction_failed event arrives via SSE
+    Then the pending banner is replaced by a failure banner stating history was preserved
+
+  # ── Context measurement — image-aware heuristic (F-compact-2.5) ────────────
+  # measureContext's chars/4 heuristic ignored image blocks AND everything
+  # nested inside tool_result blocks (both contributed 0 chars), so tool-heavy
+  # or screenshot-heavy histories were invisible to the estimate. Real tokens
+  # from the API remain the trigger source of truth; the heuristic only needs
+  # to be sane, not exact.
+
+  Scenario: Image blocks count a flat estimate in measureContext
+    Given the history contains a user message with an image content block
+    When measureContext runs
+    Then the image contributes a flat 6400 chars (≈1.6k tokens) to messagesChars
+    And the base64 payload length is irrelevant to the estimate
+
+  Scenario: tool_result nested content is counted by measureContext
+    Given the history contains a tool_result whose content is an array with a text block and an image block
+    When measureContext runs
+    Then the text block contributes its text length
+    And the image block contributes the flat 6400-char estimate
+
+  Scenario: tool_result with string content is counted by measureContext
+    Given the history contains a tool_result whose content is a plain string
+    When measureContext runs
+    Then the string length is added to messagesChars

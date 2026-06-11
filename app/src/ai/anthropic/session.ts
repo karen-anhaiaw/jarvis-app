@@ -10,6 +10,7 @@ import { sanitizeMessages } from "./sanitize-messages.js";
 import { unescapeToolInput } from "./unescape-tool-input.js";
 import { logUsage } from "./usage-log.js";
 import { load as loadSettings, getCompactionSettings } from "../../core/settings.js";
+import { archivePreCompactBackup } from "../../core/conversation-store.js";
 import { getMaxContext, getMaxOutput, supportsLongContext } from "../../config/index.js";
 
 type CapabilityDef = { name: string; description: string; input_schema: Record<string, unknown> };
@@ -61,6 +62,15 @@ export class AnthropicSession implements AISession {
   private toolFilter?: (toolName: string) => boolean;
   private messages: MessageParam[] = [];
   private label: string;
+  /** Trace id of the CURRENT turn — set by JarvisCore (duck-typed, F4.17)
+   *  right before sendAndStream/continueAndStream so session-internal logs
+   *  correlate with the bus/core logs of the same turn. Deliberately NOT on
+   *  the AISession interface: app-internal concern, no plugin contract. */
+  private turnTraceId?: string;
+  /** High-effort tier flag — set once at construction by the FACTORY (F3.12).
+   *  true → API effort "max" + usage-log tier "xhigh"; false → "high".
+   *  Immutable: effort policy is session-creation policy, never per-turn. */
+  private readonly highEffort: boolean;
   private abortController?: AbortController;
   private contextInjector?: (sessionId: string) => string[] | Promise<string[]>;
   private bus?: EventBus;
@@ -113,8 +123,14 @@ export class AnthropicSession implements AISession {
      *  otherwise generate a fresh one. Either way, it is fixed for the lifetime
      *  of this session and embedded in defaultHeaders below. */
     restoredSessionId?: string;
+    /** High-effort tier: "xhigh" reasoning + "max" output effort. Set by the
+     *  FACTORY (policy lives there, next to other session-creation policy) —
+     *  the provider must not know magic session names (F3.12: the old code
+     *  hardcoded `label === "main"` here). Default: false (standard tier). */
+    highEffort?: boolean;
   }) {
     this._sessionId = opts.restoredSessionId ?? crypto.randomUUID();
+    this.highEffort = opts.highEffort ?? false;
     // One Anthropic client per session, with NuLLM/LiteLLM identity headers
     // mirroring Claude Code CLI so traffic is attributed to the `claude_code`
     // bucket in nullm_vendor_usage_by_event (AI Tools Dashboard pipeline).
@@ -163,7 +179,7 @@ export class AnthropicSession implements AISession {
     logUsage({
       sessionId: this.label,
       instanceId: this.sessionId,
-      effort: this.label === "main" ? "xhigh" : "high",
+      effort: this.highEffort ? "xhigh" : "high",
       model: modelUsed,
       input_tokens: usage.input_tokens,
       output_tokens: usage.output_tokens,
@@ -197,6 +213,12 @@ export class AnthropicSession implements AISession {
 
   setContextInjector(injector: (sessionId: string) => string[]): void {
     this.contextInjector = injector;
+  }
+
+  /** Set the trace id for the upcoming turn (F4.17). Called by JarvisCore via
+   *  duck-typing; pass undefined to clear. Used purely for log correlation. */
+  setTurnTraceId(traceId: string | undefined): void {
+    this.turnTraceId = traceId;
   }
 
   /**
@@ -269,6 +291,7 @@ export class AnthropicSession implements AISession {
 
     log.info({
       label: this.label,
+      traceId: this.turnTraceId,
       promptLength: promptBlocks.reduce((n, b) => n + b.text.length, 0),
       promptPreview: promptPreviewText,
       promptBlocks: promptBlocks.length,
@@ -404,20 +427,44 @@ export class AnthropicSession implements AISession {
    *   Total: 4 — exactly Anthropic's limit, all stable.
    */
   private placeMessageCacheBreakpoint(): void {
+    // Block types that do NOT support cache_control — Anthropic API rejects
+    // cache_control on thinking/redacted_thinking blocks (returns 400
+    // "Extra inputs are not permitted"). This surfaces when claude-fable-5 or
+    // other thinking-capable models leave a thinking block as the last content
+    // block in an assistant message.
+    const NON_CACHEABLE_BLOCK_TYPES = new Set(["thinking", "redacted_thinking"]);
+
     // Find the most recent assistant message (scan from the end).
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const m = this.messages[i];
       if (m.role !== "assistant") continue;
       if (!Array.isArray(m.content) || m.content.length === 0) continue;
-      const lastBlock = m.content[m.content.length - 1] as any;
-      if (lastBlock && typeof lastBlock === "object") {
-        lastBlock.cache_control = { type: "ephemeral" };
+
+      // Walk backwards through blocks to find the last cacheable one.
+      // Thinking/redacted_thinking blocks don't accept cache_control.
+      let anchorBlock: any | undefined;
+      for (let j = m.content.length - 1; j >= 0; j--) {
+        const block = m.content[j] as any;
+        if (block && typeof block === "object" && !NON_CACHEABLE_BLOCK_TYPES.has(block.type)) {
+          anchorBlock = block;
+          break;
+        }
+      }
+
+      if (anchorBlock) {
+        anchorBlock.cache_control = { type: "ephemeral" };
         log.debug({
           label: this.label,
           anchorMsgIdx: i,
-          anchorBlockType: lastBlock.type,
+          anchorBlockType: anchorBlock.type,
           msgsAfterAnchor: this.messages.length - 1 - i,
         }, "AnthropicSession: placed message cache breakpoint");
+      } else {
+        // All blocks are non-cacheable (all thinking) — skip this message.
+        log.debug({
+          label: this.label,
+          anchorMsgIdx: i,
+        }, "AnthropicSession: skipping message cache breakpoint (all blocks are non-cacheable thinking blocks)");
       }
       return;
     }
@@ -764,11 +811,12 @@ export class AnthropicSession implements AISession {
       const toCompact = sanitizeMessages(this.messages.slice(0, splitAt));
       const remaining = this.messages.slice(splitAt);
 
-      // Ensure toCompact ends with a user message (API requirement for the summary call)
-      const msgs = [...toCompact];
-      if (msgs.length > 0 && msgs[msgs.length - 1].role === 'assistant') {
-        msgs.push({ role: 'user', content: 'Please summarize the conversation above.' });
-      }
+      // Same prompt-shape hardening as doCompact (F-compact-2.2/2.3):
+      // instruction guaranteed as final user content + <summary> prefill.
+      // The sliding chunk can also end in a tool_result user message when the
+      // sanitized slice carries an orphan-patched tail — the conditional
+      // instruction bug applied here too.
+      const msgs = AnthropicSession.buildSummarizerTail(toCompact);
 
       const compactionModel = this.stickyModelOverride ?? this.getBaseModel();
       // Sliding-window prompt is purpose-built for token reduction, NOT narrative summary.
@@ -796,6 +844,8 @@ export class AnthropicSession implements AISession {
         max_tokens: 4096, // sliding summaries are partial — less content than full compaction
         system: SLIDING_SYSTEM_PROMPT,
         messages: msgs,
+        // Prefill requires thinking disabled — see buildSummarizerTail/doCompact.
+        thinking: { type: 'disabled' },
       });
 
       const summaryText = summaryResponse.content
@@ -803,8 +853,7 @@ export class AnthropicSession implements AISession {
         .map((b: any) => b.text)
         .join('\n');
 
-      const match = summaryText.match(/<summary>([\s\S]*?)<\/summary>/);
-      const summary = match ? match[1].trim() : summaryText.trim();
+      const summary = AnthropicSession.extractSummary(summaryText);
 
       // Prepend summary as a synthetic user/assistant pair, keep remaining messages intact.
       // The synthetic user message starts with plain text (NOT a tool_result), so it
@@ -912,14 +961,100 @@ export class AnthropicSession implements AISession {
       "AnthropicSession: Engine B abrupt-growth compaction triggered"
     );
 
-    yield* this.doCompact(lastInputTokens, "growth" as any);
+    yield* this.doCompact(lastInputTokens, "growth");
+  }
+
+  /** The instruction that MUST terminate every summarizer request's user content. */
+  private static readonly SUMMARIZE_INSTRUCTION = "Please summarize the conversation above.";
+
+  /** Assistant prefill that forces the summarizer into summary-continuation mode. */
+  private static readonly SUMMARY_PREFILL = "<summary>";
+
+  /**
+   * Guarantee the summarize instruction is the FINAL user content of a
+   * summarizer request, then terminate with the `<summary>` assistant prefill.
+   *
+   * WHY (incident #2, 2026-06-10): the old code only appended the instruction
+   * when the history happened to end with an assistant message. When sanitize
+   * stripped a trailing orphan tool_use, the history ended in a user
+   * tool_result, the instruction was silently skipped, and the summarizer
+   * role-played the conversation instead of summarizing — replacing 416k
+   * tokens of history with 84 chars of fiction containing a hallucinated
+   * user instruction.
+   *
+   * Three tail shapes, all producing NEW message objects (the input array
+   * shares message references with the live history — mutating them would
+   * corrupt `this.messages`):
+   *   - trailing assistant    → push a new user message with the instruction
+   *   - trailing user string  → merge the instruction into the string content
+   *   - trailing user blocks  → append a text block after the tool_results
+   *     (keeps the no-consecutive-user-message shape)
+   *
+   * The prefill makes roleplay structurally impossible: the model can only
+   * CONTINUE a summary. Prefill requires thinking to be disabled — the two
+   * API features are mutually exclusive (see callSummarizer).
+   */
+  private static buildSummarizerTail(msgs: MessageParam[]): MessageParam[] {
+    if (msgs.length === 0) return msgs; // degenerate — upstream guards prevent this
+    const out = [...msgs];
+    const last = out[out.length - 1];
+    if (last.role === "assistant") {
+      out.push({ role: "user", content: AnthropicSession.SUMMARIZE_INSTRUCTION });
+    } else if (typeof last.content === "string") {
+      out[out.length - 1] = { ...last, content: `${last.content}\n\n${AnthropicSession.SUMMARIZE_INSTRUCTION}` };
+    } else if (Array.isArray(last.content)) {
+      out[out.length - 1] = { ...last, content: [...last.content, { type: "text", text: AnthropicSession.SUMMARIZE_INSTRUCTION }] };
+    } else {
+      out.push({ role: "user", content: AnthropicSession.SUMMARIZE_INSTRUCTION });
+    }
+    out.push({ role: "assistant", content: AnthropicSession.SUMMARY_PREFILL });
+    return out;
   }
 
   /**
-   * Core compaction logic shared by both fallbackCompact and forceCompact.
-   * Sends messages to a summarizer, replaces history with the summary.
+   * Extract the summary body from a summarizer response.
+   *
+   * The request prefills the assistant turn with `<summary>`, so a
+   * well-behaved response contains ONLY the body + closing tag. Prepend the
+   * prefilled tag before matching so the regex sees a complete pair. Some
+   * models re-emit the opening tag anyway — strip leading duplicates from
+   * the captured body. No closing tag (max_tokens truncation, tag-averse
+   * model) → fall back to the raw trimmed text: with the prefill in place,
+   * the whole response IS summary content by construction.
    */
-  private async *doCompact(tokensBefore: number, reason: "forced" | "threshold"): AsyncGenerator<AIStreamEvent, void> {
+  private static extractSummary(text: string): string {
+    const combined = `${AnthropicSession.SUMMARY_PREFILL}${text}`;
+    const match = combined.match(/<summary>([\s\S]*?)<\/summary>/);
+    const body = match ? match[1] : text;
+    return body.replace(/^(\s*<summary>)+/i, "").trim();
+  }
+
+  /**
+   * Core compaction logic shared by fallbackCompact, growthCompact and
+   * forceCompact. Sends messages to a summarizer, replaces history with the
+   * summary.
+   *
+   * FAILURE SEMANTICS (added after the 2026-06-10 incident — a forced
+   * compaction on a 734k-token session received an EMPTY summarizer response
+   * and replaced the entire history with it, unrecoverably):
+   *
+   *   1. History is NEVER replaced unless the summarizer returned a usable
+   *      summary (empty / whitespace-only / suspiciously-short = failure).
+   *   2. stop_reason "max_tokens" with zero text (adaptive-thinking models,
+   *      e.g. fable, can burn the whole budget on thinking blocks) gets
+   *      exactly ONE retry with a 4x budget clamped to the model ceiling.
+   *   3. The full pre-compaction history is archived to sessions/archive/
+   *      BEFORE replacement. If the backup write fails, compaction ABORTS —
+   *      an oversized context is recoverable, destroyed history is not.
+   *   4. Every failure path yields `compaction_failed` so the UI resolves the
+   *      pending banner — the catch no longer swallows errors invisibly.
+   *   5. Messages are sanitized before the summarizer call. This used to be
+   *      the ONLY call site sending history to the API without
+   *      sanitizeMessages — orphan tool_use blocks made the summarizer 400
+   *      while the main loop kept working, so automatic compaction failed
+   *      silently until the context ballooned.
+   */
+  private async *doCompact(tokensBefore: number, reason: "forced" | "threshold" | "growth"): AsyncGenerator<AIStreamEvent, void> {
     const settings = getCompactionSettings(loadSettings());
     const instructions = settings.instructions ||
       "Summarize this conversation preserving key decisions, code, and progress.";
@@ -937,35 +1072,138 @@ export class AnthropicSession implements AISession {
     };
 
     try {
-      // Ensure messages end with a user message (API requirement)
-      const msgs = [...this.messages];
-      if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
-        msgs.push({ role: "user", content: "Please summarize the conversation above." });
-      }
+      // Sanitize a COPY before the summarizer call (in-memory history is not
+      // mutated — the main loop sanitizes independently right before its own
+      // API calls). buildSummarizerTail then guarantees the summarize
+      // instruction is the final user content REGARDLESS of how the history
+      // ends, and appends the <summary> prefill (F-compact-2.2/2.3 — the
+      // conditional instruction was the root cause of incident #2's roleplay).
+      const msgs = AnthropicSession.buildSummarizerTail(sanitizeMessages([...this.messages]));
 
-      // Compaction is a UTILITY call: summary doesn't share cache pool with
-      // the main loop. Force Haiku regardless of session sticky to capture
       // Use the session's current model for compaction — same client, same model.
       // The utility model (Haiku) was too weak for large contexts (~1M tokens)
       // and would silently truncate, producing summaries that barely reduced context.
       const compactionModel = this.stickyModelOverride ?? this.getBaseModel();
       log.info({ label: this.label, compactionModel }, "AnthropicSession: compaction summary using session model");
 
-      const summaryResponse = await this.client.messages.create({
-        model: compactionModel,
-        max_tokens: 8192, // summary is short prose, doesn't need the full output budget
-        system: `You are a conversation summarizer. ${instructions}\nWrap your summary in <summary></summary> tags.`,
-        messages: msgs,
-      });
+      // Summary is short prose — doesn't need the full output budget. The
+      // retry path quadruples this when thinking exhausts it (see below).
+      const BASE_MAX_TOKENS = 8192;
 
-      const summaryText = summaryResponse.content
-        .filter((b: any) => b.type === "text")
-        .map((b: any) => b.text)
-        .join("\n");
+      /**
+       * One summarizer round-trip + full diagnostics. The 2026-06-10 incident
+       * was undiagnosable because none of this was recorded: the call bypassed
+       * usage.log and the response shape (stop_reason / block types) was never
+       * logged — `summaryLength: 0` was the only trace.
+       */
+      const callSummarizer = async (maxTokens: number) => {
+        const response = await this.client.messages.create({
+          model: compactionModel,
+          max_tokens: maxTokens,
+          system: `You are a conversation summarizer. ${instructions}\nWrap your summary in <summary></summary> tags.`,
+          messages: msgs,
+          // Prefill and extended thinking are mutually exclusive API features
+          // — and thinking burned the output budget here anyway (the
+          // max_tokens retry below exists for exactly that, kept as defense
+          // in depth for providers that ignore this flag).
+          thinking: { type: "disabled" },
+        });
 
-      // Extract content between <summary> tags, or use full text
-      const match = summaryText.match(/<summary>([\s\S]*?)<\/summary>/);
-      const summary = match ? match[1].trim() : summaryText.trim();
+        const text = response.content
+          .filter((b: any) => b.type === "text")
+          .map((b: any) => b.text)
+          .join("\n");
+        // The request ends with the <summary> prefill — extraction prepends
+        // it back before matching (see extractSummary).
+        const summary = AnthropicSession.extractSummary(text);
+
+        const stopReason = (response as any).stop_reason as string | undefined;
+        const blockTypes = response.content.map((b: any) => b.type);
+        const usage = (response as any).usage;
+
+        log.info({
+          label: this.label,
+          compactionModel,
+          maxTokens,
+          stopReason,
+          blockTypes,
+          summaryLength: summary.length,
+          inputTokens: usage?.input_tokens,
+          outputTokens: usage?.output_tokens,
+        }, "AnthropicSession: compaction summarizer response");
+
+        // Summarizer calls are real billed API usage — record them like every
+        // other call so cost analysis and incident forensics see them.
+        if (usage) {
+          logUsage({
+            sessionId: this.label,
+            instanceId: this.sessionId,
+            effort: this.highEffort ? "xhigh" : "high",
+            model: compactionModel,
+            input_tokens: usage.input_tokens ?? 0,
+            output_tokens: usage.output_tokens ?? 0,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
+            cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+          });
+        }
+
+        return { summary, stopReason, blockTypes };
+      };
+
+      let result = await callSummarizer(BASE_MAX_TOKENS);
+
+      // Thinking-budget exhaustion: adaptive-thinking models can spend the
+      // entire max_tokens budget on thinking blocks and return ZERO text
+      // (stop_reason "max_tokens"). Exactly one retry with a 4x budget,
+      // clamped to the model's output ceiling.
+      if (result.summary.length === 0 && result.stopReason === "max_tokens") {
+        const retryBudget = Math.min(BASE_MAX_TOKENS * 4, getMaxOutput(compactionModel));
+        log.warn(
+          { label: this.label, retryBudget, blockTypes: result.blockTypes },
+          "AnthropicSession: summarizer exhausted max_tokens with no text — retrying with larger budget",
+        );
+        result = await callSummarizer(retryBudget);
+      }
+
+      // ── Empty-summary guard ─────────────────────────────────────────────
+      // An empty summary is ALWAYS a failure. The short-summary floor is
+      // PROPORTIONAL to context size (F-compact-2.4) — a large context cannot
+      // legitimately summarize to a tweet. Incident #2: 84 chars passed the
+      // old absolute 50-char floor for a 416k-token context. Small sessions
+      // (≤10k tokens) keep no floor — they can summarize to a sentence.
+      const LARGE_CONTEXT_TOKENS = 10_000;
+      const minSummaryChars = tokensBefore > 200_000 ? 800 : tokensBefore > 50_000 ? 300 : 50;
+      const empty = result.summary.length === 0;
+      const tooShort = !empty && tokensBefore > LARGE_CONTEXT_TOKENS && result.summary.length < minSummaryChars;
+      if (empty || tooShort) {
+        const failReason = `summarizer returned ${empty ? "an empty" : "a suspiciously short"} summary `
+          + `(${result.summary.length} chars for ~${tokensBefore} tokens, floor=${minSummaryChars}, stop_reason=${result.stopReason ?? "?"}, `
+          + `blocks=[${result.blockTypes.join(",")}]) — history preserved`;
+        log.error(
+          { label: this.label, tokensBefore, summaryLength: result.summary.length, stopReason: result.stopReason, blockTypes: result.blockTypes },
+          "AnthropicSession: compaction ABORTED — unusable summary, history preserved",
+        );
+        yield {
+          type: "compaction_failed",
+          compactionFailed: { engine: "fallback", reason: failReason, tokensBefore },
+        };
+        return;
+      }
+
+      // ── Pre-compact backup ──────────────────────────────────────────────
+      // Archive the FULL history BEFORE replacing it. If the write fails,
+      // ABORT: an oversized context is recoverable, destroyed history is not.
+      if (!archivePreCompactBackup(this.label, this.messages)) {
+        const failReason = "pre-compaction backup write failed — compaction aborted, history preserved";
+        log.error({ label: this.label, tokensBefore }, "AnthropicSession: compaction ABORTED — backup failed");
+        yield {
+          type: "compaction_failed",
+          compactionFailed: { engine: "fallback", reason: failReason, tokensBefore },
+        };
+        return;
+      }
+
+      const summary = result.summary;
 
       // Replace message history with summary
       this.injectedContextCount = 0; // compaction wipes all messages — reset ephemeral tracking
@@ -992,6 +1230,15 @@ export class AnthropicSession implements AISession {
       };
     } catch (err) {
       log.error({ label: this.label, err }, "AnthropicSession: Engine B compaction failed");
+      const msg = err instanceof Error ? err.message : String(err);
+      yield {
+        type: "compaction_failed",
+        compactionFailed: {
+          engine: "fallback",
+          reason: `summarizer call failed: ${msg.slice(0, 300)}`,
+          tokensBefore,
+        },
+      };
     }
   }
 
@@ -1004,10 +1251,27 @@ export class AnthropicSession implements AISession {
         ? sys.reduce((sum, b) => sum + ((b as any).text?.length ?? 0), 0)
         : 0;
 
-    // Messages size
+    // Messages size. Per-block accounting (F-compact-2.5):
+    //   - image blocks: flat 6,400 chars (≈1.6k tokens at chars/4). Anthropic
+    //     bills images by DIMENSIONS, not bytes — the base64 payload (100k+
+    //     chars for a screenshot) must never leak into the estimate.
+    //   - tool_result blocks: recurse into nested content (string or block
+    //     array). Before this, everything inside a tool_result contributed
+    //     ZERO chars, hiding tool-heavy histories from the heuristic.
+    //   - everything else: text length, or JSON length of tool_use input.
+    const IMAGE_BLOCK_EST_CHARS = 6_400;
+    const blockChars = (b: any): number => {
+      if (b?.type === "image") return IMAGE_BLOCK_EST_CHARS;
+      if (b?.type === "tool_result") {
+        if (typeof b.content === "string") return b.content.length;
+        if (Array.isArray(b.content)) return b.content.reduce((s: number, ib: any) => s + blockChars(ib), 0);
+        return 0;
+      }
+      return b?.text?.length ?? (b?.input ? JSON.stringify(b.input).length : 0);
+    };
     const messagesChars = this.messages.reduce((sum, m) => {
       if (typeof m.content === "string") return sum + m.content.length;
-      if (Array.isArray(m.content)) return sum + m.content.reduce((s, b: any) => s + (b.text?.length ?? (b.input ? JSON.stringify(b.input).length : 0)), 0);
+      if (Array.isArray(m.content)) return sum + m.content.reduce((s, b: any) => s + blockChars(b), 0);
       return sum;
     }, 0);
 
@@ -1087,6 +1351,7 @@ export class AnthropicSession implements AISession {
     const ctx = this.measureContext();
     log.info({
       label: this.label,
+      traceId: this.turnTraceId,
       messageCount: ctx.messageCount,
       toolCount: toolNames.length,
       context: {
@@ -1131,10 +1396,11 @@ export class AnthropicSession implements AISession {
         betas.push("effort-2025-11-24");
       }
 
-      // effort: "max" for main session (highest available), "high" for actors/subagents.
-      // NOTE: some models don't support "xhigh" — use "max" which is universally
-      // accepted by all models that support the effort-2025-11-24 beta header.
-      const effort = modelSupportsEffort ? (this.label === "main" ? "max" : "high") : undefined;
+      // effort: "max" for high-effort sessions (factory marks the default
+      // session), "high" for actors/subagents. NOTE: some models don't support
+      // "xhigh" — use "max" which is universally accepted by all models that
+      // support the effort-2025-11-24 beta header.
+      const effort = modelSupportsEffort ? (this.highEffort ? "max" : "high") : undefined;
 
       // metadata.user_id: mirrors CC pattern — session_id for backend cache optimization
       const metadata = { user_id: JSON.stringify({ session_id: this.sessionId }) };
@@ -1355,6 +1621,7 @@ export class AnthropicSession implements AISession {
       const ctxAfter = this.measureContext();
       log.info({
         label: this.label,
+        traceId: this.turnTraceId,
         ms: Date.now() - t0,
         stopReason: message.stop_reason,
         toolCalls: toolCalls.length,
@@ -1398,7 +1665,7 @@ export class AnthropicSession implements AISession {
         log.warn({ label: this.label }, "AnthropicSession: no images found to strip despite image error");
       }
 
-      log.error({ label: this.label, err }, "AnthropicSession: API error");
+      log.error({ label: this.label, traceId: this.turnTraceId, err }, "AnthropicSession: API error");
       // Build a human-readable error string from the Anthropic SDK error shape.
       // err.status  → HTTP status code (e.g. 529, 529, 400)
       // err.error   → { type: 'error', error: { type: '...', message: '...' } }

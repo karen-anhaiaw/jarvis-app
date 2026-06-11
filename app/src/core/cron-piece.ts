@@ -14,7 +14,9 @@ import type { PersistedCronJob } from "./settings.js";
 import type { DelegateTaskPiece, DelegateRunOptions } from "../pieces/delegate-task.js";
 import { load as loadSettings, save as saveSettings, invalidateCache } from "./settings.js";
 import { graphRegistry } from "./graph-registry.js";
+import { DEFAULT_SESSION } from "./constants.js";
 import { log } from "../logger/index.js";
+import { newTraceId } from "../logger/trace.js";
 
 // NOTE: PieceManager is responsible for registering this piece as a core graph node.
 
@@ -39,6 +41,43 @@ interface CronJob {
   reply_to?: string;
   // catch-up: if true, runs immediately when a missed execution is detected
   catchUp?: boolean;
+  // in-memory only: set after the first dead-target warning so a recurring
+  // job with a dead target warns ONCE instead of spamming the default session
+  deadWarned?: boolean;
+}
+
+// ─── Fire-time target validation (phantom prevention, G2) ──────────────────
+// WHY: cron targets are persisted at creation. If the target session dies
+// (killed actor, old grpc session), publishing ai.request to it would make
+// JarvisCore lazily CREATE a phantom session with the DEFAULT system prompt
+// — not the role the id originally had — which then persists to disk and
+// resurrects on every subsequent fire. Pure functions so they are unit-
+// testable without touching settings persistence.
+// See docs/features/bdd/phantom-sessions.feature (G2).
+
+export type PromptFirePlan = { action: "fire" } | { action: "skip-warn" };
+
+/** Decide whether a prompt-mode job may fire at its persisted target.
+ *  DEFAULT_SESSION is always legitimate (created on demand by design). */
+export function planPromptFire(
+  target: string,
+  isAlive: (id: string) => boolean,
+): PromptFirePlan {
+  if (target === DEFAULT_SESSION || isAlive(target)) return { action: "fire" };
+  return { action: "skip-warn" };
+}
+
+/** Decide where a delegate-mode result is delivered. Dead reply_to falls
+ *  back to DEFAULT_SESSION with `redirected: true` so the message can carry
+ *  a note about the original target. */
+export function planDelegateReply(
+  requested: string,
+  isAlive: (id: string) => boolean,
+): { target: string; redirected: boolean } {
+  if (requested === DEFAULT_SESSION || isAlive(requested)) {
+    return { target: requested, redirected: false };
+  }
+  return { target: DEFAULT_SESSION, redirected: true };
 }
 
 // ─── Cron parsing ─────────────────────────────────────────────────────────────
@@ -217,6 +256,9 @@ export class CronPiece implements Piece {
   private jobs = new Map<string, CronJob>();
   private counter = 0;
   private delegatePiece?: DelegateTaskPiece;
+  /** Minimal view over SessionManager used for fire-time target validation.
+   *  Optional: when absent (tests, legacy embedding) validation is permissive. */
+  private sessionResolver?: { has(id: string): boolean };
 
   constructor(registry: CapabilityRegistry) {
     this.registry = registry;
@@ -225,6 +267,12 @@ export class CronPiece implements Piece {
   /** Inject delegate piece after both are started. Called from main.ts. */
   setDelegatePiece(piece: DelegateTaskPiece): void {
     this.delegatePiece = piece;
+  }
+
+  /** Inject the session resolver (SessionManager satisfies the shape).
+   *  Called from main.ts. Enables dead-target detection at fire time (G2). */
+  setSessionResolver(resolver: { has(id: string): boolean }): void {
+    this.sessionResolver = resolver;
   }
 
   systemContext(): string {
@@ -396,20 +444,34 @@ export class CronPiece implements Piece {
   private executeJob(job: CronJob): void {
     job.runs++;
     job.lastRun = Date.now();
+    // One traceId per FIRE (F4.17): the fire log and every publish caused by
+    // this fire (prompt request, delegate result, dead-target warning) share
+    // the same id, so a scheduled turn is filterable end-to-end like a chat
+    // turn. Without this the bus would auto-fill a DIFFERENT id per publish,
+    // breaking the linkage between "executing job" and the downstream turn.
+    const traceId = newTraceId();
     log.info(
-      { jobId: job.id, mode: job.mode ?? "prompt", prompt: job.prompt.slice(0, 50), runs: job.runs, lastRun: new Date(job.lastRun).toISOString() },
+      { jobId: job.id, traceId, mode: job.mode ?? "prompt", prompt: job.prompt.slice(0, 50), runs: job.runs, lastRun: new Date(job.lastRun).toISOString() },
       "CronPiece: executing job",
     );
 
     if (job.mode === "delegate") {
-      this.executeDelegateJob(job);
+      this.executeDelegateJob(job, traceId);
     } else {
-      this.bus.publish({
-        channel: "ai.request",
-        source: "cron",
-        target: job.target,
-        text: `[CRON job "${job.id}"] ${job.prompt}`,
-      } as any);
+      // Fire-time target validation (G2): never publish into a dead session —
+      // that would materialize a phantom with the default prompt.
+      const plan = planPromptFire(job.target, (id) => this.isSessionAlive(id));
+      if (plan.action === "skip-warn") {
+        this.warnDeadTarget(job, traceId);
+      } else {
+        this.bus.publish({
+          channel: "ai.request",
+          source: "cron",
+          target: job.target,
+          text: `[CRON job "${job.id}"] ${job.prompt}`,
+          traceId,
+        } as any);
+      }
     }
 
     // Persist lastRun immediately
@@ -426,34 +488,71 @@ export class CronPiece implements Piece {
     }
   }
 
-  private executeDelegateJob(job: CronJob): void {
+  private executeDelegateJob(job: CronJob, traceId: string): void {
     if (!this.delegatePiece) {
-      log.warn({ jobId: job.id }, "CronPiece: delegate mode but DelegateTaskPiece not injected — skipping");
+      log.warn({ jobId: job.id, traceId }, "CronPiece: delegate mode but DelegateTaskPiece not injected — skipping");
       return;
     }
 
-    const replyTo = job.reply_to ?? job.target;
+    const requestedReplyTo = job.reply_to ?? job.target;
 
     this.delegatePiece.runDelegate({
       task: job.prompt,
       role: job.role,
       model: job.model,
     }).then(({ summary, error }) => {
+      // Re-validate at COMPLETION time (not fire time) — the target can die
+      // while the delegate runs. Dead reply_to → redirect to default session
+      // with an explicit note instead of materializing a phantom (G2).
+      const reply = planDelegateReply(requestedReplyTo, (id) => this.isSessionAlive(id));
+      const redirectNote = reply.redirected
+        ? ` (redirected: session "${requestedReplyTo}" no longer exists)`
+        : "";
       const text = error
-        ? `[CRON delegate "${job.id}" ERROR] ${error}`
-        : `[CRON delegate "${job.id}"] ${summary}`;
+        ? `[CRON delegate "${job.id}"${redirectNote} ERROR] ${error}`
+        : `[CRON delegate "${job.id}"${redirectNote}] ${summary}`;
 
       this.bus.publish({
         channel: "ai.request",
         source: "cron",
-        target: replyTo,
+        target: reply.target,
         text,
+        traceId,
       } as any);
 
-      log.info({ jobId: job.id, replyTo, chars: summary.length, error }, "CronPiece: delegate job completed");
+      log.info({ jobId: job.id, traceId, replyTo: reply.target, redirected: reply.redirected, chars: summary.length, error }, "CronPiece: delegate job completed");
     }).catch((err: unknown) => {
-      log.error({ jobId: job.id, err }, "CronPiece: delegate job crashed");
+      log.error({ jobId: job.id, traceId, err }, "CronPiece: delegate job crashed");
     });
+  }
+
+  /** True when the session exists in the SessionManager (in-memory).
+   *  No resolver wired (tests, legacy embedding) ⇒ permissive: behave as before. */
+  private isSessionAlive(sessionId: string): boolean {
+    if (!this.sessionResolver) return true;
+    return this.sessionResolver.has(sessionId);
+  }
+
+  /** One-time warning to the default session about a job whose target died.
+   *  The LLM receiving it is instructed to ask the user keep-vs-delete.
+   *  Warns once per job (deadWarned flag) — recurring jobs would otherwise
+   *  spam the default session on every fire. */
+  private warnDeadTarget(job: CronJob, traceId: string): void {
+    log.warn({ jobId: job.id, traceId, target: job.target, runs: job.runs }, "CronPiece: target session no longer exists — fire skipped");
+    if (job.deadWarned) return;
+    job.deadWarned = true;
+    this.bus.publish({
+      channel: "ai.request",
+      source: "cron",
+      target: DEFAULT_SESSION,
+      traceId,
+      text: [
+        `[CRON job "${job.id}"] SKIPPED — target session "${job.target}" no longer exists.`,
+        `The job's prompt was NOT executed and will keep being skipped while the target is gone.`,
+        `Ask the user whether to keep this job or delete it via cron_delete("${job.id}").`,
+        `Job prompt (first 200 chars): ${job.prompt.slice(0, 200)}`,
+      ].join("\n"),
+    } as any);
   }
 
   private scheduleJob(job: CronJob, parsed?: ParsedCron, catchUpDelayMs?: number): void {
@@ -500,6 +599,7 @@ export class CronPiece implements Piece {
   private registerTools(): void {
     this.registry.register({
       name: "cron_create",
+      category: "cron",
       description: "Schedule a prompt to run on a timer. Two modes: 'prompt' (default) sends the prompt to the calling session's LLM; 'delegate' spawns a cheap ephemeral worker (Haiku/Sonnet) directly with no LLM in the loop and posts the result to reply_to. Supports '*/N * * * *' (interval), 'once:Ns/Nm' (one-shot), 'HH:MM' or '0 H * * *' (daily), 'M H * * 1-5' (weekly). Target is always the calling session — never passed by the LLM. Use catch_up:true for daily/weekly jobs that must not miss executions across restarts.",
       input_schema: {
         type: "object",
@@ -508,7 +608,7 @@ export class CronPiece implements Piece {
           prompt: { type: "string", description: "The prompt or task description to execute at each trigger" },
           recurring: { type: "boolean", description: "true for recurring (default), false for one-shot" },
           mode: { type: "string", enum: ["prompt", "delegate"], description: "'prompt' (default): sends prompt to the calling session's LLM. 'delegate': runs an ephemeral worker (DelegateTaskPiece) directly — no LLM in the loop, result posted to reply_to session." },
-          role: { type: "string", description: "delegate mode only: role for the worker (default: nu-discovery-agent)" },
+          role: { type: "string", description: "delegate mode only: role for the worker (default: settings delegate.defaultRole, fallback 'generic')" },
           model: { type: "string", description: "delegate mode only: model override for the worker (e.g. 'haiku', 'sonnet')" },
           reply_to: { type: "string", description: "delegate mode only: session to receive the result (default: calling session)" },
           catch_up: { type: "boolean", description: "If true, runs immediately on restore if a scheduled slot was missed (daily/weekly only). Default: false." },
@@ -562,6 +662,7 @@ export class CronPiece implements Piece {
 
     this.registry.register({
       name: "cron_list",
+      category: "cron",
       description: "List all scheduled cron jobs.",
       input_schema: { type: "object", properties: {} },
       handler: async () => ({
@@ -580,6 +681,7 @@ export class CronPiece implements Piece {
 
     this.registry.register({
       name: "cron_delete",
+      category: "cron",
       description: "Delete a scheduled cron job by ID.",
       input_schema: {
         type: "object",

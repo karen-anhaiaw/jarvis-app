@@ -30,6 +30,109 @@ import { log } from "../logger/index.js";
 import { newTraceId, preview } from "../logger/trace.js";
 import { config } from "../config/index.js";
 import { graphRegistry } from "./graph-registry.js";
+import { DEFAULT_SESSION } from "./constants.js";
+import { TurnTracker } from "./turn-tracker.js";
+
+// ─── Inter-session dispatch text (attribution + reply routing) ────────────
+// WHY: when session A publishes ai.request into session B, B's LLM must know
+// WHO sent the message (or it may treat it as human input) and WHERE to send
+// the answer when one is expected. Pure function — unit-tested against
+// docs/features/bdd/inter-session-messaging.feature.
+//
+// Rules:
+//   - chat-input / jarvis-core / cron → plain text (user input, self-routing,
+//     and cron self-prefixes [CRON job ...] respectively).
+//   - any other source WITH replyTo → origin + bus_publish reply instruction
+//     (legacy contract preserved — plugins that request answers rely on it).
+//   - a LIVE-SESSION source WITHOUT replyTo → origin-only preamble marking it
+//     fire-and-forget (the "bare pong" fix; no reply instruction).
+//   - non-session sources without replyTo (voice-stt, canvas, mnemosyne,
+//     system, grpc, plugins) → plain text, unchanged.
+
+export function buildDispatchText(opts: {
+  text: string;
+  source: string;
+  replyTo?: string;
+  reminderBlock?: string;
+  /** True when opts.source is a live session id (SessionManager.has).
+   *  Computed by the caller so this function stays pure. */
+  sourceIsLiveSession?: boolean;
+}): string | import("../ai/types.js").PromptBlock[] {
+  const reminder = opts.reminderBlock ?? "";
+  const internal = opts.source === "chat-input" || opts.source === "jarvis-core" || opts.source === "cron";
+
+  if (!internal && opts.replyTo) {
+    return [
+      {
+        type: "text" as const,
+        text: [
+          `[SYSTEM] This message was sent by session "${opts.source}" (not the user).`,
+          `It expects your response to be delivered via bus_publish to session "${opts.replyTo}".`,
+          `Do NOT address the user directly. Publish your answer using:`,
+          `  bus_publish({ channel: "ai.request", target: "${opts.replyTo}", text: "<your answer>" })`,
+        ].join("\n"),
+      },
+      { type: "text" as const, text: reminder + opts.text },
+    ];
+  }
+
+  if (!internal && opts.sourceIsLiveSession) {
+    return [
+      {
+        type: "text" as const,
+        text: [
+          `[SYSTEM] This message was sent by session "${opts.source}" (not the user).`,
+          `It is fire-and-forget: no reply channel was provided and no response is expected.`,
+          `Do NOT treat it as input typed by the human user.`,
+        ].join("\n"),
+      },
+      { type: "text" as const, text: reminder + opts.text },
+    ];
+  }
+
+  return reminder + opts.text;
+}
+
+// ─── Queue drain planning (segmented drain, F2.6) ──────────────────────
+// WHY: drainQueue combines N queued messages into ONE API call for token
+// efficiency. One API call yields ONE response — request-reply messages
+// cannot share a combined turn (whose replyTo would win?), and inter-session
+// attribution preambles are per-message. Pre-mission bug: drain DISCARDED
+// replyTo (request-reply to a busy session never routed back) and skipped
+// attribution. The planner segments the queue: a head message needing solo
+// semantics dispatches alone; otherwise the longest plain prefix combines.
+// The remainder stays queued — consumeStream re-drains after each turn.
+
+export interface QueuedDrainItem {
+  text: string;
+  source: string;
+  replyTo?: string;
+  images?: AIRequestMessage["images"];
+  systems: string[];
+}
+
+export type QueueDrainPlan =
+  | { mode: "solo"; item: QueuedDrainItem }
+  | { mode: "combine"; items: QueuedDrainItem[] };
+
+export function planQueueDrain(
+  queue: QueuedDrainItem[],
+  isLiveSession: (id: string) => boolean,
+): QueueDrainPlan {
+  const needsSolo = (m: QueuedDrainItem): boolean => {
+    const internal = m.source === "chat-input" || m.source === "jarvis-core" || m.source === "cron";
+    // replyTo always demands a dedicated turn (one reply route per API call).
+    // A live-session source demands per-message origin attribution.
+    return !!m.replyTo || (!internal && isLiveSession(m.source));
+  };
+  if (needsSolo(queue[0])) return { mode: "solo", item: queue[0] };
+  const items: QueuedDrainItem[] = [];
+  for (const m of queue) {
+    if (needsSolo(m)) break;
+    items.push(m);
+  }
+  return { mode: "combine", items };
+}
 
 /**
  * Produces a compact, human-readable summary of a tool call's arguments
@@ -127,6 +230,53 @@ export class JarvisCore implements Piece {
    *  continuation) so the whole turn shares one id in the logs. */
   private currentTrace = new Map<string, string>();
 
+  /**
+   * Per-turn lifecycle aggregator (F5, Pillar B). Instantiated in start()
+   * with the live bus. Called DIRECTLY at the turn hook sites (begin /
+   * textDelta / roundTrip / toolsDispatched / toolsCompleted / complete /
+   * abort / error) — see docs/features/turn-tracker.md for why it is not
+   * a bus subscriber. Public via the getter for introspection (jarvis_eval,
+   * turn-inspector initial snapshot).
+   */
+  private turns!: TurnTracker;
+
+  /** Turn tracker — exposed for introspection (jarvis_eval) and the
+   *  turn-inspector piece's initial snapshot. Available after start(). */
+  get turnTracker(): TurnTracker {
+    return this.turns;
+  }
+
+  /**
+   * Reactor state for the HUD orb, derived DIRECTLY from globalState — the
+   * source of truth (F6 hud-truth, design decision #3). HudState pulls this
+   * via setReactorSource instead of reading its own jarvis-core panel copy
+   * (which arrives via hud.update and can lag or drop).
+   */
+  getReactorState(): { status: string; coreLabel: string; coreSubLabel: string } {
+    return {
+      status: this.globalState,
+      coreLabel: this.globalState.toUpperCase().replace("_", " "),
+      coreSubLabel: "",
+    };
+  }
+
+  /**
+   * Current desired HUD panel state — the reconciliation producer snapshot
+   * (F6). MUST mirror the `add` published in start() so a reconcile re-add
+   * heals to an identical panel.
+   */
+  getHudSnapshot(): import("./piece.js").HudPieceData {
+    return {
+      pieceId: this.id,
+      type: "overlay",
+      name: this.name,
+      status: this.globalState,
+      data: this.getData(),
+      position: { x: 650, y: 30 },
+      size: { width: 220, height: 260 },
+    };
+  }
+
   private getTrace(sessionId: string): string | undefined {
     return this.currentTrace.get(sessionId);
   }
@@ -223,21 +373,48 @@ export class JarvisCore implements Piece {
    */
   async start(bus: EventBus): Promise<void> {
     this.bus = bus;
-
-    // Register actor-* sessions as owned — JarvisCore is the sole stream
-    // processor for ALL sessions. The actor-runner plugin only manages
-    // lifecycle (create/destroy/configure); it does not intercept ai.request.
-    this.registerSessionPattern(/^actor-/);
+    this.turns = new TurnTracker({
+      publish: (m) => this.bus.publish(m as Parameters<EventBus["publish"]>[0]),
+    });
 
     this.bus.subscribe<AIRequestMessage>("ai.request", (msg) => {
       if (msg.target) {
         return this.handlePrompt(msg);
       }
+      // Targetless ai.request → DROP, but never silently. There is NO
+      // default target by design: routing a stray/buggy publisher's message
+      // into the user's main chat would be ghost behavior (decided 2026-06-10,
+      // mission jarvis-fix). target is mandatory for ai.request — the
+      // bus_publish tool enforces it at schema level; internal publishers
+      // must set it explicitly. This warn is the observability net.
+      log.warn({
+        source: msg.source,
+        replyTo: msg.replyTo,
+        traceId: msg.traceId,
+        preview: preview(msg.text ?? "", 80),
+      }, "JarvisCore: ai.request WITHOUT target — dropped (no default; fix the publisher)");
     });
 
     this.bus.subscribe<CapabilityResultMessage>("capability.result", (msg) => {
       // Handle capability results for any session we manage
       if (msg.target) return this.handleToolResult(msg);
+    });
+
+    // Session lifecycle eviction (F3.14): when SessionManager closes a
+    // session, drop every per-session entry this piece holds. Without this,
+    // pendingPrompts / pendingReplyTo / currentTrace / sessionStates kept
+    // entries for dead sessions forever (review 2026-06-10: orphan state).
+    this.bus.subscribe<SystemEventMessage>("system.event", (msg) => {
+      if ((msg as any).event !== "session.closed") return;
+      const sessionId = (msg as any).data?.sessionId as string | undefined;
+      if (!sessionId) return;
+      const hadQueue = this.pendingPrompts.delete(sessionId);
+      this.pendingReplyTo.delete(sessionId);
+      this.currentTrace.delete(sessionId);
+      this.sessionStates.delete(sessionId);
+      this.deriveGlobalState();
+      this.updateHud();
+      log.debug({ sessionId, hadQueue }, "JarvisCore: per-session state evicted on session.closed");
     });
 
     // Register HUD piece
@@ -327,7 +504,7 @@ export class JarvisCore implements Piece {
     this.bus.publish({
       channel: "ai.stream",
       source: "jarvis-core",
-      target: "main",
+      target: DEFAULT_SESSION,
       event: "complete",
       text: "Back online, Sir.",
       usage: { input_tokens: 0, output_tokens: 0 },
@@ -361,7 +538,7 @@ export class JarvisCore implements Piece {
     this.bus.publish({
       channel: "ai.request",
       source: "system",
-      target: "main",
+      target: DEFAULT_SESSION,
       text: contextMessage,
     });
     log.info("JarvisCore: startup prompt ai.request published");
@@ -435,6 +612,10 @@ export class JarvisCore implements Piece {
       event: "aborted",
       traceId,
     } as any);
+
+    // Close the open turn as aborted (no traceId needed — closes whatever
+    // is open for this session; idempotent if already closed).
+    this.turns.abort(sessionId);
 
     // Trace ends — clear so the next turn starts with a fresh id.
     this.currentTrace.delete(sessionId);
@@ -511,6 +692,8 @@ export class JarvisCore implements Piece {
     }
 
     this.currentTrace.set(sessionId, traceId);
+    // Turn opens here — one TurnSummary per traceId (F5).
+    this.turns.begin(sessionId, traceId, msg.source);
 
     /**
      * Compose optional per-turn system reminders (msg.systems?: string[]).
@@ -530,35 +713,22 @@ export class JarvisCore implements Piece {
       ? systems.map(s => `<system-reminder>\n${s}\n</system-reminder>`).join("\n\n") + "\n\n"
       : "";
 
-    // When a message arrives from another session (not the human chat input)
-    // and carries a replyTo, deliver it as TWO separate content blocks:
-    //   [0] [SYSTEM] preamble — origin + reply routing instruction
-    //   [1] the actual message text (with reminders prepended)
-    // This keeps context and content structurally distinct in the message history.
-    // Inter-session: message from another session (not user input, not jarvis-core
-    // routing its own result back) AND has a replyTo target.
-    // Excludes jarvis-core as source to avoid injecting preamble on task dispatches
-    // (actor_dispatch flows through JarvisCore with source="jarvis-core", replyTo="main").
-    const isInterSession = msg.source !== "chat-input"
-      && msg.source !== "jarvis-core"
-      && !!msg.replyTo;
-    const dispatchText: string | import("../ai/types.js").PromptBlock[] = isInterSession
-      ? [
-          {
-            type: "text" as const,
-            text: [
-              `[SYSTEM] This message was sent by session "${msg.source}" (not the user).`,
-              `It expects your response to be delivered via bus_publish to session "${msg.replyTo}".`,
-              `Do NOT address the user directly. Publish your answer using:`,
-              `  bus_publish({ channel: "ai.request", target: "${msg.replyTo}", text: "<your answer>" })`,
-            ].join("\n"),
-          },
-          {
-            type: "text" as const,
-            text: reminderBlock + (msg.text ?? ""),
-          },
-        ]
-      : reminderBlock + text;
+    // Inter-session attribution + reply routing — see buildDispatchText()
+    // (exported pure helper, top of file) and
+    // docs/features/bdd/inter-session-messaging.feature.
+    // sourceIsLiveSession: bus_publish stamps the caller's sessionId as source,
+    // so a live-session source = session-to-session traffic. It must carry
+    // origin attribution even without replyTo — otherwise the receiving LLM
+    // mistakes it for human input (evidenced 2026-06-10: bare "pong" from an
+    // actor arrived in main with zero context). Non-session sources
+    // (voice-stt, canvas, mnemosyne, system, grpc) keep legacy plain delivery.
+    const dispatchText = buildDispatchText({
+      text,
+      source: msg.source,
+      replyTo: msg.replyTo,
+      reminderBlock,
+      sourceIsLiveSession: this.sessions.has(msg.source),
+    });
 
     // Session is idle — this prompt is about to be sent to the API.
     // Emit prompt_dispatched so the timeline renders it as a user entry
@@ -628,10 +798,17 @@ export class JarvisCore implements Piece {
       }, "JarvisCore: *** API CALL START ***");
 
       const images = msgImages?.map(i => ({ label: i.label, base64: i.base64, mediaType: i.mediaType }));
+      // Hand the turn's traceId to the session (duck-typed, F4.17) so
+      // session-internal logs (API call, complete, error) carry it too.
+      (managed.session as { setTurnTraceId?: (id?: string) => void }).setTurnTraceId?.(traceId);
       const stream = managed.session.sendAndStream(text, images);
       await this.consumeStream(sessionId, stream);
     } catch (err: any) {
       log.info({ sessionId, traceId }, "JarvisCore: dispatchToSession error — popState");
+      // Close the turn as error; fall back to abort-style close when the
+      // trace was already cleared (defensive — keeps the one-summary invariant).
+      if (traceId) this.turns.error(sessionId, traceId, String(err));
+      else this.turns.abort(sessionId);
       this.sessions.popState(sessionId);
       this.setSessionState(sessionId, "idle");
       this.updateHud();
@@ -716,6 +893,16 @@ export class JarvisCore implements Piece {
 
     managed.session.addToolResults(pendingCalls, results);
 
+    // Stamp per-tool durations/errors on the turn (durationMs measured by
+    // the registry per call — see CapabilityResult.durationMs).
+    if (traceId) {
+      this.turns.toolsCompleted(sessionId, traceId, results.map(r => ({
+        tool_use_id: r.tool_use_id,
+        is_error: r.is_error,
+        durationMs: r.durationMs,
+      })));
+    }
+
     // Notify chat of tool completion with output preview
     for (const tc of pendingCalls) {
       const result = results.find(r => r.tool_use_id === tc.id);
@@ -757,6 +944,9 @@ export class JarvisCore implements Piece {
     }, "JarvisCore: continuing stream after tool results");
 
     try {
+      // Tool-loop continuation belongs to the SAME turn — refresh the trace
+      // on the session (it may have been cleared or reused meanwhile).
+      (managed.session as { setTurnTraceId?: (id?: string) => void }).setTurnTraceId?.(traceId);
       const stream = managed.session.continueAndStream();
       await this.consumeStream(sessionId, stream);
     } catch (err: any) {
@@ -778,6 +968,9 @@ export class JarvisCore implements Piece {
         err: err?.message ?? String(err),
         stack: err?.stack,
       }, "JarvisCore: tool continuation failed");
+      // Close the turn as error (same defensive fallback as dispatchToSession).
+      if (traceId) this.turns.error(sessionId, traceId, String(err));
+      else this.turns.abort(sessionId);
     }
   }
 
@@ -826,6 +1019,9 @@ export class JarvisCore implements Piece {
           case "text_delta":
             fullText += event.text ?? "";
             deltaCount++;
+            // Turn-level TTFT + text accumulation. Stale traceIds (turn
+            // aborted and superseded) are ignored inside the tracker.
+            if (traceId) this.turns.textDelta(sessionId, traceId, (event.text ?? "").length);
             if (firstDeltaAt === undefined) {
               firstDeltaAt = Date.now();
               log.info({ traceId, sessionId, ttftMs: firstDeltaAt - tStream0 }, "JarvisCore: first delta received");
@@ -853,6 +1049,18 @@ export class JarvisCore implements Piece {
             break;
           case "message_complete":
             usage = event.usage;
+            // One API round-trip done — accumulate usage on the open turn.
+            // Model: prefer the session's effective model (sticky/override
+            // aware via peekModel) over config.model, which ignores both.
+            if (traceId) {
+              this.turns.roundTrip(
+                sessionId,
+                traceId,
+                event.usage,
+                (event as any).stopReason,
+                this.sessions.peek(sessionId)?.session.peekModel?.() ?? config.model,
+              );
+            }
             log.info({
               traceId,
               sessionId,
@@ -884,6 +1092,43 @@ export class JarvisCore implements Piece {
                 tokensBefore: event.compactionStart.tokensBefore,
                 reason: event.compactionStart.reason,
               }, "JarvisCore: compaction started");
+            }
+            break;
+          case "compaction_failed":
+            if (event.compactionFailed) {
+              // Engine B compaction failed — history is PRESERVED (see
+              // doCompact failure semantics). Forward so the chat UI resolves
+              // the pending banner into a failure entry instead of hanging.
+              // Like compaction_start, intentionally NOT in the public
+              // AIStreamMessage union — published via cast.
+              this.bus.publish({
+                channel: "ai.stream",
+                source: "jarvis-core",
+                target: sessionId,
+                event: "compaction_failed",
+                compactionFailed: event.compactionFailed,
+                traceId,
+              } as any);
+
+              this.bus.publish({
+                channel: "system.event",
+                source: "jarvis-core",
+                event: "compaction_failed",
+                data: {
+                  sessionId,
+                  engine: event.compactionFailed.engine,
+                  tokensBefore: event.compactionFailed.tokensBefore,
+                  reason: event.compactionFailed.reason,
+                },
+                traceId,
+              } as any);
+
+              log.error({
+                traceId,
+                sessionId,
+                tokensBefore: event.compactionFailed.tokensBefore,
+                reason: event.compactionFailed.reason,
+              }, "JarvisCore: compaction FAILED — history preserved");
             }
             break;
           case "compaction":
@@ -987,6 +1232,12 @@ export class JarvisCore implements Piece {
 
       const managed = this.sessions.get(sessionId);
       managed.pendingToolCalls = toolCalls;
+      // Register pending tools on the turn (durations stamped on result).
+      // Shortened names — matches the chat timeline display convention.
+      if (traceId) {
+        this.turns.toolsDispatched(sessionId, traceId,
+          toolCalls.map(tc => ({ id: tc.id, name: shortenToolName(tc.name) })));
+      }
       // Pop processing, push waiting_tools — API done, now waiting for tools.
       log.info({
         traceId,
@@ -1071,6 +1322,9 @@ export class JarvisCore implements Piece {
         traceId,
       } as any);
 
+      // Turn closes — exactly one TurnSummary per traceId (F5).
+      if (traceId) this.turns.complete(sessionId, traceId);
+
       // Trace ends here for this turn — clear so a new turn starts fresh.
       this.currentTrace.delete(sessionId);
 
@@ -1117,71 +1371,89 @@ export class JarvisCore implements Piece {
     const queue = this.pendingPrompts.get(sessionId);
     if (!queue || queue.length === 0) return;
 
-    // Snapshot the original queued messages BEFORE combining, so the
-    // timeline can render one user entry per original message (preserving
-    // each message's source/label). The backend still combines them into
-    // a single API call to save tokens.
-    const items = queue.map(m => ({
+    // Snapshot queued messages including replyTo (F2.6 — previously DISCARDED
+    // here, breaking request-reply to busy sessions). The planner decides:
+    // solo dispatch (replyTo / inter-session attribution) vs plain combine.
+    const drainItems: QueuedDrainItem[] = queue.map(m => ({
       text: m.text ?? "",
       source: m.source,
+      replyTo: m.replyTo,
       images: (m as any).images,
       systems: Array.isArray((m as any).systems) ? (m as any).systems as string[] : [],
     }));
-    // Compose per-message: each queued msg's reminders prefix its own text,
-    // then all are joined. This preserves the source→reminder coupling — a
-    // voice STT message keeps its `voice_say`-forcing reminder right next to
-    // the transcript that needs it, even when combined with sibling prompts.
-    const combined = items
-      .map(i => {
-        const r = i.systems.length > 0
-          ? i.systems.map(s => `<system-reminder>\n${s}\n</system-reminder>`).join("\n\n") + "\n\n"
-          : "";
-        return r + i.text;
-      })
-      .join("\n\n");
-    const allImages = items.flatMap(i => i.images ?? []);
-    queue.length = 0;
-    // NOTE: do NOT broadcastPendingQueue here — the empty broadcast would
-    // wipe the UI queue display before the messages are actually processed.
-    // The caller (abortSession or consumeStream) already broadcast the
-    // pre-drain snapshot. The UI will clear naturally when items drain.
+    const plan = planQueueDrain(drainItems, (id) => this.sessions.has(id));
 
-    // Drain starts a fresh turn — generate a new traceId so logs separate
-    // the previous turn's tail from this combined dispatch.
+    // Drain starts a fresh turn — new traceId separates it in the logs.
     const traceId = newTraceId();
     this.currentTrace.set(sessionId, traceId);
+    // Turn opens here (drain path). Combined drains merge N messages into
+    // one API call — there is no single source, so they are attributed to
+    // the synthetic "drain:combined" (documented in TurnSummary.source).
+    this.turns.begin(sessionId, traceId, plan.mode === "solo" ? plan.item.source : "drain:combined");
 
-    log.info({
-      traceId,
-      sessionId,
-      items: items.length,
-      combinedLength: combined.length,
-      images: allImages.length,
-    }, "JarvisCore: draining queued prompts");
+    const composeReminders = (systems: string[]): string => systems.length > 0
+      ? systems.map(s => `<system-reminder>\n${s}\n</system-reminder>`).join("\n\n") + "\n\n"
+      : "";
+
+    let dispatchText: string | import("../ai/types.js").PromptBlock[];
+    let dispatchedItems: QueuedDrainItem[];
+    let images: AIRequestMessage["images"];
+
+    if (plan.mode === "solo") {
+      // Full handlePrompt semantics for ONE message: reply routing +
+      // origin attribution. Remainder stays queued — re-drained when this
+      // turn completes (consumeStream → drainQueue), order preserved.
+      queue.shift();
+      const item = plan.item;
+      if (item.replyTo) this.pendingReplyTo.set(sessionId, item.replyTo);
+      else this.pendingReplyTo.delete(sessionId);
+      dispatchText = buildDispatchText({
+        text: item.text,
+        source: item.source,
+        replyTo: item.replyTo,
+        reminderBlock: composeReminders(item.systems),
+        sourceIsLiveSession: this.sessions.has(item.source),
+      });
+      dispatchedItems = [item];
+      images = item.images;
+      log.info({ traceId, sessionId, source: item.source, replyTo: item.replyTo, remaining: queue.length }, "JarvisCore: draining queued prompt (solo — reply/attribution semantics)");
+    } else {
+      // Plain combine — same token optimization as before. Per-message
+      // reminders prefix their own text (source→reminder coupling: a voice
+      // STT message keeps its voice_say-forcing reminder next to its
+      // transcript even when combined with sibling prompts).
+      queue.splice(0, plan.items.length);
+      // Combined turns have no reply route — clear any stale entry.
+      this.pendingReplyTo.delete(sessionId);
+      dispatchText = plan.items.map(i => composeReminders(i.systems) + i.text).join("\n\n");
+      dispatchedItems = plan.items;
+      const allImages = plan.items.flatMap(i => i.images ?? []);
+      images = allImages.length > 0 ? allImages : undefined;
+      log.info({ traceId, sessionId, items: plan.items.length, remaining: queue.length }, "JarvisCore: draining queued prompts (combined)");
+    }
 
     // Signal "processing" to the frontend BEFORE emitting prompt_dispatched
     // so the thinking indicator lights up before the user entry appears.
     // We do NOT push onto the stack here — dispatchToSession will push.
-    // Only update the HUD-side sessionStates map and broadcast SSE; the
-    // SessionManager stack is left for dispatchToSession to manage.
-    log.info({ sessionId, traceId, queueItems: items.length }, "JarvisCore: drainQueue — pre-broadcast processing (no stack push)");
     this.setSessionState(sessionId, "processing");
     this.updateHud();
     this.broadcastSessionState(sessionId, "processing");
 
-    // Emit one prompt_dispatched per original queued message — the timeline
-    // renders each as its own user entry with its own source label.
-    this.broadcastPromptDispatched(sessionId, items);
+    // One prompt_dispatched per dispatched message — timeline renders each
+    // as its own user entry with its own source label.
+    this.broadcastPromptDispatched(sessionId, dispatchedItems.map(i => ({
+      text: i.text,
+      source: i.source,
+      images: i.images,
+    })));
 
-    // Queue is now empty — tell the UI to clear the pending list.
+    // Broadcast the post-splice snapshot — possibly non-empty (segmented
+    // drain leaves the remainder queued for the next turn).
     this.broadcastPendingQueue(sessionId);
 
-    // Send the combined prompt to the AI. We bypass handlePrompt because
-    // (a) the queue branch would re-queue (session is already processing),
-    // and (b) prompt_dispatched was already emitted above for the original
-    // items. dispatchToSession will call setState("processing") again at its
-    // top — that is a no-op since we already set it here.
-    void this.dispatchToSession(sessionId, combined, allImages.length > 0 ? allImages : undefined);
+    // Bypass handlePrompt: (a) queue branch would re-queue (session already
+    // processing), (b) prompt_dispatched already emitted for these items.
+    void this.dispatchToSession(sessionId, dispatchText, images);
   }
 
   /**
@@ -1279,26 +1551,33 @@ export class JarvisCore implements Piece {
 
   /** Derive global state from all tracked per-session states */
   /**
-   * Recomputes globalState from all per-session states.
+   * Recomputes globalState from the `main` session state ONLY.
    *
-   * Priority: waiting_tools > processing > online.
-   * Empty sessionStates map (all idle) → "online".
+   * Rationale (decided 2026-06-01):
+   *   The central reactor (the orange "JARVIS THINKING" core) historically
+   *   reflected the AGGREGATED state of every active session — any actor
+   *   processing a request lit the core. That was confusing because each
+   *   actor already has its own indicator in the Actor Pool panel, and the
+   *   core implied that "main" was busy when it wasn't.
+   *
+   *   New rule: the reactor mirrors ONLY the `main` session. Actor activity
+   *   is surfaced exclusively through the Actor Pool indicators. The core
+   *   is the user's personal "are you thinking about MY request?" signal.
+   *
+   * Priority for main: waiting_tools > processing > online.
+   * `main` absent or idle → "online".
    * Also syncs graphRegistry for hud-core-node visualization.
    * Called after every setSessionState() invocation.
    */
   private deriveGlobalState(): void {
     const prev = this.globalState;
-    if (this.sessionStates.size === 0) {
-      this.globalState = "online";
+    const mainState = this.sessionStates.get(DEFAULT_SESSION);
+    if (mainState === "waiting_tools") {
+      this.globalState = "waiting_tools";
+    } else if (mainState === "processing") {
+      this.globalState = "processing";
     } else {
-      const states = [...this.sessionStates.values()];
-      if (states.includes("waiting_tools")) {
-        this.globalState = "waiting_tools";
-      } else if (states.includes("processing")) {
-        this.globalState = "processing";
-      } else {
-        this.globalState = "online";
-      }
+      this.globalState = "online";
     }
     // Keep graphRegistry in sync so the core-node tree reflects live state
     if (this.globalState !== prev) {

@@ -1,7 +1,7 @@
 // src/ai/types.ts
 
 export interface AIStreamEvent {
-  type: 'text_delta' | 'tool_use' | 'message_complete' | 'error' | 'compaction' | 'compaction_start';
+  type: 'text_delta' | 'tool_use' | 'message_complete' | 'error' | 'compaction' | 'compaction_start' | 'compaction_failed';
   text?: string;
   toolUse?: { id: string; name: string; input: Record<string, unknown> };
   stopReason?: 'end_turn' | 'tool_use' | 'max_tokens' | 'compaction';
@@ -24,6 +24,19 @@ export interface AIStreamEvent {
     /** Optional reason for why compaction started. */
     reason?: 'forced' | 'threshold' | 'growth' | 'sliding-window';
   };
+  /**
+   * Emitted when an Engine B compaction attempt FAILS — summarizer error,
+   * empty/too-short summary, or pre-compact backup write failure. The session
+   * history is guaranteed untouched. Added after the 2026-06-10 incident where
+   * an empty summary silently replaced 734k tokens of history; failures must
+   * be visible so the UI can resolve the pending banner instead of hanging.
+   */
+  compactionFailed?: {
+    engine: 'fallback';
+    /** Human-readable cause — surfaced in the chat failure banner and logs. */
+    reason: string;
+    tokensBefore: number;
+  };
   compaction?: {
     summary: string;
     engine: 'api' | 'fallback' | 'sliding-window';
@@ -40,6 +53,13 @@ export interface CapabilityResult {
   tool_use_id: string;
   content: ToolResultContent;
   is_error?: boolean;
+  /**
+   * Wall time of THIS call, measured by the registry (F5 turn-tracker).
+   * Per-call — NOT the Promise.all batch time. Absent when the call never
+   * ran (unknown capability fast-fail). Providers build API tool_result
+   * blocks field-explicitly, so this never reaches the provider payload.
+   */
+  durationMs?: number;
 }
 
 export interface CapabilityCall {

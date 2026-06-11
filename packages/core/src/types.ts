@@ -128,6 +128,75 @@ export interface SystemEventMessage extends BusMessage {
   data: Record<string, unknown>;
 }
 
+// ─── Turn summaries (Pillar B — F5) ─────────────────────────────────────
+// Published by jarvis-core as `system.event` with `event: "turn.summary"`
+// and `data` shaped as TurnSummary. One summary per conversation turn
+// (one traceId): prompt dispatch → session idle, spanning 1..N API
+// round-trips. Public API from 0.8.0 — plugins may subscribe and consume.
+// See docs/features/turn-tracker.md for the full design.
+
+/** Per-tool execution stat inside a TurnSummary. */
+export interface TurnToolStat {
+  /** Shortened tool name (same form the chat timeline shows). */
+  name: string;
+  /** Provider tool_use id — joins ai.stream tool_start/tool_done events. */
+  toolUseId: string;
+  /**
+   * Registry-measured wall time of THIS call (not the batch).
+   * Absent — not 0 — when the result never arrived (e.g. abort mid-tools).
+   */
+  durationMs?: number;
+  isError: boolean;
+}
+
+/**
+ * One conversation turn, aggregated. Emitted exactly once per traceId on
+ * `system.event: turn.summary` when the turn closes (completed, aborted
+ * or error). All usage numbers default to 0 — never NaN/undefined.
+ */
+export interface TurnSummary {
+  traceId: string;
+  sessionId: string;
+  /** ai.request source: "chat-input", "cron", an actor session id, "drain:combined", … */
+  source: string;
+  /** Epoch ms. */
+  startedAt: number;
+  endedAt: number;
+  durationMs: number;
+  /**
+   * First text delta − startedAt (user-perceived latency). Absent when the
+   * turn streamed no text. Only the FIRST delta of the turn sets it.
+   */
+  ttftMs?: number;
+  /** API calls in this turn (≥1 unless the turn errored before dispatch). */
+  roundTrips: number;
+  /** Model observed on the last round-trip. */
+  model?: string;
+  /** stop_reason of the round-trip that ended the turn. */
+  stopReason?: string;
+  outcome: "completed" | "aborted" | "error";
+  /** Present when outcome === "error". */
+  error?: string;
+  /** Total streamed text length (chars). */
+  textChars: number;
+  tools: TurnToolStat[];
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    /** input + cacheRead + cacheWrite (everything billed on the input side). */
+    totalInput: number;
+    /** totalInput + output. */
+    total: number;
+  };
+  /**
+   * Server-side estimate by model-family pricing. Undefined for unknown
+   * families — consumers must render "—", never fabricate a number.
+   */
+  costUsd?: number;
+}
+
 // chat.anchor — pieces declare/remove/clear UI anchors that float above the
 // chat composer (per-session). Generic mechanism: any piece can publish.
 // The frontend AnchorRegistry consumes via SSE forwarding in ChatPiece.

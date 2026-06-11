@@ -87,6 +87,21 @@ export class OpenAIMetricsHud implements Piece {
     this.unsubs.push(this.bus.subscribe<AIStreamMessage>("ai.stream", (msg: any) => {
       const type = msg.type ?? msg.event;
 
+      // streaming_started: published by OpenAISession at API-call start with
+      // the chosen verb + model (replaces the malformed `type:"delta"` shape,
+      // mission jarvis-fix F2.3). Activates the visual streaming state early.
+      if (type === "streaming_started") {
+        if (!this.streamingActive) {
+          this.streamingActive = true;
+          this.streamingStartMs = Date.now();
+          this.streamingOutputChars = 0;
+          this.streamingVerb = (msg.data as any)?.streamingVerb
+            ?? STREAMING_VERBS[Math.floor(Math.random() * STREAMING_VERBS.length)];
+          this.startStreamingTimer();
+        }
+        return;
+      }
+
       if (type === "delta" && msg.text !== undefined) {
         if (!this.streamingActive) {
           this.streamingActive = true;

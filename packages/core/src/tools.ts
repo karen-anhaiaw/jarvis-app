@@ -5,6 +5,11 @@ export interface CapabilityDefinition {
   description: string;
   input_schema: Record<string, unknown>;
   handler: CapabilityHandler;
+  /** Optional slash-menu grouping (e.g. "filesystem", "hud", "mcp").
+   *  Declared by the registrar; when omitted the registry applies structural
+   *  fallbacks: `mcp__`-prefixed names → "mcp", else "general".
+   *  Added in 0.7.0 — optional, older plugins keep working without it. */
+  category?: string;
 }
 
 export interface CapabilityCall {
@@ -21,6 +26,14 @@ export interface CapabilityResult {
   tool_use_id: string;
   content: ToolResultContent;
   is_error?: boolean;
+  /**
+   * Wall time of THIS call, measured by the registry (added in 0.8.0, F5
+   * turn-tracker). Per-call — NOT the Promise.all batch time. Absent when
+   * the call never ran (unknown capability fast-fail). Carried on the
+   * capability.result bus message; providers build API tool_result blocks
+   * field-explicitly, so it never reaches provider payloads.
+   */
+  durationMs?: number;
 }
 
 export interface SlashCommand {

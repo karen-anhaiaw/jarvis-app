@@ -1,7 +1,28 @@
 // src/core/hud-state.ts
-// Manages HUD panel state. Provides:
-// 1. getState() — full snapshot for initial load (GET /hud)
-// 2. SSE stream — pushes deltas only when piece content actually changed (dirty check)
+/**
+ * @module core/hud-state
+ * @see docs/features/hud-truth.md
+ * @see docs/features/bdd/hud-truth.feature
+ * @see docs/modules/core/hud-state.md
+ *
+ * Manages HUD panel state. Provides:
+ * 1. getState() — full snapshot for initial load (GET /hud) — carries per-panel
+ *    `rev` + `updatedAt` so clients can resync and display age.
+ * 2. SSE stream — pushes deltas only when piece content actually changed
+ *    (stable-hash dirty check). Every pushed delta carries a per-panel
+ *    monotonic `rev` (gap detection) — see HUD-truth design (F6).
+ * 3. Reactor pull-direct — when a reactor source is registered (JarvisCore),
+ *    the orb state is read from the source of truth, not the panel copy.
+ * 4. Reconciliation — registered producers are polled (~10s) and drift/lost
+ *    panels self-heal.
+ *
+ * INVARIANTS (tested in hud-state.test.ts):
+ * - `rev` follows CONTENT changes (and removes), independent of connected
+ *   clients — the snapshot on connect is always a consistent baseline.
+ * - `updatedAt` stamps content changes only; it is EXCLUDED from the stable
+ *   hash so it can never cause a push by itself.
+ * - Unknown-pieceId updates are logged (warn), never silently dropped.
+ */
 import type { ServerResponse } from "node:http";
 import type { EventBus } from "./bus.js";
 import type { HudPieceData } from "./piece.js";
@@ -21,68 +42,93 @@ interface HudComponent {
   size: { width: number; height: number };
   data: Record<string, unknown>;
   renderer?: { plugin: string; file: string };
+  /** Per-panel monotonic revision — gap detection (F6). */
+  rev: number;
+  /** Epoch ms of the last REAL content change (F6 staleness). */
+  updatedAt: number;
 }
+
+interface HudReactorState { status: string; coreLabel: string; coreSubLabel: string }
 
 /** SSE delta event sent to frontend */
 interface HudDelta {
   action: "set" | "remove";
   pieceId: string;
   component?: HudComponent;
-  reactor?: { status: string; coreLabel: string; coreSubLabel: string };
+  reactor?: HudReactorState;
+  /** Mirrors component.rev (set) or the remove's consumed rev. Reactor-only
+   *  deltas omit it — clients must skip gap detection for those. */
+  rev?: number;
 }
+
+/** Producer snapshot callback — returns the piece's CURRENT desired panel
+ *  state, or undefined to skip this tick. See feature doc, decision #4. */
+export type HudProducerSnapshot = () => HudPieceData | undefined;
 
 export class HudState {
   private pieces = new Map<string, HudPieceData>();
   private streamClients = new Set<ServerResponse>();
 
-  // Dirty-check: store JSON hash of last pushed component per piece
-  private lastPushed = new Map<string, string>();
+  // Stable content hash per piece — updated on EVERY content change
+  // (regardless of connected clients); doubles as the SSE dirty check.
+  private contentHash = new Map<string, string>();
   private lastReactorHash = "";
 
-  constructor(bus: EventBus) {
+  // ─── F6 state ─────────────────────────────────────────────────────────
+  private revs = new Map<string, number>();
+  private changedAt = new Map<string, number>();
+  private reactorSource?: () => HudReactorState | undefined;
+  private producers = new Map<string, HudProducerSnapshot>();
+  private reconcileTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly now: () => number;
+
+  constructor(bus: EventBus, opts: { now?: () => number } = {}) {
+    this.now = opts.now ?? Date.now;
+
     bus.subscribe<HudUpdateMessage>("hud.update", (msg) => {
       switch (msg.action) {
         case "add": {
-          const piece = msg.piece!;
-          // Override with saved layout from settings (skip ephemeral panels)
-          if (!piece.ephemeral) {
-            const saved = loadSettings().pieces?.[piece.pieceId]?.config?.layout as any;
-            if (saved) {
-              piece.position = { x: saved.x, y: saved.y };
-              piece.size = { width: saved.width, height: saved.height };
-            }
-          }
-          this.pieces.set(piece.pieceId, piece);
-          log.debug({ pieceId: piece.pieceId, type: piece.type, ephemeral: !!piece.ephemeral }, "HudState: added");
-          this.pushIfChanged(piece.pieceId);
+          this.applyAdd(msg.piece!);
           break;
         }
         case "update": {
           const existing = this.pieces.get(msg.pieceId);
-          if (existing) {
-            existing.data = { ...existing.data, ...msg.data };
-            if (msg.status) existing.status = msg.status;
-            if (msg.visible !== undefined) existing.visible = msg.visible;
-            if (msg.layout) {
-              existing.position = { x: msg.layout.x, y: msg.layout.y };
-              existing.size = { width: msg.layout.width, height: msg.layout.height };
-            }
-            log.trace({ pieceId: msg.pieceId }, "HudState: updated");
-            this.pushIfChanged(msg.pieceId);
+          if (!existing) {
+            // Previously a SILENT drop (failure mode 3, hud-truth.md).
+            // The warn makes the loss observable; a registered producer
+            // heals it on the next reconciliation tick.
+            log.warn({ pieceId: msg.pieceId, source: msg.source }, "HudState: update for unknown pieceId — dropped (lost add?)");
+            break;
           }
+          existing.data = { ...existing.data, ...msg.data };
+          if (msg.status) existing.status = msg.status;
+          if (msg.visible !== undefined) existing.visible = msg.visible;
+          if (msg.layout) {
+            existing.position = { x: msg.layout.x, y: msg.layout.y };
+            existing.size = { width: msg.layout.width, height: msg.layout.height };
+          }
+          log.trace({ pieceId: msg.pieceId }, "HudState: updated");
+          this.applyContentChange(msg.pieceId);
           break;
         }
         case "remove": {
-          this.pieces.delete(msg.pieceId);
-          this.lastPushed.delete(msg.pieceId);
+          if (!this.pieces.delete(msg.pieceId)) break; // unknown — nothing to do
+          this.contentHash.delete(msg.pieceId);
+          this.changedAt.delete(msg.pieceId);
           log.debug({ pieceId: msg.pieceId }, "HudState: removed");
 
-          const delta: HudDelta = {
+          // Remove consumes a rev too: a client that misses the remove sees
+          // a gap on the panel's next appearance and resyncs (BDD: re-add
+          // continues the sequence).
+          const rev = (this.revs.get(msg.pieceId) ?? 0) + 1;
+          this.revs.set(msg.pieceId, rev);
+
+          this.pushDelta({
             action: "remove",
             pieceId: msg.pieceId,
+            rev,
             ...(msg.pieceId === "jarvis-core" ? { reactor: this.getReactor() } : {}),
-          };
-          this.pushDelta(delta);
+          });
           break;
         }
       }
@@ -111,7 +157,105 @@ export class HudState {
     log.trace({ clients: this.streamClients.size }, "HudState: SSE client disconnected");
   }
 
+  // ─── F6: reactor pull-direct ──────────────────────────────────────────
+
+  /**
+   * Register the reactor source of truth (JarvisCore.getReactorState).
+   * When set, getReactor() reads it directly — the jarvis-core PANEL copy
+   * (which arrives via hud.update and can lag/drop) becomes a fallback only.
+   */
+  setReactorSource(fn: () => HudReactorState | undefined): void {
+    this.reactorSource = fn;
+  }
+
+  // ─── F6: reconciliation ───────────────────────────────────────────────
+
+  /** Register a producer whose snapshot() is pulled on every reconcile tick. */
+  registerProducer(pieceId: string, snapshot: HudProducerSnapshot): void {
+    this.producers.set(pieceId, snapshot);
+    log.debug({ pieceId }, "HudState: producer registered");
+  }
+
+  /**
+   * One reconciliation tick (public for tests; the loop calls it).
+   * - lost add  → re-add from the producer snapshot (warn — should not happen)
+   * - drift     → overwrite data/status from the snapshot; layout (position/
+   *               size/visible) is preserved — it belongs to the user, not
+   *               the producer.
+   * - reactor   → push a reactor-only delta when its hash drifted.
+   * Reuses the stable-hash dirty check, so a healthy tick pushes nothing.
+   */
+  reconcile(): void {
+    for (const [pieceId, snapshot] of this.producers) {
+      let snap: HudPieceData | undefined;
+      try {
+        snap = snapshot();
+      } catch (err) {
+        log.error({ err, pieceId }, "HudState: producer snapshot threw");
+        continue;
+      }
+      if (!snap) continue;
+
+      const existing = this.pieces.get(pieceId);
+      if (!existing) {
+        log.warn({ pieceId }, "HudState: reconcile — piece missing, re-adding from producer snapshot");
+        this.applyAdd(snap);
+        continue;
+      }
+
+      existing.data = snap.data;
+      existing.status = snap.status;
+      this.applyContentChange(pieceId);
+    }
+
+    // Reactor drift (pull-direct source may move without a panel push).
+    // First observation is a BASELINE, not drift — settle silently so a
+    // healthy first tick pushes nothing (BDD: zero deltas on healthy tick).
+    const reactor = this.getReactor();
+    const reactorHash = JSON.stringify(reactor);
+    if (reactorHash !== this.lastReactorHash) {
+      const isBaseline = this.lastReactorHash === "";
+      this.lastReactorHash = reactorHash;
+      if (!isBaseline) {
+        // Reactor-only delta: no component, no rev (clients skip gap logic).
+        this.pushDelta({ action: "set", pieceId: "jarvis-core", reactor });
+      }
+    }
+  }
+
+  /** Start the periodic reconciliation loop (default 10s). Idempotent. */
+  startReconciliation(intervalMs = 10_000): void {
+    if (this.reconcileTimer) return;
+    this.reconcileTimer = setInterval(() => this.reconcile(), intervalMs);
+    this.reconcileTimer.unref?.();
+    log.info({ intervalMs }, "HudState: reconciliation loop started");
+  }
+
+  stopReconciliation(): void {
+    if (this.reconcileTimer) {
+      clearInterval(this.reconcileTimer);
+      this.reconcileTimer = null;
+      log.info("HudState: reconciliation loop stopped");
+    }
+  }
+
   // ─── Private ────────────────────────────────────────────────────────────
+
+  /** Shared by the bus `add` handler and reconcile's re-add path so saved
+   *  layout handling stays identical in both. */
+  private applyAdd(piece: HudPieceData): void {
+    // Override with saved layout from settings (skip ephemeral panels)
+    if (!piece.ephemeral) {
+      const saved = loadSettings().pieces?.[piece.pieceId]?.config?.layout as any;
+      if (saved) {
+        piece.position = { x: saved.x, y: saved.y };
+        piece.size = { width: saved.width, height: saved.height };
+      }
+    }
+    this.pieces.set(piece.pieceId, piece);
+    log.debug({ pieceId: piece.pieceId, type: piece.type, ephemeral: !!piece.ephemeral }, "HudState: added");
+    this.applyContentChange(piece.pieceId);
+  }
 
   private serializePiece(p: HudPieceData): HudComponent {
     return {
@@ -125,34 +269,56 @@ export class HudState {
       size: p.size ?? { width: 200, height: 100 },
       data: p.data,
       renderer: p.renderer,
+      rev: this.revs.get(p.pieceId) ?? 0,
+      updatedAt: this.changedAt.get(p.pieceId) ?? this.now(),
     };
   }
 
-  private getReactor(): { status: string; coreLabel: string; coreSubLabel: string } {
+  /**
+   * Reactor state for the orb. Pull-direct from the registered source
+   * (JarvisCore — the truth) when available; panel-copy fallback otherwise.
+   * Never throws: a failing source falls back to the copy.
+   */
+  private getReactor(): HudReactorState {
+    if (this.reactorSource) {
+      try {
+        const fromSource = this.reactorSource();
+        if (fromSource) return fromSource;
+      } catch (err) {
+        log.error({ err }, "HudState: reactor source threw — falling back to panel copy");
+      }
+    }
     const core = this.pieces.get("jarvis-core");
     return core
       ? { status: core.data.status as string ?? "online", coreLabel: core.data.coreLabel as string ?? "ONLINE", coreSubLabel: "" }
       : { status: "offline", coreLabel: "OFFLINE", coreSubLabel: "" };
   }
 
-  /** Only push SSE delta if the serialized component actually changed.
-   *  Uses a stable hash that excludes volatile fields (e.g. streamingElapsedMs)
-   *  which change every call but are cosmetic — the frontend computes elapsed locally. */
-  private pushIfChanged(pieceId: string): void {
-    if (this.streamClients.size === 0) return;
-
+  /**
+   * Content-change pipeline for add/update/reconcile:
+   * stable hash → unchanged? done : (rev++, stamp updatedAt, push if clients).
+   *
+   * WHY rev/updatedAt advance even with zero clients: the snapshot a client
+   * receives on connect must be a consistent baseline — revs that only move
+   * while someone watches would make gaps undetectable across reconnects.
+   */
+  private applyContentChange(pieceId: string): void {
     const piece = this.pieces.get(pieceId);
     if (!piece) return;
 
+    const hash = this.stableHash(piece);
+    if (this.contentHash.get(pieceId) === hash) return; // no content change
+
+    this.contentHash.set(pieceId, hash);
+    this.revs.set(pieceId, (this.revs.get(pieceId) ?? 0) + 1);
+    this.changedAt.set(pieceId, this.now());
+
+    if (this.streamClients.size === 0) return;
+
     const component = this.serializePiece(piece);
-    const hash = this.stableHash(component);
-    const prev = this.lastPushed.get(pieceId);
-    if (prev === hash) return; // No change — skip SSE push
+    const delta: HudDelta = { action: "set", pieceId, component, rev: component.rev };
 
-    this.lastPushed.set(pieceId, hash);
-
-    // Check if reactor changed too (only relevant for jarvis-core)
-    const delta: HudDelta = { action: "set", pieceId, component };
+    // Reactor rides jarvis-core pushes when its own hash moved.
     if (pieceId === "jarvis-core") {
       const reactor = this.getReactor();
       const reactorHash = JSON.stringify(reactor);
@@ -165,16 +331,28 @@ export class HudState {
     this.pushDelta(delta);
   }
 
-  /** Hash component data excluding volatile/cosmetic fields that change every tick */
-  private stableHash(component: HudComponent): string {
-    const { data, ...rest } = component;
-    // Filter out fields that are purely cosmetic timers (change every call but carry no new info)
+  /**
+   * Hash piece content excluding volatile/cosmetic fields.
+   * Excluded: streamingElapsedMs (frontend computes locally), and — by
+   * construction — rev/updatedAt, which live OUTSIDE HudPieceData and are
+   * only attached at serialization time. The hash source is the raw piece,
+   * so freshness metadata can never trigger a push.
+   */
+  private stableHash(piece: HudPieceData): string {
     const stableData: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(data)) {
-      if (k === "streamingElapsedMs") continue; // frontend computes this from streamingStartMs
+    for (const [k, v] of Object.entries(piece.data)) {
+      if (k === "streamingElapsedMs") continue;
       stableData[k] = v;
     }
-    return JSON.stringify({ ...rest, data: stableData });
+    return JSON.stringify({
+      name: piece.name,
+      status: piece.status,
+      visible: piece.visible !== false,
+      position: piece.position,
+      size: piece.size,
+      renderer: piece.renderer,
+      data: stableData,
+    });
   }
 
   private pushDelta(delta: HudDelta): void {

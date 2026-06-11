@@ -4,6 +4,52 @@ All notable changes to this package will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-06-10
+
+### Added
+- **`TurnSummary` + `TurnToolStat` interfaces** — per-turn lifecycle aggregation
+  (F5 Pillar B, mission jarvis-fix). jarvis-core emits exactly one
+  `system.event` with `event: "turn.summary"` and `data: TurnSummary` when a
+  conversation turn closes (outcome `completed` | `aborted` | `error`).
+  Carries traceId, source, TTFT, round-trip count, per-tool durations/errors,
+  accumulated token usage and an estimated `costUsd` (undefined for unknown
+  model families). Public API — plugins may subscribe.
+  See `docs/features/turn-tracker.md`.
+
+- **`CapabilityResult.durationMs?: number`** — per-call wall time measured by
+  the registry, carried on `capability.result` bus messages. Feeds
+  `TurnSummary.tools[].durationMs`. Absent when the call never ran.
+
+  Compatibility: additive — new event + new exported types + one new optional
+  field. No existing shape changed.
+
+## [0.7.0] — 2026-06-11
+
+### Added
+- **`CapabilityDefinition.category?: string`** — declarative slash-menu grouping
+  (F3.15, mission jarvis-fix). Each tool's owner declares its category at
+  registration (e.g. `"filesystem"`, `"hud"`, `"cron"`). The registry no longer
+  maintains hardcoded per-tool name lists in `getSlashCommands()` — only two
+  structural fallbacks remain: names with the `mcp__` prefix → `"mcp"`, else
+  `"general"`. Plugin JSON exec tools may declare `"category"` in their tool
+  definition file (passed through by PluginManager); loader tools declare it
+  in `capabilities/*.json`.
+
+  Compatibility: optional field. Plugins built against older core versions
+  keep working — their tools fall back to `"general"` (or `"mcp"` by prefix).
+  Note: `bus_publish` (registered by jarvis-plugin-actors) previously got a
+  hardcoded `"bus"` category from the core list; it now reports `"general"`
+  until the plugin declares `category: "bus"` itself.
+
+## [0.6.0] — 2026-06-10
+
+### Added
+- **`BusMessage.traceId?: string`** — end-to-end trace correlation across
+  chat→bus→core→provider→stream (shipped in jarvis-app `ef362f8`; this entry
+  backfills the missing version bump — the COMPATIBILITY matrix already
+  documented it as 0.6.0 but package.json/CHANGELOG were never updated).
+  Optional: the bus auto-fills a fresh id per publish when absent.
+
 ## [0.5.0] — 2026-05-29
 
 ### Added

@@ -6,8 +6,10 @@ import type { AIRequestMessage, AIStreamMessage, HudUpdateMessage, ChatAnchorMes
 import type { CapabilityRegistry } from "../capabilities/registry.js";
 import type { SessionManager } from "../core/session-manager.js";
 import { log } from "../logger/index.js";
+import { DEFAULT_SESSION } from "../core/constants.js";
 import { newTraceId, preview } from "../logger/trace.js";
 import { consumePendingGreeting } from "../core/conversation-store.js";
+import { config } from "../config/index.js";
 
 /**
  * ChatPiece — session-agnostic chat bridge.
@@ -126,6 +128,20 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
             session: msg.target,
           });
           break;
+        // compaction_failed is published by JarvisCore / main.ts runCompaction
+        // when Engine B fails (summarizer error, empty summary, backup write
+        // failure). History is preserved — the UI replaces the pending banner
+        // with a failure entry. Not in the public AIStreamMessage union — cast.
+        case "compaction_failed" as any:
+          this.broadcast(msg.target, {
+            type: "compaction_failed",
+            engine: (msg as any).compactionFailed?.engine,
+            tokensBefore: (msg as any).compactionFailed?.tokensBefore,
+            reason: (msg as any).compactionFailed?.reason,
+            source,
+            session: msg.target,
+          });
+          break;
         // pending_queue is published by JarvisCore.broadcastPendingQueue.
         // Not declared in AIStreamMessage.event union (intentionally — kept
         // out of the public type surface to avoid forcing plugin updates),
@@ -229,14 +245,14 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
     this.bus.publish({
       channel: "hud.update", source: this.id, action: "add", pieceId: "chat-output",
       piece: { pieceId: "chat-output", type: "panel", name: "Chat", status: "running",
-        data: { sessionId: "main", assistantLabel: "JARVIS" },
+        data: { sessionId: DEFAULT_SESSION, assistantLabel: "JARVIS" },
         position: { x: 10, y: 480 }, size: { width: 1660, height: 280 } },
     });
 
     this.bus.publish({
       channel: "hud.update", source: this.id, action: "add", pieceId: "chat-input",
       piece: { pieceId: "chat-input", type: "panel", name: "Input", status: "running",
-        data: { sessionId: "main", assistantLabel: "JARVIS" },
+        data: { sessionId: DEFAULT_SESSION, assistantLabel: "JARVIS" },
         position: { x: 10, y: 768 }, size: { width: 1660, height: 44 } },
     });
 
@@ -324,8 +340,14 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
           slashCmd.handler(cmdArgs?.trim() ?? "", { sessionId: sid }).then((result) => {
             if (result.message) this.broadcast(sid, { type: "done", fullText: result.message, source: "system", session: sid });
             if (result.inject) log.info({ cmd: cmdName, injectLength: result.inject.length }, "ChatPiece: slash command injected content");
+            // Slash commands never reach JarvisCore, so no session_state:idle is
+            // ever emitted for them. The UI sets isThinking=true on the 'user'
+            // event and ONLY session_state clears it (done doesn't, by design) —
+            // without this, the chat shows "thinking..." forever after any slash.
+            this.broadcast(sid, { type: "session_state", state: "idle", session: sid });
           }).catch((err) => {
             this.broadcast(sid, { type: "error", error: `Slash command error: ${err}`, source: "system", session: sid });
+            this.broadcast(sid, { type: "session_state", state: "idle", session: sid });
           });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true }));
@@ -375,9 +397,17 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
     const sid = this.parseQuerySessionId(req);
     if (!sid) { this.send400(res, "sessionId query param is required"); return; }
     try {
-      const managed = this.sessions?.get(sid);
+      // peek() — NEVER get(): get() materializes a ghost session (main's full
+      // system prompt, wrong role) for unknown ids, and the ModelPicker polls
+      // this endpoint every 5s for every open panel. Same guard rationale as
+      // handleHistory's has() check below.
+      const managed = this.sessions?.peek(sid);
       const session = managed?.session as any;
-      const model = session?.peekModel?.() ?? session?.stickyModelOverride ?? null;
+      // Effective model = peekModel() (next ?? sticky ?? base). For sessions
+      // not yet materialized, report the provider default — what a brand-new
+      // session would use — so the HUD shows the truthful upcoming model
+      // instead of a placeholder.
+      const model = session?.peekModel?.() ?? session?.stickyModelOverride ?? config.model ?? null;
       const provider = session?.constructor?.name?.replace("Session", "").toLowerCase() ?? null;
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ model, provider }));
@@ -408,7 +438,7 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
       const entries = parseMessagesToHistory(rawMessages);
       // Append startup greeting if one is pending (set by consumeStartupPrompt on boot).
       // Consumed once so subsequent history requests don't repeat it.
-      const greeting = sid === "main" ? consumePendingGreeting() : null;
+      const greeting = sid === DEFAULT_SESSION ? consumePendingGreeting() : null;
       if (greeting) {
         entries.push({ kind: "message", role: "assistant", text: greeting, source: "jarvis" });
       }

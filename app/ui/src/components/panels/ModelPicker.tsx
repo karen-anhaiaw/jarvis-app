@@ -1,18 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useHudPiece } from '../../hooks/useHudStream'
 
-// Known models with display labels
-const MODEL_LABELS: Record<string, { label: string; note: string }> = {
-  'claude-opus-4-8':    { label: 'Opus 4.8',   note: '1M · Max' },
-  'claude-opus-4-7':    { label: 'Opus 4.7',   note: '1M · Max' },
-  'claude-opus-4-6':    { label: 'Opus 4.6',   note: '1M · Max' },
-  'claude-sonnet-4-6':  { label: 'Sonnet 4.6', note: '1M · High' },
-  'claude-haiku-4-5':   { label: 'Haiku 4.5',  note: '200K · Fast' },
-  'gpt-4o':             { label: 'GPT-4o',     note: 'OpenAI' },
-  'gpt-4o-mini':        { label: 'GPT-4o Mini',note: 'OpenAI · Fast' },
-  'gpt-4.1':            { label: 'GPT-4.1',    note: 'OpenAI' },
-  'o3':                 { label: 'o3',          note: 'OpenAI · Reason' },
-  'o4-mini':            { label: 'o4-mini',     note: 'OpenAI · Fast' },
+interface ModelMeta {
+  id: string
+  label: string
+  note: string
+  provider: string
 }
 
 interface ModelPickerProps {
@@ -22,24 +15,27 @@ interface ModelPickerProps {
 
 export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
   const [open, setOpen] = useState(false)
-  const [available, setAvailable] = useState<string[]>([])
+  const [catalog, setCatalog] = useState<ModelMeta[]>([])
   const [sessionModel, setSessionModel] = useState<string | null>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
-  // Current model from token-counter HUD piece (live, via SSE) — reflects global active provider.
-  // Used as fallback for the main session; overridden by sessionModel for actor sessions.
+  // Token-counter HUD piece aggregates the most-recent model ACROSS ALL
+  // sessions (scope ALL). Displaying it here leaked background sessions'
+  // models into this panel: an actor responding on Sonnet flipped main's
+  // footer while main was pinned to Fable (bug, 2026-06-11). It is now ONLY
+  // a re-fetch trigger — when the aggregate flips, we re-poll THIS session's
+  // truth immediately instead of waiting for the 5s interval.
   const tokenCounter = useHudPiece('token-counter')
-  const globalModel: string = (tokenCounter?.data as any)?.model ?? '…'
+  const globalModelHint = (tokenCounter?.data as any)?.model as string | undefined
 
-  // For non-main sessions (actors), fetch the real model from the session itself.
+  // Session-scoped model truth for EVERY session (main included): GET
+  // /chat/session-info returns peekModel() (next ?? sticky ?? base) for live
+  // sessions, or the provider default for not-yet-materialized ones.
   useEffect(() => {
-    if (!sessionId || sessionId === 'main') {
-      setSessionModel(null)
-      return
-    }
+    const sid = sessionId ?? 'main'
     let cancelled = false
     const fetchModel = () => {
-      fetch(`/chat/session-info?sessionId=${encodeURIComponent(sessionId)}`)
+      fetch(`/chat/session-info?sessionId=${encodeURIComponent(sid)}`)
         .then(r => r.json())
         .then((data: { model: string | null }) => {
           if (!cancelled) setSessionModel(data.model)
@@ -47,16 +43,21 @@ export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
         .catch(() => {})
     }
     fetchModel()
-    // Refresh every 5s to pick up model changes
+    // 5s steady-state poll; globalModelHint in deps re-arms the effect (and
+    // fetches instantly) whenever any session's activity changes the aggregate.
     const interval = setInterval(fetchModel, 5000)
     return () => { cancelled = true; clearInterval(interval) }
-  }, [sessionId])
+  }, [sessionId, globalModelHint])
 
-  const currentModel = sessionModel ?? globalModel
+  // '…' only until the first session-info response lands (<100ms typical).
+  const currentModel = sessionModel ?? '…'
 
-  // Populate model list from known config (mirrors getValidModels() in config/index.ts)
+  // Fetch model catalog from backend — single source of truth from config/index.ts
   useEffect(() => {
-    setAvailable(Object.keys(MODEL_LABELS))
+    fetch('/chat/models')
+      .then(r => r.json())
+      .then((data: ModelMeta[]) => setCatalog(data))
+      .catch(() => {})
   }, [])
 
   // Close dropdown when clicking outside
@@ -81,7 +82,7 @@ export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
     }).catch(() => {})
   }, [sessionId, sendUrl])
 
-  const meta = MODEL_LABELS[currentModel]
+  const meta = catalog.find(m => m.id === currentModel)
   const displayLabel = meta?.label ?? currentModel
   const displayNote = meta?.note ?? ''
 
@@ -104,8 +105,7 @@ export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
             <span className="modelPickerSearchLabel">Select model</span>
           </div>
           <div className="modelPickerList">
-            {available.map(id => {
-              const m = MODEL_LABELS[id]
+            {catalog.map(({ id, label, note }) => {
               const isActive = id === currentModel
               return (
                 <button
@@ -113,8 +113,8 @@ export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
                   className={`modelPickerItem${isActive ? ' active' : ''}`}
                   onClick={() => selectModel(id)}
                 >
-                  <span className="modelPickerItemLabel">{m?.label ?? id}</span>
-                  {m?.note && <span className="modelPickerItemNote">{m.note}</span>}
+                  <span className="modelPickerItemLabel">{label}</span>
+                  {note && <span className="modelPickerItemNote">{note}</span>}
                   {isActive && <span className="modelPickerItemCheck">✓</span>}
                 </button>
               )

@@ -82,7 +82,16 @@ When a session becomes idle, its key is **deleted** from `sessionStates` (not se
 
 `currentTrace[sessionId]` is set at `handlePrompt` dispatch and deleted at turn completion (or abort). All bus events in a turn (stream deltas, capability requests, tool results) share the same trace ID for log correlation.
 
-### 6. JarvisCore handles ANY session ID
+### 6. Every turn produces exactly one TurnSummary
+
+The `turns` field (TurnTracker, F5) is called directly at the turn hook sites
+— begin on `currentTrace.set` (handlePrompt/drainQueue), accumulation inside
+`consumeStream`/`handleToolResult`, close on turn-complete/abort/error. It
+publishes `system.event: turn.summary` once per traceId. Direct calls (not bus
+subscription) so the stale-turn guards apply — see
+`docs/features/turn-tracker.md` design decision #1.
+
+### 7. JarvisCore handles ANY session ID
 
 The `ai.request` subscriber fires for any `msg.target`. Session existence and creation are delegated to `SessionManager.get()`, which creates sessions lazily. There is no `ownedPatterns` filter anymore. `isSessionOwned()` always returns `true` and `registerSessionPattern()` is a no-op kept for backward compat.
 
@@ -119,6 +128,8 @@ The `ai.request` subscriber fires for any `msg.target`. Session existence and cr
 | `capability.request` | — | Tool calls detected in stream |
 | `system.event` | `api.usage` | After each completed turn |
 | `system.event` | `compaction` | After compaction |
+| `system.event` | `compaction_failed` | Engine B compaction failed (history preserved) |
+| `system.event` | `turn.summary` | Turn closes (via TurnTracker — see `docs/modules/core/turn-tracker.md`) |
 | `ai.request` | — | `replyTo` routing after turn completion |
 | `ai.request` | — | Startup prompt injection on `ready()` |
 
@@ -131,6 +142,12 @@ The `ai.request` subscriber fires for any `msg.target`. Session existence and cr
 ### `ready(): void`
 
 Called by the Piece orchestrator after ALL pieces have started. Transitions `globalState` from `"loading"` to `"online"` and calls `sendStartupPrompt()`.
+
+---
+
+### `getReactorState()` / `getHudSnapshot()` (F6 hud-truth)
+
+`getReactorState()` derives the HUD orb state DIRECTLY from `globalState` — HudState pulls it via `setReactorSource` instead of trusting its panel copy. `getHudSnapshot()` returns the current desired jarvis-core panel (mirrors the start() `add`) — registered as the first reconciliation producer in main.ts. See `docs/modules/core/hud-state.md`.
 
 ---
 
@@ -229,6 +246,7 @@ Strips MCP namespace prefix: `mcp__knowledge-semantic__knowledge_search` → `kn
 | `pendingPrompts` | `Map<sessionId, msg[]>` | Queue of pending prompts per session. |
 | `pendingReplyTo` | `Map<sessionId, callerSessionId>` | Request-reply routing state. |
 | `currentTrace` | `Map<sessionId, traceId>` | Per-turn trace ID for log correlation. |
+| `turns` | `TurnTracker` | Per-turn aggregation → `system.event: turn.summary` (F5). Public via `turnTracker` getter. |
 | `jarvisMdPath` | `string` | Path to `~/.jarvis/jarvis.md`. |
 
 ---

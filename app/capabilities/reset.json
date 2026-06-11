@@ -1,13 +1,20 @@
 {
   "name": "jarvis_reset",
+  "category": "system",
   "description": "Graceful shutdown of JARVIS. Stops all pieces, closes connections, and exits. The user must restart manually. <IMPORTANT>You MUST call jarvis_ask_choice FIRST to get explicit user confirmation before calling this tool. Ask: 'Are you sure you want to shut down JARVIS? You will need to restart it manually.' with options yes_confirm (Confirm shutdown) and no_cancel (Cancel). Only call jarvis_reset if the user selects yes_confirm. Never call this tool without prior confirmation.</IMPORTANT>",
   "type": "script",
   "command": "bash",
-  "args": ["capabilities/scripts/reset.sh", "${message}"],
+  "args": [
+    "capabilities/scripts/reset.sh",
+    "${message}"
+  ],
   "input_schema": {
     "type": "object",
     "properties": {
-      "message": { "type": "string", "description": "Optional message for JARVIS to process on next startup (e.g. context, reminders, continuation instructions)" }
+      "message": {
+        "type": "string",
+        "description": "Optional message for JARVIS to process on next startup (e.g. context, reminders, continuation instructions)"
+      }
     }
   }
 }

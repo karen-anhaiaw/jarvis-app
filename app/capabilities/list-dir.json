@@ -1,17 +1,38 @@
 {
   "name": "list_dir",
+  "category": "filesystem",
   "description": "List files and directories at a given path. Shows names, sizes, types, and permissions. Supports recursive listing and type filtering.",
   "type": "script",
   "command": "bash",
-  "args": ["capabilities/scripts/list-dir.sh", "${path}", "${recursive}", "${type}", "${limit}"],
+  "args": [
+    "capabilities/scripts/list-dir.sh",
+    "${path}",
+    "${recursive}",
+    "${type}",
+    "${limit}"
+  ],
   "input_schema": {
     "type": "object",
     "properties": {
-      "path": { "type": "string", "description": "Absolute path to the directory" },
-      "recursive": { "type": "boolean", "description": "List recursively (default: false)" },
-      "type": { "type": "string", "description": "Filter by type: 'file', 'dir', or 'all' (default: 'all')" },
-      "limit": { "type": "number", "description": "Max entries to return (default: 200)" }
+      "path": {
+        "type": "string",
+        "description": "Absolute path to the directory"
+      },
+      "recursive": {
+        "type": "boolean",
+        "description": "List recursively (default: false)"
+      },
+      "type": {
+        "type": "string",
+        "description": "Filter by type: 'file', 'dir', or 'all' (default: 'all')"
+      },
+      "limit": {
+        "type": "number",
+        "description": "Max entries to return (default: 200)"
+      }
     },
-    "required": ["path"]
+    "required": [
+      "path"
+    ]
   }
 }

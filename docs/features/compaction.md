@@ -104,14 +104,96 @@ check.
 (input + cache_creation + cache_read). Used as the source of truth for threshold checks.
 The `chars/4` heuristic underestimates by 3-4x for sessions with many tool calls.
 
+`measureContext` (F-compact-2.5) counts image blocks at a flat **6,400 chars (≈1.6k
+tokens)** regardless of base64 payload size — Anthropic bills images by dimensions, not
+bytes, and an 800px-wide JPEG lands around 1.6k tokens. It also recurses into
+`tool_result` nested content (string or block array); before this, everything inside a
+tool_result contributed **zero** chars, making tool-heavy histories invisible to the
+heuristic. The heuristic feeds display/routing only — triggers always use real tokens.
+
+### Summarizer prompt-shape hardening (F-compact-2, incident #2 2026-06-10)
+
+Incident #2: a growth-triggered auto-compact ran on a history whose trailing orphan
+`tool_use` had been stripped by `sanitizeMessages`, leaving a user `tool_result` as the
+last message. The old code only appended the "Please summarize" instruction after an
+assistant message — so the summarizer received a conversation with NO final instruction
+and role-played the next turn instead of summarizing (84 chars of fiction containing a
+hallucinated user instruction, which post-compact JARVIS believed). Three structural
+fixes, applied to BOTH `doCompact` and the sliding-window summarizer:
+
+1. **Instruction always present** — `buildSummarizerMessages` guarantees the summarize
+   instruction is the final user content regardless of how the history ends: appended as
+   a new user message (after assistant), merged into string content (plain-text user
+   tail), or appended as a trailing text block (tool_result tail — keeps the
+   no-consecutive-user shape).
+2. **Assistant prefill `<summary>`** — the request ends with a prefilled assistant
+   message containing `<summary>`. The model can only CONTINUE a summary; starting a
+   roleplay turn is structurally impossible. Extraction prepends the prefilled tag
+   before matching (`extractSummary`), tolerates re-emitted opening tags, and falls back
+   to raw text when the closing tag is missing.
+3. **Thinking disabled** — `thinking: { type: "disabled" }` on summarizer calls.
+   Prefill is incompatible with extended thinking, and thinking blocks were burning the
+   output budget (the max_tokens retry existed for exactly that). The retry is kept as
+   defense in depth.
+
 ### Previous tokens tracking
 `previousRealInputTokens` — snapshot of `lastRealInputTokens` taken before each API call.
 Used to compute the delta for abrupt-growth detection. Reset to 0 after compaction (since
 history is replaced, the "previous" baseline is no longer meaningful).
 
+## Failure Semantics — history must never be destroyed
+
+> Added after the 2026-06-10 incident: a forced compaction (`POST /chat/compact`) on a
+> 734k-token session received an empty summarizer response (`summaryLength: 0`) and
+> replaced the entire history with it, unrecoverably. Four compounding gaps: no
+> empty-summary guard, the summarizer call skipped `sanitizeMessages` (an earlier
+> auto-compact had 400'd on an orphan `tool_use` and was silently swallowed), no
+> response diagnostics (the call also bypassed `usage.log`), and no failure event
+> (the UI banner hung forever).
+
+`doCompact` either produces a usable summary or changes NOTHING:
+
+1. **Sanitize first** — the message copy sent to the summarizer goes through
+   `sanitizeMessages` (it was the only API call site that didn't). The in-memory
+   history is not mutated by this pass.
+2. **Diagnostics always** — every summarizer round-trip logs `stop_reason`, content
+   block types, and summary length, and records token usage to `usage.log`
+   (`logUsage`), so failures are diagnosable and billed usage is visible.
+3. **Thinking-exhaustion retry** — `stop_reason === "max_tokens"` with zero text
+   (adaptive-thinking models can burn the entire budget on thinking blocks) triggers
+   exactly ONE retry with a 4x budget clamped to `getMaxOutput(model)`.
+4. **Empty/short guard (proportional, F-compact-2.4)** — empty (post-trim) summaries
+   are ALWAYS failures. For contexts above `LARGE_CONTEXT_TOKENS` (10k) the minimum
+   summary length scales with context size — a large context cannot legitimately
+   summarize to a tweet (incident #2: 84 chars passed the old absolute 50-char floor
+   for a 416k-token context):
+   | tokensBefore | floor |
+   |---|---|
+   | ≤ 10k | none |
+   | 10k–50k | 50 chars |
+   | 50k–200k | 300 chars |
+   | > 200k | 800 chars |
+5. **Pre-compact backup** — the FULL untrimmed history is archived to
+   `sessions/archive/<label>_precompact_<timestamp>.json` (`archivePreCompactBackup`,
+   newest 5 kept per label) BEFORE replacement. If the backup write fails, compaction
+   ABORTS — an oversized context is recoverable, destroyed history is not.
+6. **Visible failure** — every failure path yields `compaction_failed`
+   (`{ engine, reason, tokensBefore }`). JarvisCore and `main.ts runCompaction`
+   forward it to `ai.stream` (cast, like `compaction_start`) + `system.event`;
+   ChatPiece flattens it over SSE; ChatPanel replaces the pending ⏳ banner with a
+   red "Compaction failed — history preserved" entry.
+
 ## Invariants
 
 - Engine A is permanently disabled. Do not re-enable without a visible summary mechanism.
+- `doCompact` NEVER replaces history with an empty or unusable summary — failure paths leave `this.messages` untouched and emit `compaction_failed`.
+- The pre-compact backup is written BEFORE history replacement; backup failure aborts compaction.
+- The summarizer call always goes through `sanitizeMessages` and always records usage + `stop_reason` diagnostics.
+- The `max_tokens` empty-text retry runs at most once per compaction attempt.
+- The summarize instruction is ALWAYS the final user content of a summarizer request — regardless of whether the sanitized history ends in assistant, plain-text user, or tool_result user.
+- Every summarizer request ends with the assistant prefill `<summary>` and carries `thinking: { type: "disabled" }` (prefill and extended thinking are mutually exclusive).
+- Summary extraction prepends the prefilled `<summary>` tag before matching; a missing closing tag falls back to the raw response text.
+- The short-summary floor is proportional to `tokensBefore` (50 / 300 / 800 chars at 10k / 50k / 200k) — never a single absolute constant.
 - Sliding window NEVER runs while `stop_reason === "tool_use"` — only at logical turn ends. Threshold and growth still run on every API response (they protect against overflow regardless of turn structure).
 - After full compaction (`doCompact`), `injectedContextCount` and `previousRealInputTokens` are reset to 0.
 - Sliding window does NOT reset `injectedContextCount` or `previousRealInputTokens` — it preserves recent turns.

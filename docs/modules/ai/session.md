@@ -28,7 +28,7 @@ streaming, tool calls, model overrides, context injection, and compaction.
 | `send(prompt, images?)` | Main entry point. Streams a full turn including tool loop. |
 | `forceCompact()` | Engine B compaction bypassing all threshold checks. Called by `/compact`. |
 | `fallbackCompact(lastInputTokens)` | Auto-compaction: checks absolute threshold (80%) and triggers `doCompact`. |
-| `doCompact(tokensBefore, reason)` | Core compaction: summarizes history using session model, replaces messages. |
+| `doCompact(tokensBefore, reason)` | Core compaction: sanitizes a copy of history, summarizes via session model (with diagnostics + `usage.log` recording, one `max_tokens` retry), writes pre-compact backup, then replaces messages. On ANY failure (empty/short summary, backup write error, API error) history is preserved and `compaction_failed` is emitted. |
 | `measureContext()` | Returns estimated token counts for system, tools, messages, and total. |
 | `getModel()` | Resolves model priority: nextModelOverride → stickyModelOverride → baseModel. |
 | `setMessages(messages)` | Restores history from persistence (session save/restore). |
@@ -77,4 +77,7 @@ nextModelOverride (consumed after use)
 - `previousRealInputTokens` is always 0 after compaction — abrupt-growth check skips when 0.
 - `injectedContextCount` is reset to 0 after any compaction.
 - Tool calls cleaned up via `cleanupAbortedToolMessages` on abort/close.
+- `doCompact` failure paths (empty/short summary, backup write error, API error) NEVER touch `this.messages` — they emit `compaction_failed` (event type outside the public union, forwarded via cast like `compaction_start`).
+- The summarizer copy is sanitized (`sanitizeMessages`) and its usage recorded to `usage.log` on every round-trip.
+- Full pre-compaction history is archived via `archivePreCompactBackup` (conversation-store, untrimmed, newest 5 per label) before any replacement.
 - If `abortController.signal.aborted` is true when `streamFromAPI` is about to push the assistant message, the push is skipped entirely. This prevents an orphan `tool_use` block (no matching `tool_result`) when the API resolves just as the user presses ESC — the race condition that was causing 400 errors on the next turn.

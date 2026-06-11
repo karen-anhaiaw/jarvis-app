@@ -195,3 +195,29 @@ Feature: Chat
     Then the tab's ServerResponse is removed from the session pool
     And all subsequent SSE frames are delivered only to remaining connections
     And the AI stream is NOT interrupted
+
+  # ─── Model Indicator (ModelPicker) ───────────────────────────────────────────
+  # The footer model label must reflect the SESSION's effective model
+  # (peekModel: next ?? sticky ?? base) fetched from /chat/session-info.
+  # It must NEVER display the token-counter aggregate: that piece reports the
+  # most-recent model ACROSS ALL sessions (scope ALL), so background sessions
+  # (actors, mnemosyne) on other models would leak into this panel's footer.
+
+  Scenario: Model indicator is session-scoped, not global
+    Given the main session has a sticky model "claude-fable-5"
+    And an actor session runs on "claude-sonnet-4-6"
+    When the actor emits a usage event after responding
+    Then the token-counter aggregate model may flip to "claude-sonnet-4-6"
+    And the chat footer indicator for "main" still shows "claude-fable-5"
+
+  Scenario: Model indicator updates after a model switch on the session
+    Given the chat panel for "main" is open
+    When the user selects "claude-opus-4-8" in the model picker
+    Then a "/model claude-opus-4-8" command is sent to session "main"
+    And the indicator reflects "claude-opus-4-8" on the next session-info poll
+
+  Scenario: Model indicator for a not-yet-materialized session shows the provider default
+    Given no session "actor-new" exists
+    When the chat panel for "actor-new" polls /chat/session-info
+    Then the response carries the provider default model from config
+    And the indicator shows the default model label instead of a placeholder

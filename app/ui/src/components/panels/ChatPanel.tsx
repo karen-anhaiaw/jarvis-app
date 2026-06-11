@@ -219,6 +219,11 @@ export function ChatPanel({
           setStreamingText(prev => {
             if (prev) {
               setEntries(msgs => [...msgs, { kind: 'message', role: 'assistant', text: prev, source: data.source, session: data.session }])
+            } else if (data.fullText) {
+              // No deltas accumulated (slash commands, non-streaming paths) —
+              // render the payload's fullText directly. Without this branch the
+              // result of /model, /compact etc. was silently dropped.
+              setEntries(msgs => [...msgs, { kind: 'message', role: 'assistant', text: data.fullText, source: data.source, session: data.session }])
             }
             return ''
           })
@@ -350,6 +355,29 @@ export function ChatPanel({
             reason: data.reason,
             startedAt: Date.now(),
           }])
+          break
+        case 'compaction_failed':
+          if (!features.compaction) break
+          // Engine B failed — history is preserved (doCompact failure
+          // semantics). Replace the pending ⏳ banner with a failure entry so
+          // it doesn't hang forever; append if no banner exists (e.g. failure
+          // event arrived after a reconnect dropped the start event).
+          setEntries(prev => {
+            const failEntry = {
+              kind: 'compaction_failed' as const,
+              engine: 'fallback' as const,
+              tokensBefore: data.tokensBefore ?? 0,
+              reason: data.reason ?? 'unknown error',
+            }
+            for (let idx = prev.length - 1; idx >= 0; idx--) {
+              if (prev[idx].kind === 'compaction_pending') {
+                const next = prev.slice()
+                next[idx] = failEntry
+                return next
+              }
+            }
+            return [...prev, failEntry]
+          })
           break
         case 'compaction':
           if (!features.compaction) break
