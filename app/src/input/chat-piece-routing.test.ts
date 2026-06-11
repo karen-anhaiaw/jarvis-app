@@ -104,3 +104,88 @@ describe("ChatPiece.handleSend — session-agnostic routing", () => {
     expect(userBroadcasts).toHaveLength(0);
   });
 });
+
+/**
+ * Tests for ChatPiece.handleSessionInfo — GET /chat/session-info.
+ *
+ * Contract (BDD: phantom-sessions.feature + chat.feature "Model Indicator"):
+ *   - MUST use sessions.peek(), NEVER sessions.get(). get() materializes a
+ *     ghost session (main's full system prompt, wrong role) for unknown ids,
+ *     and the ModelPicker polls this endpoint every 5s for EVERY open panel.
+ *   - Live sessions report peekModel() (next ?? sticky ?? base).
+ *   - Not-yet-materialized sessions report the provider default (config.model)
+ *     — what a brand-new session would use — never a null placeholder.
+ */
+describe("ChatPiece.handleSessionInfo — ghost-session guard", () => {
+  function makeGetReqRes(url: string): { req: IncomingMessage; res: ServerResponse; sent: any } {
+    const sent: any = { statusCode: null, headers: null, body: null };
+    const req = { url } as any;
+    const res = {
+      writeHead: (code: number, headers: any) => { sent.statusCode = code; sent.headers = headers; },
+      end: (b: any) => { sent.body = b; },
+    } as any;
+    return { req, res, sent };
+  }
+
+  it("never calls sessions.get() — peek() only, so no ghost is materialized", async () => {
+    const piece = new ChatPiece();
+    const peek = vi.fn(() => undefined);
+    const get = vi.fn();
+    (piece as any).sessions = { peek, get };
+
+    const { req, res, sent } = makeGetReqRes("/chat/session-info?sessionId=nope-123");
+    piece.handleSessionInfo(req, res);
+
+    expect(peek).toHaveBeenCalledWith("nope-123");
+    expect(get).not.toHaveBeenCalled();
+    expect(sent.statusCode).toBe(200);
+  });
+
+  it("unknown session → 200 with provider default model and provider null", async () => {
+    const { config } = await import("../config/index.js");
+    const piece = new ChatPiece();
+    (piece as any).sessions = { peek: () => undefined, get: vi.fn() };
+
+    const { req, res, sent } = makeGetReqRes("/chat/session-info?sessionId=nope-123");
+    piece.handleSessionInfo(req, res);
+
+    const body = JSON.parse(sent.body);
+    expect(sent.statusCode).toBe(200);
+    expect(body.model).toBe(config.model); // provider default, not null/placeholder
+    expect(body.provider).toBeNull();
+  });
+
+  it("live session → peekModel() wins (session-scoped truth, not global aggregate)", () => {
+    const piece = new ChatPiece();
+    const managed = { session: { peekModel: () => "claude-fable-5" } };
+    (piece as any).sessions = { peek: () => managed, get: vi.fn() };
+
+    const { req, res, sent } = makeGetReqRes("/chat/session-info?sessionId=main");
+    piece.handleSessionInfo(req, res);
+
+    const body = JSON.parse(sent.body);
+    expect(body.model).toBe("claude-fable-5");
+  });
+
+  it("live session without peekModel falls back to stickyModelOverride", () => {
+    const piece = new ChatPiece();
+    const managed = { session: { stickyModelOverride: "claude-opus-4-8" } };
+    (piece as any).sessions = { peek: () => managed, get: vi.fn() };
+
+    const { req, res, sent } = makeGetReqRes("/chat/session-info?sessionId=actor-x");
+    piece.handleSessionInfo(req, res);
+
+    const body = JSON.parse(sent.body);
+    expect(body.model).toBe("claude-opus-4-8");
+  });
+
+  it("missing sessionId query param → 400", () => {
+    const piece = new ChatPiece();
+    (piece as any).sessions = { peek: vi.fn(), get: vi.fn() };
+
+    const { req, res, sent } = makeGetReqRes("/chat/session-info");
+    piece.handleSessionInfo(req, res);
+
+    expect(sent.statusCode).toBe(400);
+  });
+});

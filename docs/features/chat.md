@@ -205,6 +205,15 @@ When a user provides a free-text "Other" answer, `OTHER_VALUE = "__other__"` is 
 
 ---
 
+## Model indicator (ModelPicker)
+
+The footer model label is **session-scoped truth**, never a global aggregate.
+
+- Source: `GET /chat/session-info?sessionId=X` → `peekModel()` (`next ?? sticky ?? base`) for live sessions; **provider default (`config.model`) for not-yet-materialized ones** (what a new session would use).
+- Polling: every 5s per panel, plus an immediate re-fetch whenever the token-counter aggregate model changes (SSE-driven hint — cheap instant refresh after `/model` switches anywhere).
+- **Anti-pattern (fixed 2026-06-11):** the main panel used to display the `token-counter` HUD piece's `model` field. That piece aggregates the most-recent model across ALL sessions (scope ALL), so an actor responding on Sonnet flipped main's footer while main was pinned to Fable. The aggregate is now only a re-fetch *trigger*, never the displayed value.
+- **Ghost guard:** `handleSessionInfo` uses `sessions.peek()`, not `get()` — `get()` would materialize a phantom session (main's system prompt, wrong role) for every poll on an unknown id. Same rationale as `handleHistory`'s `has()` check.
+
 ## Related
 
 - `docs/modules/core/jarvis-core.md` — JarvisCore state machine detail

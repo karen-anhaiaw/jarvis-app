@@ -86,3 +86,12 @@ Feature: Phantom session prevention
     When bus_publish is called with channel "ai.request" and target "main"
     Then the message is published
     # "main" owns the default prompt — creating it on demand is by design.
+
+  Scenario: GET /chat/session-info never materializes a ghost session
+    Given no session "nope-123" exists
+    When a GET /chat/session-info?sessionId=nope-123 request is handled
+    Then the response is 200 with the provider default model and provider null
+    And no session "nope-123" exists in the SessionManager afterwards
+    # handleSessionInfo must use sessions.peek(), never sessions.get() —
+    # get() materializes a ghost with main's full system prompt and the wrong
+    # role. The ModelPicker polls this endpoint every 5s for EVERY panel.

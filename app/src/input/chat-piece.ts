@@ -9,6 +9,7 @@ import { log } from "../logger/index.js";
 import { DEFAULT_SESSION } from "../core/constants.js";
 import { newTraceId, preview } from "../logger/trace.js";
 import { consumePendingGreeting } from "../core/conversation-store.js";
+import { config } from "../config/index.js";
 
 /**
  * ChatPiece — session-agnostic chat bridge.
@@ -396,9 +397,17 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
     const sid = this.parseQuerySessionId(req);
     if (!sid) { this.send400(res, "sessionId query param is required"); return; }
     try {
-      const managed = this.sessions?.get(sid);
+      // peek() — NEVER get(): get() materializes a ghost session (main's full
+      // system prompt, wrong role) for unknown ids, and the ModelPicker polls
+      // this endpoint every 5s for every open panel. Same guard rationale as
+      // handleHistory's has() check below.
+      const managed = this.sessions?.peek(sid);
       const session = managed?.session as any;
-      const model = session?.peekModel?.() ?? session?.stickyModelOverride ?? null;
+      // Effective model = peekModel() (next ?? sticky ?? base). For sessions
+      // not yet materialized, report the provider default — what a brand-new
+      // session would use — so the HUD shows the truthful upcoming model
+      // instead of a placeholder.
+      const model = session?.peekModel?.() ?? session?.stickyModelOverride ?? config.model ?? null;
       const provider = session?.constructor?.name?.replace("Session", "").toLowerCase() ?? null;
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ model, provider }));

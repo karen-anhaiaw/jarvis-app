@@ -19,20 +19,23 @@ export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
   const [sessionModel, setSessionModel] = useState<string | null>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
-  // Current model from token-counter HUD piece (live, via SSE) — reflects global active provider.
-  // Used as fallback for the main session; overridden by sessionModel for actor sessions.
+  // Token-counter HUD piece aggregates the most-recent model ACROSS ALL
+  // sessions (scope ALL). Displaying it here leaked background sessions'
+  // models into this panel: an actor responding on Sonnet flipped main's
+  // footer while main was pinned to Fable (bug, 2026-06-11). It is now ONLY
+  // a re-fetch trigger — when the aggregate flips, we re-poll THIS session's
+  // truth immediately instead of waiting for the 5s interval.
   const tokenCounter = useHudPiece('token-counter')
-  const globalModel: string = (tokenCounter?.data as any)?.model ?? '…'
+  const globalModelHint = (tokenCounter?.data as any)?.model as string | undefined
 
-  // For non-main sessions (actors), fetch the real model from the session itself.
+  // Session-scoped model truth for EVERY session (main included): GET
+  // /chat/session-info returns peekModel() (next ?? sticky ?? base) for live
+  // sessions, or the provider default for not-yet-materialized ones.
   useEffect(() => {
-    if (!sessionId || sessionId === 'main') {
-      setSessionModel(null)
-      return
-    }
+    const sid = sessionId ?? 'main'
     let cancelled = false
     const fetchModel = () => {
-      fetch(`/chat/session-info?sessionId=${encodeURIComponent(sessionId)}`)
+      fetch(`/chat/session-info?sessionId=${encodeURIComponent(sid)}`)
         .then(r => r.json())
         .then((data: { model: string | null }) => {
           if (!cancelled) setSessionModel(data.model)
@@ -40,12 +43,14 @@ export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
         .catch(() => {})
     }
     fetchModel()
-    // Refresh every 5s to pick up model changes
+    // 5s steady-state poll; globalModelHint in deps re-arms the effect (and
+    // fetches instantly) whenever any session's activity changes the aggregate.
     const interval = setInterval(fetchModel, 5000)
     return () => { cancelled = true; clearInterval(interval) }
-  }, [sessionId])
+  }, [sessionId, globalModelHint])
 
-  const currentModel = sessionModel ?? globalModel
+  // '…' only until the first session-info response lands (<100ms typical).
+  const currentModel = sessionModel ?? '…'
 
   // Fetch model catalog from backend — single source of truth from config/index.ts
   useEffect(() => {
