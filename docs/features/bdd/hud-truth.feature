@@ -126,3 +126,29 @@ Feature: HUD truth — rev/gap detection, reactor pull-direct, reconciliation, s
   Scenario: Panels older than the threshold render a staleness indicator
     Given a panel whose updatedAt is older than 60 seconds
     Then its header shows the stale marker and an age tooltip
+
+  # ── F6.1 — SSE subscribe storm (live defect 2026-06-11) ──────────────────
+  # Root cause: inline-arrow subscribe passed to useSyncExternalStore → new
+  # identity per render → React re-subscribes per render → refCount 1→0→1 →
+  # disconnect+connect per render → snapshot replay → notify → re-render → ∞.
+  # Ignites only when exactly ONE subscriber crosses zero (sleep/wake seeded
+  # the single-subscriber state). Observed: ~770 reconnects/s, node 53% CPU.
+  # Frontend scenarios — live-validation (no UI test runner).
+
+  Scenario: Hook subscribe identity is stable across renders
+    Given a component using useHudState, useHudPiece or useHudReactor
+    When the component re-renders for any reason
+    Then useSyncExternalStore receives the same subscribe function reference
+    And React does not unsubscribe and resubscribe
+    And the server logs zero SSE connect or disconnect events
+
+  Scenario: Transient refCount zero does not recycle the SSE connection
+    Given the HUD store has exactly one subscriber
+    When the subscriber unsubscribes and a new one subscribes within the grace window
+    Then the EventSource is never closed
+    And no new connection is opened on the server
+
+  Scenario: Sustained zero subscribers closes the connection after the grace window
+    Given the HUD store has exactly one subscriber
+    When the subscriber unsubscribes and nothing resubscribes within the grace window
+    Then the EventSource is closed exactly once

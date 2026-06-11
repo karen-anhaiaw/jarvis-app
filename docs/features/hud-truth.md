@@ -113,3 +113,29 @@ JarvisCore.getReactorState() ◀── pull-direct (reactor truth)
 See `docs/features/bdd/hud-truth.feature`. Backend scenarios are unit-tested;
 frontend gap/resync and staleness rendering are validated live (no UI test
 runner exists in this repo — documented limitation).
+
+## F6.1 — SSE subscribe storm (live defect, fixed 2026-06-11)
+
+**Failure mode 5 (discovered in production):** the hooks passed inline-arrow
+`subscribe` functions to `useSyncExternalStore`. React re-subscribes whenever
+the subscribe reference changes identity between renders, so every render of a
+consumer produced unsubscribe→resubscribe. With exactly ONE live subscriber the
+refCount crossed `1→0→1`, tearing down and reopening the EventSource per
+render; each reopen replayed a snapshot → `notify()` → re-render → repeat.
+Self-sustaining at ~770 cycles/s: node 53% CPU, Electron 13.6%, log ring buffer
+flooded (12M seq), `/logs` observability drowned. Ignition required the
+single-subscriber state — a Mac sleep/wake at ~04:21 seeded it after 12h of
+clean operation (N panels normally keep refCount > 0 between paired calls).
+
+**Fix (two independent layers):**
+1. *Stable identities* — module-level `subscribeFn` / `getVersionFn` shared by
+   all three hooks. React never re-subscribes. Comment in code forbids
+   re-inlining.
+2. *Disconnect hysteresis* — when refCount touches 0, teardown is deferred by a
+   250ms grace timer; any resubscribe within the window cancels it. Protects
+   against ANY future churn source (StrictMode double-invoke, remounts),
+   not just identity churn.
+
+**Validation:** live — server-side connect/disconnect rate on `/hud-stream`
+drops to zero after HUD reload; sustained zero subscribers still closes the
+connection (grace expiry).
