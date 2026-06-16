@@ -1,5 +1,7 @@
 // src/server.ts
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createSecureServer, type Http2ServerRequest, type Http2ServerResponse } from "node:http2";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { loadTlsCert } from "./transport/tls.js";
 import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import { join, extname } from "node:path";
 import { homedir } from "node:os";
@@ -90,7 +92,7 @@ type CapabilitiesProvider = () => Array<{ name: string; description: string; cat
 type RouteHandler = (req: IncomingMessage, res: ServerResponse) => void;
 
 export class HttpServer {
-  private server: ReturnType<typeof createServer>;
+  private server: ReturnType<typeof createSecureServer>;
   private port: number;
   private chatPiece: ChatPiece;
   private getHudState: HudStateProvider;
@@ -111,8 +113,16 @@ export class HttpServer {
     this.getHudState = getHudState;
     this.getCapabilities = getCapabilities;
     this.onAbort = onAbort;
-    this.server = createServer(this.handle.bind(this));
-    this.server.listen(port, () => log.info({ port }, "HttpServer: listening"));
+    const tls = loadTlsCert();
+    this.server = createSecureServer(
+      { ...tls, allowHTTP1: true },
+      // allowHTTP1: true means req/res are compatible at runtime even though
+      // Http2ServerRequest has a slightly different static type from IncomingMessage.
+      (this.handle.bind(this) as unknown) as (req: Http2ServerRequest, res: Http2ServerResponse) => void,
+    );
+    this.server.listen(port, () =>
+      log.info({ port, protocol: "https/h2" }, "HttpServer: listening on https://localhost:" + port)
+    );
   }
 
   setOnClearSession(handler: (sessionId: string) => void): void {
@@ -146,7 +156,7 @@ export class HttpServer {
   }
 
   get url(): string {
-    return `http://localhost:${this.port}`;
+    return `https://localhost:${this.port}`;
   }
 
   private handle(req: IncomingMessage, res: ServerResponse): void {

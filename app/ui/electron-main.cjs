@@ -1,7 +1,16 @@
 
 const { app, BrowserWindow, screen, globalShortcut } = require('electron');
 const http = require('http');
+const https = require('https');
 const url = require('url');
+// Protocol-aware helpers — server uses HTTPS/h2 with self-signed cert.
+// rejectUnauthorized:false is required for self-signed localhost cert.
+const _tlsOpts = { rejectUnauthorized: false };
+const nuGet = (u, cb) => (u.startsWith('https:') ? https : http).get(u, _tlsOpts, cb);
+const nuRequest = (opts, cb) => {
+  const mod = (opts.protocol === 'https:' || opts.port === 50052) ? https : http;
+  return mod.request(Object.assign({}, opts, _tlsOpts), cb);
+};
 
 /**
  * Global hotkey for voice push-to-talk (toggle on/off).
@@ -39,9 +48,8 @@ function createBrowserWindow(id, url, partition) {
   bwin.on('closed', () => {
     browserWindows.delete(id);
     // notify Node server that window was closed
-    const http2 = require('http');
     const body = JSON.stringify({ id, event: 'closed' });
-    const req = http2.request({
+    const req = nuRequest({
       hostname: 'localhost', port: 50052,
       path: '/plugins/browser/event', method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
@@ -54,6 +62,7 @@ function createBrowserWindow(id, url, partition) {
 }
 
 // Grant microphone permission for Web Speech API
+app.commandLine.appendSwitch('ignore-certificate-errors');
 app.commandLine.appendSwitch('enable-speech-dispatcher');
 
 app.whenReady().then(() => {
@@ -117,7 +126,7 @@ app.whenReady().then(() => {
     }
   });
 
-  win.loadURL('http://localhost:50052');
+  win.loadURL('https://localhost:50052');
 
   // ── Global voice hotkey ──
   // Dispatches DOM CustomEvent 'jarvis:voice-toggle' inside the HUD when the
@@ -149,7 +158,7 @@ app.whenReady().then(() => {
 
   // Auto-reload when server comes back after restart
   win.webContents.on('did-fail-load', () => {
-    setTimeout(() => win.loadURL('http://localhost:50052'), 2000);
+    setTimeout(() => win.loadURL('https://localhost:50052'), 2000);
   });
 
   // ── Open external links in the default browser, not in Electron ──
@@ -158,13 +167,13 @@ app.whenReady().then(() => {
   // to shell.openExternal so the OS default browser handles the URL.
   const { shell } = require('electron');
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (!url.startsWith('http://localhost') && !url.startsWith('file://')) {
+    if (!url.startsWith('http://localhost') && !url.startsWith('https://localhost') && !url.startsWith('file://')) {
       shell.openExternal(url);
     }
     return { action: 'deny' }; // always deny — Electron never opens a new window
   });
   win.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith('http://localhost') && !url.startsWith('file://')) {
+    if (!url.startsWith('http://localhost') && !url.startsWith('https://localhost') && !url.startsWith('file://')) {
       event.preventDefault();
       shell.openExternal(url);
     }
@@ -200,7 +209,7 @@ app.whenReady().then(() => {
       backgroundColor: '#0d1117',
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
-    child.loadURL('http://localhost:50052?panel=' + encodeURIComponent(panelId));
+    child.loadURL('https://localhost:50052?panel=' + encodeURIComponent(panelId));
     child.once('ready-to-show', () => {
       child.show();
       // On macOS, child windows open behind transparent fullscreen parents.
@@ -215,9 +224,8 @@ app.whenReady().then(() => {
     const saveDetachedLayout = () => {
       if (child.isDestroyed()) return;
       const b = child.getBounds();
-      const http2 = require('http');
       const postData = JSON.stringify({ panelId, x: b.x, y: b.y, width: b.width, height: b.height });
-      const req2 = http2.request({ hostname: 'localhost', port: 50052, path: '/hud/detach-layout', method: 'POST',
+      const req2 = nuRequest({ hostname: 'localhost', port: 50052, path: '/hud/detach-layout', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) } });
       req2.write(postData);
       req2.end();
@@ -235,9 +243,8 @@ app.whenReady().then(() => {
         ).catch(() => {});
       }
       // Persist detached=false in settings so it won't auto-restore on next launch
-      const http4 = require('http');
-      const postData = JSON.stringify({ panelId });
-      const req3 = http4.request({ hostname: 'localhost', port: 50052, path: '/hud/reattach', method: 'POST',
+        const postData = JSON.stringify({ panelId });
+      const req3 = nuRequest({ hostname: 'localhost', port: 50052, path: '/hud/reattach', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) } });
       req3.write(postData);
       req3.end();
@@ -248,8 +255,7 @@ app.whenReady().then(() => {
 
   // ── Auto-restore detached panels from previous session ──
   setTimeout(() => {
-    const http3 = require('http');
-    http3.get('http://localhost:50052/hud/detached', (resp) => {
+    nuGet('https://localhost:50052/hud/detached', (resp) => {
       let data = '';
       resp.on('data', c => data += c);
       resp.on('end', () => {
