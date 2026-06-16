@@ -173,19 +173,9 @@ app.whenReady().then(() => {
   // Intercepts target="_blank" anchor clicks (setWindowOpenHandler) and any
   // navigation away from the local dev server (will-navigate). Both delegate
   // to shell.openExternal so the OS default browser handles the URL.
-  const { shell } = require('electron');
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (!url.startsWith('http://localhost') && !url.startsWith('https://localhost') && !url.startsWith('file://')) {
-      shell.openExternal(url);
-    }
-    return { action: 'deny' }; // always deny — Electron never opens a new window
-  });
-  win.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith('http://localhost') && !url.startsWith('https://localhost') && !url.startsWith('file://')) {
-      event.preventDefault();
-      shell.openExternal(url);
-    }
-  });
+  // Applied to the main window here AND to every detached panel window
+  // (see attachExternalLinks) so links work identically wherever a panel lives.
+  attachExternalLinks(win.webContents);
 
   // ── Detach panel: create a child BrowserWindow for a single panel ──
   function detachPanel(panelId, title, x, y, width, height) {
@@ -475,6 +465,21 @@ app.whenReady().then(() => {
           res.end(JSON.stringify({ ok: true, imported: ok, failed: fail }));
         } catch(e) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: String(e) })); }
       }); return;
+    }
+
+    // GET /open-url?url=<encoded> — open a URL in the OS default browser.
+    // Used by plugin renderers that can't call shell.openExternal directly
+    // (contextIsolation:true blocks Electron APIs from the renderer process).
+    if (parsed.pathname === '/open-url' && req.method === 'GET') {
+      const target = parsed.searchParams?.get('url') ?? '';
+      if (target.startsWith('http://') || target.startsWith('https://')) {
+        const { shell } = require('electron');
+        shell.openExternal(target).catch(() => {});
+        res.writeHead(204); res.end();
+      } else {
+        res.writeHead(400); res.end('invalid url');
+      }
+      return;
     }
 
     res.writeHead(404);
