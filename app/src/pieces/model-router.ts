@@ -290,7 +290,11 @@ export class ModelRouterPiece implements Piece {
     }
     let r = this.routes.get(sessionId);
     if (!r) {
-      r = { sticky: cfg.default, switchCount: 0 };
+      // If the session already exists with a sticky model override (set by a piece
+      // before the first ai.request, e.g. slack-hook pinning Haiku), seed the
+      // route from that override instead of cfg.default so we don't stomp it.
+      const existingSticky = (this.sessions.peek(sessionId) as any)?.session?.stickyModelOverride;
+      r = { sticky: existingSticky ?? cfg.default, switchCount: 0 };
       this.routes.set(sessionId, r);
     }
     return r;

@@ -231,6 +231,13 @@ export class JarvisCore implements Piece {
   private currentTrace = new Map<string, string>();
 
   /**
+   * Tracks which sessions have already received their first dispatch since
+   * this process started. Used to inject the one-time "JARVIS started/restarted"
+   * system block on the very first turn of each session per boot.
+   */
+  private dispatchedSessions = new Set<string>();
+
+  /**
    * Per-turn lifecycle aggregator (F5, Pillar B). Instantiated in start()
    * with the live bus. Called DIRECTLY at the turn hook sites (begin /
    * textDelta / roundTrip / toolsDispatched / toolsCompleted / complete /
@@ -798,10 +805,39 @@ export class JarvisCore implements Piece {
       }, "JarvisCore: *** API CALL START ***");
 
       const images = msgImages?.map(i => ({ label: i.label, base64: i.base64, mediaType: i.mediaType }));
+
+      // ── Context injections (session-level, provider-agnostic) ──────────────
+      // 1. Timestamp block — every turn, ultra-short, so the LLM can orient
+      //    itself in time without burning tokens on verbose formatting.
+      const now = new Date();
+      const ts = now.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+      const timestampBlock = `[now: ${ts}]`;
+
+      // 2. Restart sentinel — injected only on the FIRST dispatch of each
+      //    session since this process booted. Tells the LLM the context is
+      //    fresh (no prior conversation in memory for this session).
+      const isFirstDispatch = !this.dispatchedSessions.has(sessionId);
+      this.dispatchedSessions.add(sessionId);
+      const restartBlock = isFirstDispatch
+        ? "[SYSTEM: JARVIS started or restarted — this is the first message of this session]"
+        : null;
+
+      // Merge injections with the user prompt into a PromptBlock array.
+      // We prepend so the LLM sees context before the user message.
+      const userBlocks: import("../ai/types.js").PromptBlock[] = Array.isArray(text)
+        ? text
+        : [{ type: "text" as const, text }];
+      const injections: import("../ai/types.js").PromptBlock[] = [
+        { type: "text" as const, text: timestampBlock },
+        ...(restartBlock ? [{ type: "text" as const, text: restartBlock }] : []),
+      ];
+      const enrichedText: import("../ai/types.js").PromptBlock[] = [...injections, ...userBlocks];
+      // ── end context injections ─────────────────────────────────────────────
+
       // Hand the turn's traceId to the session (duck-typed, F4.17) so
       // session-internal logs (API call, complete, error) carry it too.
       (managed.session as { setTurnTraceId?: (id?: string) => void }).setTurnTraceId?.(traceId);
-      const stream = managed.session.sendAndStream(text, images);
+      const stream = managed.session.sendAndStream(enrichedText, images);
       await this.consumeStream(sessionId, stream);
     } catch (err: any) {
       log.info({ sessionId, traceId }, "JarvisCore: dispatchToSession error — popState");

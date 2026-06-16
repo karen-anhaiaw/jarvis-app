@@ -110,6 +110,10 @@ export function ChatPanel({
   // They render as faint cards under the JARVIS thinking indicator until the
   // backend drains them and they materialize as real user messages.
   const [pendingQueue, setPendingQueue] = useState<Array<{ text: string; source?: string; hasImages?: boolean }>>([])
+  const [sseConnected, setSseConnected] = useState(true)
+  // Current model for this session — hydrated via SSE model_changed events.
+  // Replaces ModelPicker's per-instance polling of /chat/session-info.
+  const [sessionModel, setSessionModel] = useState<string | null>(null)
 
   // Mirror of streaming/thinking state read inside the SSE callback — that
   // useEffect closes over initial values, so reading state directly there
@@ -183,17 +187,41 @@ export function ChatPanel({
       .catch(() => {})
   }, [historyUrl])
 
-  // SSE stream scoped to this sessionId
+  // SSE stream scoped to this sessionId — with auto-reconnect on error.
+  // The native EventSource reconnects automatically in browsers, but Electron
+  // does NOT — once the connection drops the source goes CLOSED and stays there.
+  // We replicate the HUD stream pattern: onerror → close → setTimeout(2s) → reconnect.
   useEffect(() => {
-    const source = new EventSource(streamUrl)
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let cancelled = false
+    let cleanup = () => {}
 
-    source.onmessage = (event) => {
+    function connect() {
+      if (cancelled) return
+      const source = new EventSource(streamUrl)
+
+      source.onopen = () => setSseConnected(true)
+
+      source.onerror = () => {
+        source.close()
+        setSseConnected(false)
+        if (!cancelled) {
+          reconnectTimer = setTimeout(connect, 2000)
+        }
+      }
+
+      cleanup = () => source.close()
+
+      source.onmessage = (event) => {
       const data = JSON.parse(event.data)
 
       switch (data.type) {
         // Authoritative state snapshot from the backend stack.
         // Takes precedence over inferred state from individual events.
         // idle → clear thinking+streaming; processing → thinking; waiting_tools → thinking.
+        case 'model_changed':
+          setSessionModel(data.model ?? null)
+          break
         case 'session_state':
           if (data.state === 'idle') {
             setIsThinking(false)
@@ -514,9 +542,16 @@ export function ChatPanel({
           break
         }
       }
-    }
+    } // end source.onmessage
+    } // end connect()
 
-    return () => source.close()
+    connect()
+
+    return () => {
+      cancelled = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      cleanup()
+    }
   }, [streamUrl, features.compaction, flushPendingChoices])
 
   // ESC to abort — fires when this panel's textarea has focus
@@ -824,9 +859,26 @@ export function ChatPanel({
         onChoiceDismiss={handleAnchorChoiceDismiss}
       />
 
+      {!sseConnected && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          padding: '5px 12px',
+          background: 'rgba(255,160,0,0.12)',
+          borderTop: '1px solid rgba(255,160,0,0.3)',
+          fontSize: '11px',
+          color: '#fa0',
+          letterSpacing: '0.04em',
+        }}>
+          <span style={{ display: 'inline-block', width: '7px', height: '7px', borderRadius: '50%', background: '#fa0', animation: 'pulse-slow 1.2s ease-in-out infinite' }} />
+          RECONNECTING…
+        </div>
+      )}
+
       <div className="chatDockedInput">
         {features.modelPicker && (
-          <ModelPicker sessionId={sessionId} sendUrl={sendUrl} />
+          <ModelPicker sessionId={sessionId} sendUrl={sendUrl} externalModel={sessionModel} />
         )}
         <div style={{ display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {features.slashMenu && (

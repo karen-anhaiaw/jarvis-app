@@ -1,7 +1,8 @@
 // src/core/graph-registry.ts
 // GraphRegistry — typed, bus-free registry for the hud-core-node graph.
 // Pieces call register() in start() and unregister() in stop().
-// The hud-core-node piece calls getTree() every render frame.
+// HudCoreNodePiece subscribes via onChange() and receives a notification whenever the tree
+// mutates — no polling needed. Call notify() after any structural or status change.
 
 import { log } from "../logger/index.js";
 
@@ -39,6 +40,23 @@ class GraphRegistryImpl {
   private nodes = new Map<string, GraphNodeDef>();
   /** Root node status — updated via update("jarvis-core", { status }) */
   private rootStatus = "online";
+  /** Listeners notified on every structural or status mutation. */
+  private changeListeners = new Set<() => void>();
+
+  /** Subscribe to tree mutations. Returns an unsubscribe function. */
+  onChange(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
+  }
+
+  /** Fire all registered listeners. Call after any register/unregister/update/setChildren. */
+  private notify(): void {
+    for (const fn of this.changeListeners) {
+      try { fn(); } catch (e) {
+        log.warn({ error: (e as Error).message }, "GraphRegistry: onChange listener threw");
+      }
+    }
+  }
 
   register(node: GraphNodeDef): void {
     const existing = this.nodes.get(node.id);
@@ -49,11 +67,13 @@ class GraphRegistryImpl {
     }
     this.nodes.set(node.id, node);
     log.debug({ nodeId: node.id }, "GraphRegistry: registered");
+    this.notify();
   }
 
   unregister(id: string): void {
     this.nodes.delete(id);
     log.debug({ nodeId: id }, "GraphRegistry: unregistered");
+    this.notify();
   }
 
   /** Set or clear the children callback on an existing node.
@@ -63,6 +83,7 @@ class GraphRegistryImpl {
     const node = this.nodes.get(id);
     if (!node) return;
     node.children = children;
+    this.notify();
   }
 
   /** Update status/meta/label without re-registering */
@@ -70,6 +91,7 @@ class GraphRegistryImpl {
     // Special case: root node status is stored separately
     if (id === "jarvis-core" && patch.status !== undefined) {
       this.rootStatus = patch.status;
+      this.notify();
       return;
     }
     const node = this.nodes.get(id);
@@ -77,6 +99,7 @@ class GraphRegistryImpl {
     if (patch.status !== undefined) node.status = patch.status;
     if (patch.meta !== undefined) node.meta = patch.meta;
     if (patch.label !== undefined) node.label = patch.label;
+    this.notify();
   }
 
   /**

@@ -1,5 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { useHudPiece } from '../../hooks/useHudStream'
+import { useState, useEffect, useCallback, useRef } from 'react'
 
 interface ModelMeta {
   id: string
@@ -11,9 +10,11 @@ interface ModelMeta {
 interface ModelPickerProps {
   sessionId: string
   sendUrl: string
+  /** Model pushed from ChatPanel via SSE model_changed — replaces /chat/session-info polling. */
+  externalModel?: string | null
 }
 
-export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
+export function ModelPicker({ sessionId, sendUrl, externalModel }: ModelPickerProps) {
   const [open, setOpen] = useState(false)
   const [catalog, setCatalog] = useState<ModelMeta[]>([])
   const [sessionModel, setSessionModel] = useState<string | null>(null)
@@ -25,29 +26,26 @@ export function ModelPicker({ sessionId, sendUrl }: ModelPickerProps) {
   // footer while main was pinned to Fable (bug, 2026-06-11). It is now ONLY
   // a re-fetch trigger — when the aggregate flips, we re-poll THIS session's
   // truth immediately instead of waiting for the 5s interval.
-  const tokenCounter = useHudPiece('token-counter')
-  const globalModelHint = (tokenCounter?.data as any)?.model as string | undefined
-
-  // Session-scoped model truth for EVERY session (main included): GET
-  // /chat/session-info returns peekModel() (next ?? sticky ?? base) for live
-  // sessions, or the provider default for not-yet-materialized ones.
+  // Model state: hydrated by externalModel prop (SSE model_changed from ChatPanel).
+  // One-time fetch on mount + sessionId change as fallback for cases where
+  // model_changed hasn't fired yet (e.g. panel opened mid-session).
+  // No polling — the SSE event covers all live changes.
   useEffect(() => {
+    if (externalModel) {
+      // ChatPanel already has the model via SSE — trust it immediately.
+      setSessionModel(externalModel)
+      return
+    }
+    // Fallback: fetch once on mount or when externalModel is null/undefined
+    // (SSE model_changed hasn't fired yet for this session).
     const sid = sessionId ?? 'main'
     let cancelled = false
-    const fetchModel = () => {
-      fetch(`/chat/session-info?sessionId=${encodeURIComponent(sid)}`)
-        .then(r => r.json())
-        .then((data: { model: string | null }) => {
-          if (!cancelled) setSessionModel(data.model)
-        })
-        .catch(() => {})
-    }
-    fetchModel()
-    // 5s steady-state poll; globalModelHint in deps re-arms the effect (and
-    // fetches instantly) whenever any session's activity changes the aggregate.
-    const interval = setInterval(fetchModel, 5000)
-    return () => { cancelled = true; clearInterval(interval) }
-  }, [sessionId, globalModelHint])
+    fetch(`/chat/session-info?sessionId=${encodeURIComponent(sid)}`)
+      .then(r => r.json())
+      .then((data: { model: string | null }) => { if (!cancelled) setSessionModel(data.model) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [sessionId, externalModel])
 
   // '…' only until the first session-info response lands (<100ms typical).
   const currentModel = sessionModel ?? '…'

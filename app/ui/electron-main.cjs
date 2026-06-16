@@ -108,6 +108,15 @@ app.whenReady().then(() => {
     win.show();
   });
 
+  // Hide instead of close — keeps the backend alive on macOS.
+  // Cmd+Q still quits fully via the app menu.
+  win.on('close', (e) => {
+    if (!app.isQuiting) {
+      e.preventDefault();
+      win.hide();
+    }
+  });
+
   win.loadURL('http://localhost:50052');
 
   // ── Global voice hotkey ──
@@ -128,9 +137,14 @@ app.whenReady().then(() => {
     console.error('[hotkey] register error:', err);
   }
 
-  // Capture ALL console messages for debugging
+  // Capture ALL renderer console messages — log via console so they appear in
+  // the Electron process stdout (captured by the parent TS process below).
+  // level: 0=verbose, 1=info, 2=warning, 3=error.
   win.webContents.on('console-message', (event, level, message) => {
-    console.log('[E' + level + ']', message.slice(0, 300));
+    const msg = message.slice(0, 500);
+    if (level >= 3)      console.error('[renderer]', msg);
+    else if (level >= 2) console.warn('[renderer]', msg);
+    else                 console.log('[renderer]', msg);
   });
 
   // Auto-reload when server comes back after restart
@@ -454,8 +468,26 @@ app.whenReady().then(() => {
   }).listen(50053);
 });
 
+app.on('before-quit', () => {
+  app.isQuiting = true;
+});
+
 app.on('will-quit', () => {
   try { globalShortcut.unregisterAll(); } catch {}
 });
 
-app.on('window-all-closed', () => app.quit());
+// On macOS, closing the main window hides it instead of quitting the app.
+// This keeps the Node backend alive so SSE connections, actors, cron jobs,
+// and Slack hooks survive a "close". The user can reopen via the dock icon.
+// To fully quit, use Cmd+Q or the app menu.
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+  // On macOS: do nothing — keeps the process alive.
+});
+
+app.on('activate', () => {
+  // Reopen/show the main window when the user clicks the dock icon.
+  if (win && !win.isDestroyed()) {
+    win.show();
+  }
+});
