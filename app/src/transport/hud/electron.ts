@@ -174,7 +174,23 @@ app.whenReady().then(() => {
   // navigation away from the local dev server (will-navigate). Both delegate
   // to shell.openExternal so the OS default browser handles the URL.
   // Applied to the main window here AND to every detached panel window
-  // (see attachExternalLinks) so links work identically wherever a panel lives.
+  // so links work identically wherever a panel lives.
+  function attachExternalLinks(wc) {
+    wc.setWindowOpenHandler(({ url: openUrl }) => {
+      if (!openUrl.startsWith('https://localhost') && !openUrl.startsWith('http://localhost') && !openUrl.startsWith('file://')) {
+        const { shell } = require('electron');
+        shell.openExternal(openUrl).catch(() => {});
+      }
+      return { action: 'deny' };
+    });
+    wc.on('will-navigate', (event, navUrl) => {
+      if (!navUrl.startsWith('https://localhost') && !navUrl.startsWith('http://localhost') && !navUrl.startsWith('file://')) {
+        event.preventDefault();
+        const { shell } = require('electron');
+        shell.openExternal(navUrl).catch(() => {});
+      }
+    });
+  }
   attachExternalLinks(win.webContents);
 
   // ── Detach panel: create a child BrowserWindow for a single panel ──
@@ -208,6 +224,7 @@ app.whenReady().then(() => {
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
     child.loadURL('${statusUrl}?panel=' + encodeURIComponent(panelId));
+    attachExternalLinks(child.webContents);
     child.once('ready-to-show', () => {
       child.show();
       // On macOS, child windows open behind transparent fullscreen parents.
