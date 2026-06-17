@@ -836,7 +836,15 @@ export class AnthropicSession implements AISession {
       // pair here. Still sanitize defensively to absorb any pre-existing
       // orphans inside the chunk (legacy history, restored sessions, residue
       // from a previously aborted turn).
-      const toCompact = sanitizeMessages(this.messages.slice(0, splitAt));
+      // Guard: the API requires messages to start with a user turn.
+      // If the oldest messages start with an assistant (e.g. restored session,
+      // prior compaction left an assistant-first slice), drop leading assistant
+      // messages before sanitizing — they carry no unmatched tool_results so
+      // dropping them is safe.
+      const rawChunk = this.messages.slice(0, splitAt);
+      const firstUserIdx = rawChunk.findIndex((m) => m.role === "user");
+      const trimmedChunk = firstUserIdx > 0 ? rawChunk.slice(firstUserIdx) : rawChunk;
+      const toCompact = sanitizeMessages(trimmedChunk);
       const remaining = this.messages.slice(splitAt);
 
       // Same prompt-shape hardening as doCompact (F-compact-2.2/2.3):
@@ -1106,7 +1114,12 @@ export class AnthropicSession implements AISession {
       // instruction is the final user content REGARDLESS of how the history
       // ends, and appends the <summary> prefill (F-compact-2.2/2.3 — the
       // conditional instruction was the root cause of incident #2's roleplay).
-      const msgs = AnthropicSession.buildSummarizerTail(sanitizeMessages([...this.messages]));
+      // Guard: API requires messages to start with a user turn.
+      // Drop leading assistant messages before sanitizing (same fix as sliding-window).
+      const rawHistory = [...this.messages];
+      const firstUser = rawHistory.findIndex((m) => m.role === "user");
+      const trimmedHistory = firstUser > 0 ? rawHistory.slice(firstUser) : rawHistory;
+      const msgs = AnthropicSession.buildSummarizerTail(sanitizeMessages(trimmedHistory));
 
       // Use the session's current model for compaction — same client, same model.
       // The utility model (Haiku) was too weak for large contexts (~1M tokens)
