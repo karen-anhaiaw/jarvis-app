@@ -165,19 +165,25 @@ app.whenReady().then(() => {
   // Intercepts target="_blank" anchor clicks (setWindowOpenHandler) and any
   // navigation away from the local dev server (will-navigate). Both delegate
   // to shell.openExternal so the OS default browser handles the URL.
-  const { shell } = require('electron');
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (!url.startsWith('http://localhost') && !url.startsWith('https://localhost') && !url.startsWith('file://')) {
-      shell.openExternal(url);
-    }
-    return { action: 'deny' }; // always deny — Electron never opens a new window
-  });
-  win.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith('http://localhost') && !url.startsWith('https://localhost') && !url.startsWith('file://')) {
-      event.preventDefault();
-      shell.openExternal(url);
-    }
-  });
+  // Applied to the main window here AND to every detached panel window
+  // so links work identically wherever a panel lives.
+  function attachExternalLinks(wc) {
+    wc.setWindowOpenHandler(({ url: openUrl }) => {
+      if (!openUrl.startsWith('https://localhost') && !openUrl.startsWith('http://localhost') && !openUrl.startsWith('file://')) {
+        const { shell } = require('electron');
+        shell.openExternal(openUrl).catch(() => {});
+      }
+      return { action: 'deny' };
+    });
+    wc.on('will-navigate', (event, navUrl) => {
+      if (!navUrl.startsWith('https://localhost') && !navUrl.startsWith('http://localhost') && !navUrl.startsWith('file://')) {
+        event.preventDefault();
+        const { shell } = require('electron');
+        shell.openExternal(navUrl).catch(() => {});
+      }
+    });
+  }
+  attachExternalLinks(win.webContents);
 
   // ── Detach panel: create a child BrowserWindow for a single panel ──
   function detachPanel(panelId, title, x, y, width, height) {
@@ -210,6 +216,7 @@ app.whenReady().then(() => {
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
     child.loadURL('https://localhost:50052?panel=' + encodeURIComponent(panelId));
+    attachExternalLinks(child.webContents);
     child.once('ready-to-show', () => {
       child.show();
       // On macOS, child windows open behind transparent fullscreen parents.
@@ -469,6 +476,21 @@ app.whenReady().then(() => {
       }); return;
     }
 
+    // GET /open-url?url=<encoded> — open a URL in the OS default browser.
+    // Used by plugin renderers that can't call shell.openExternal directly
+    // (contextIsolation:true blocks Electron APIs from the renderer process).
+    if (parsed.pathname === '/open-url' && req.method === 'GET') {
+      const target = parsed.searchParams?.get('url') ?? '';
+      if (target.startsWith('http://') || target.startsWith('https://')) {
+        const { shell } = require('electron');
+        shell.openExternal(target).catch(() => {});
+        res.writeHead(204); res.end();
+      } else {
+        res.writeHead(400); res.end('invalid url');
+      }
+      return;
+    }
+
     res.writeHead(404);
     res.end();
   }).listen(50053);
@@ -483,7 +505,7 @@ app.on('will-quit', () => {
 });
 
 // On macOS, closing the main window hides it instead of quitting the app.
-// This keeps the Node backend alive so SSE connections, actors, cron jobs,
+// This keeps the Node backend alive so SSE connections, plugin sessions, cron jobs,
 // and Slack hooks survive a "close". The user can reopen via the dock icon.
 // To fully quit, use Cmd+Q or the app menu.
 app.on('window-all-closed', () => {
