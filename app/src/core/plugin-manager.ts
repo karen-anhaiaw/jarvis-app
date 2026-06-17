@@ -4,7 +4,7 @@
 // Tools, prompts loaded at runtime. Pieces/renderers in phase 2.
 
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, mkdirSync, rmSync, copyFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EventBus } from "./bus.js";
 import type { Piece } from "./piece.js";
@@ -25,6 +25,76 @@ import { log } from "../logger/index.js";
 import { DEFAULT_SESSION } from "./constants.js";
 
 const PLUGINS_DIR = join(process.env.HOME ?? "~", ".jarvis", "plugins");
+const JARVIS_DIR  = join(process.env.HOME ?? "~", ".jarvis");
+
+/**
+ * Plugin bootstrap — runs after every install or auto-clone.
+ *
+ * Reads plugin.json `install` block and copies declared artefacts to ~/.jarvis/:
+ *   install.roles   → array of filenames → ~/.jarvis/roles/<file>
+ *   install.skills  → array of dir names → ~/.jarvis/skills/<dir>/  (whole dir)
+ *   install.secrets → array of { src, dest, template? } → ~/.jarvis/secrets/<dest>
+ *                     template:true → skip if dest already exists (don't overwrite secrets)
+ *
+ * All operations are non-fatal: errors are logged but never crash the install.
+ *
+ * plugin.json example:
+ *   "install": {
+ *     "roles":   ["slack-agent.md", "researcher.md"],
+ *     "skills":  ["alexandria"],
+ *     "secrets": [{ "src": "secrets/slack-app.template.json", "dest": "slack-app.json", "template": true }]
+ *   }
+ */
+function runPluginBootstrap(pluginDir: string, pluginName: string): void {
+  const manifestPath = join(pluginDir, "plugin.json");
+  if (!existsSync(manifestPath)) return;
+
+  let manifest: Record<string, any>;
+  try { manifest = JSON.parse(readFileSync(manifestPath, "utf8")); }
+  catch { return; }
+
+  const install = manifest.install as Record<string, any> | undefined;
+  if (!install) return;
+
+  // ── roles ────────────────────────────────────────────────────────────────
+  const roles: string[] = install.roles ?? [];
+  const rolesDir = join(JARVIS_DIR, "roles");
+  mkdirSync(rolesDir, { recursive: true });
+  for (const file of roles) {
+    const src = join(pluginDir, "roles", file);
+    const dest = join(rolesDir, file);
+    if (!existsSync(src)) { log.warn({ pluginName, file }, "PluginManager: bootstrap role not found"); continue; }
+    try { copyFileSync(src, dest); log.info({ pluginName, file }, "PluginManager: bootstrap copied role"); }
+    catch (err) { log.warn({ pluginName, file, err: String(err) }, "PluginManager: bootstrap copy role failed"); }
+  }
+
+  // ── skills ───────────────────────────────────────────────────────────────
+  const skills: string[] = install.skills ?? [];
+  const skillsDir = join(JARVIS_DIR, "skills");
+  mkdirSync(skillsDir, { recursive: true });
+  for (const skillName of skills) {
+    const src = join(pluginDir, "skills", skillName);
+    const dest = join(skillsDir, skillName);
+    if (!existsSync(src)) { log.warn({ pluginName, skillName }, "PluginManager: bootstrap skill dir not found"); continue; }
+    try {
+      execSync(`cp -r "${src}" "${dest}"`, { timeout: 5000 });
+      log.info({ pluginName, skillName }, "PluginManager: bootstrap copied skill");
+    } catch (err) { log.warn({ pluginName, skillName, err: String(err) }, "PluginManager: bootstrap copy skill failed"); }
+  }
+
+  // ── secrets (templates) ──────────────────────────────────────────────────
+  const secrets: Array<{ src: string; dest: string; template?: boolean }> = install.secrets ?? [];
+  const secretsDir = join(JARVIS_DIR, "secrets");
+  mkdirSync(secretsDir, { recursive: true });
+  for (const { src, dest, template } of secrets) {
+    const srcPath  = join(pluginDir, src);
+    const destPath = join(secretsDir, dest);
+    if (!existsSync(srcPath)) { log.warn({ pluginName, src }, "PluginManager: bootstrap secret template not found"); continue; }
+    if (template && existsSync(destPath)) { log.info({ pluginName, dest }, "PluginManager: bootstrap secret already exists, skipping"); continue; }
+    try { copyFileSync(srcPath, destPath); log.info({ pluginName, dest, template }, "PluginManager: bootstrap copied secret"); }
+    catch (err) { log.warn({ pluginName, dest, err: String(err) }, "PluginManager: bootstrap copy secret failed"); }
+  }
+}
 
 interface PluginManifest {
   name: string;
@@ -224,6 +294,9 @@ export class PluginManager implements Piece {
             log.warn({ name, err: String(err) }, "PluginManager: npm install failed (non-fatal, plugin may still work)");
           }
         }
+
+        // Bootstrap: copy roles/skills/secret templates declared in plugin.json
+        runPluginBootstrap(ps.path, name);
       }
 
       await this.loadPlugin(name, ps);
@@ -480,6 +553,9 @@ export class PluginManager implements Piece {
         branch: "main",
       };
       saveSettings(settings);
+
+      // Bootstrap: copy roles/skills/secret templates declared in plugin.json
+      runPluginBootstrap(pluginDir, name);
 
       // Load immediately
       await this.loadPlugin(name, settings.plugins[name]);
