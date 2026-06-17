@@ -6,53 +6,121 @@
     },
     "capability-executor": {
       "enabled": true,
-      "visible": true
+      "visible": false,
+      "config": {
+        "layout": {
+          "x": 1228,
+          "y": 37,
+          "width": 240,
+          "height": 100
+        }
+      }
     },
     "capability-loader": {
       "enabled": true,
-      "visible": true
+      "visible": false,
+      "config": {
+        "layout": {
+          "x": 10,
+          "y": 70,
+          "width": 150,
+          "height": 60
+        }
+      }
     },
     "token-counter": {
       "enabled": true,
-      "visible": true
+      "visible": true,
+      "config": {
+        "layout": {
+          "x": 1455,
+          "y": 7,
+          "width": 361,
+          "height": 514
+        }
+      }
     },
     "mcp-manager": {
       "enabled": true,
-      "visible": true
+      "visible": false,
+      "config": {
+        "layout": {
+          "x": 1680,
+          "y": 208,
+          "width": 240,
+          "height": 379
+        }
+      }
     },
     "grpc": {
       "enabled": true,
-      "visible": true
+      "visible": false,
+      "config": {
+        "layout": {
+          "x": 20,
+          "y": 20,
+          "width": 120,
+          "height": 60
+        }
+      }
     },
     "chat": {
       "enabled": true,
       "visible": true
     },
+    "chat-output": {
+      "enabled": true,
+      "visible": true,
+      "config": {
+        "layout": {
+          "x": 21,
+          "y": 4,
+          "width": 630,
+          "height": 850
+        }
+      }
+    },
     "cron": {
       "enabled": true,
-      "visible": true
+      "visible": false,
+      "config": {
+        "layout": {
+          "x": 10,
+          "y": 160,
+          "width": 150,
+          "height": 466
+        }
+      }
     },
     "plugin-manager": {
       "enabled": true,
-      "visible": true
+      "visible": false,
+      "config": {
+        "layout": {
+          "x": 10,
+          "y": 114,
+          "width": 150,
+          "height": 801
+        }
+      }
     },
-    "mnemosyne-observer": {
+    "turn-inspector": {
       "enabled": true,
-      "visible": true
+      "visible": false,
+      "config": {
+        "layout": {
+          "x": 1138,
+          "y": 356,
+          "width": 316,
+          "height": 230
+        }
+      }
     },
-    "mnemosyne-encoder": {
+    "choice-prompt": {
       "enabled": true,
-      "visible": true
+      "visible": false
     },
-    "mnemosyne-retriever": {
-      "enabled": true,
-      "visible": true
-    },
-    "mnemosyne-consolidator": {
-      "enabled": true,
-      "visible": true
-    },
-    "mnemosyne-panel": {
+    "diff-viewer": {
       "enabled": true,
       "visible": true
     }
