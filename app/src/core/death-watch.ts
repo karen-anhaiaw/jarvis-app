@@ -159,7 +159,34 @@ export function installDeathWatch(opts: DeathWatchOptions = {}): void {
   // ─── uncaughtException ──────────────────────────────────────────────
   // Synchronous failure no one caught. The process is in an undefined state;
   // dump and exit hard (exit code 1).
+  //
+  // EXCEPTION: known benign undici/socket errors on Node v25+ that do NOT
+  // corrupt process state. These are fired by the HTTP client internals when
+  // a socket operation is unsupported by the OS (e.g. setTypeOfService EINVAL
+  // on macOS). The failed request will be retried by undici or fail gracefully;
+  // killing the entire process is the wrong response.
+  const BENIGN_UNCAUGHT: Array<{ message: RegExp }> = [
+    { message: /setTypeOfService EINVAL/ },
+    { message: /setNoDelay EINVAL/ },
+    { message: /setKeepAlive EINVAL/ },
+  ];
+
   process.on("uncaughtException", (err, origin) => {
+    // Swallow known-benign socket errors — log at WARN but do NOT exit.
+    if (err instanceof Error) {
+      for (const pattern of BENIGN_UNCAUGHT) {
+        if (pattern.message.test(err.message)) {
+          try {
+            log.warn(
+              { event: "uncaughtException-benign", origin, message: err.message },
+              `[death-watch] swallowed benign uncaughtException: ${err.message}`,
+            );
+          } catch { /* best effort */ }
+          return; // do NOT exit
+        }
+      }
+    }
+
     try {
       writeCrashDump(`uncaughtException (origin=${origin})`, err, liveOpts.snapshot);
     } finally {

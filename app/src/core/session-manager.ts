@@ -232,6 +232,92 @@ export class SessionManager {
   }
 
   /**
+   * Fork an existing session into a new ephemeral session.
+   *
+   * The fork clones the source session's message history so the Anthropic prompt
+   * cache can be reused: cache is keyed by model + identical token prefix, NOT by
+   * sessionId. A fork with the same history and the same restoredSessionId will hit
+   * the cache at ~10% of full-input cost.
+   *
+   * Cache-preservation invariants (PoC 2026-06-11):
+   *   R1: restoredSessionId from source is carried over so metadata.user_id (and
+   *       X-Claude-Code-Session-Id) are identical — same cache key prefix.
+   *   R2: The globalContextInjector is NOT applied to the fork (applyGlobalInjector
+   *       is deliberately skipped). Mnemosyne memories must not bias the classifier.
+   *   R3: getPluginContext uses label — fork gets a different label but plugin
+   *       contexts are label-agnostic in BP2, so BP1 cache remains unaffected.
+   *   R4: highEffort is mirrored from the source via (session as any) cast because
+   *       the field is declared `private readonly` — TS enforcement only, JS allows it.
+   *
+   * The forked session is ephemeral: never persisted, never restored on restart.
+   * MUST be closed after use via sessions.close(newId) to avoid ghost sessions.
+   *
+   * @param sourceId - existing session to clone history from (must exist)
+   * @param newId    - identifier for the fork (must not already exist)
+   * @returns the new ManagedSession
+   * @throws if sourceId is not found or newId already exists
+   */
+  fork(sourceId: string, newId: string): ManagedSession {
+    const source = this.sessions.get(sourceId);
+    if (!source) {
+      throw new Error(`SessionManager.fork: source session '${sourceId}' not found`);
+    }
+    if (this.sessions.has(newId)) {
+      throw new Error(`SessionManager.fork: target session '${newId}' already exists`);
+    }
+
+    const sourceSession = source.session;
+
+    // R1: reuse source's internal sessionId so the Anthropic client sends the
+    //     same X-Claude-Code-Session-Id → cache key prefix matches.
+    const restoredSessionId: string | undefined =
+      (sourceSession as any)._sessionId ?? (sourceSession as any).sessionId ?? undefined;
+
+    // R4: mirror the highEffort flag (private readonly — JS cast is fine)
+    const highEffort: boolean = (sourceSession as any).highEffort ?? false;
+
+    // Create the fork via standard get() — this goes through factory.create()
+    // which sets highEffort based on label (will be false for any non-"main" newId).
+    // We then patch it below (R4).
+    // IMPORTANT: get() calls applyGlobalInjector() — we must undo that (R2).
+    const managed = this.get(newId);
+    const forkedSession = managed.session;
+
+    // Seed with source history
+    forkedSession.setMessages?.(sourceSession.getMessages());
+
+    // R1: override internal session ID so cache key matches source
+    if (restoredSessionId) {
+      (forkedSession as any)._sessionId = restoredSessionId;
+    }
+
+    // R4: mirror effort flag (may differ if source is "main" with highEffort=true)
+    if (highEffort !== ((forkedSession as any).highEffort ?? false)) {
+      (forkedSession as any).highEffort = highEffort;
+    }
+
+    // R2: suppress context injector — fork must not be biased by Mnemosyne memories.
+    //     Undo the injector that get() just installed via applyGlobalInjector().
+    const setter = (forkedSession as {
+      setContextInjector?: (fn: (sessionId: string) => string[] | Promise<string[]>) => void;
+    }).setContextInjector;
+    if (typeof setter === "function") {
+      // Replace the global injector with a no-op so no memories are injected into the fork
+      setter.call(forkedSession, () => []);
+    }
+
+    // Mark ephemeral — fork is never saved to disk, never restored
+    this.setEphemeral(newId, true);
+
+    log.info(
+      { sourceId, newId, messages: sourceSession.getMessages().length, highEffort, restoredSessionId: !!restoredSessionId },
+      "SessionManager: forked session",
+    );
+
+    return managed;
+  }
+
+  /**
    * Get or create a session with custom prompt options.
    * If the session already exists, returns it (prompt options are ignored — they're set at creation).
    * If new, creates with createWithPrompt and optionally restores saved conversation.

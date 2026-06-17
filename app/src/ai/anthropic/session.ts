@@ -60,6 +60,13 @@ export class AnthropicSession implements AISession {
    * `undefined` = no filter (all tools visible).
    */
   private toolFilter?: (toolName: string) => boolean;
+  /**
+   * Per-session tool result size cap (chars). When set, any tool_result whose
+   * serialized content exceeds this limit is truncated with a notice appended.
+   * `undefined` = no limit (default, full result injected into context).
+   * Use for sessions with tight token budgets (e.g. Slack connector, Haiku actors).
+   */
+  private toolResultMaxChars?: number;
   private messages: MessageParam[] = [];
   private label: string;
   /** Trace id of the CURRENT turn — set by JarvisCore (duck-typed, F4.17)
@@ -270,6 +277,15 @@ export class AnthropicSession implements AISession {
    */
   setToolFilter(filter: ((toolName: string) => boolean) | undefined): void {
     this.toolFilter = filter;
+  }
+
+  /**
+   * Set a per-session cap on tool result size injected into context.
+   * Results exceeding `maxChars` are truncated; a notice is appended so the
+   * LLM knows the result was cut. Pass `undefined` to remove the cap.
+   */
+  setToolResultMaxChars(maxChars: number | undefined): void {
+    this.toolResultMaxChars = maxChars;
   }
 
   /**
@@ -570,12 +586,24 @@ export class AnthropicSession implements AISession {
       return;
     }
 
-    const toolResultBlocks: ToolResultBlockParam[] = filteredResults.map(r => ({
-      type: "tool_result" as const,
-      tool_use_id: r.tool_use_id,
-      content: r.content as ToolResultBlockParam["content"],
-      is_error: r.is_error,
-    }));
+    const maxChars = this.toolResultMaxChars;
+    const toolResultBlocks: ToolResultBlockParam[] = filteredResults.map(r => {
+      let content = r.content as ToolResultBlockParam["content"];
+      if (maxChars !== undefined) {
+        // Serialize → cap → deserialize so the LLM sees a truncated but valid string.
+        const raw = typeof content === "string" ? content : JSON.stringify(content);
+        if (raw.length > maxChars) {
+          content = raw.slice(0, maxChars)
+            + `\n\n[...truncated — result exceeded ${maxChars} chars. Request a smaller scope or use a summary tool.]`;
+        }
+      }
+      return {
+        type: "tool_result" as const,
+        tool_use_id: r.tool_use_id,
+        content,
+        is_error: r.is_error,
+      };
+    });
     this.messages.push({ role: "user", content: toolResultBlocks });
   }
 

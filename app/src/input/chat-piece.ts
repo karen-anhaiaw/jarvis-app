@@ -8,8 +8,8 @@ import type { SessionManager } from "../core/session-manager.js";
 import { log } from "../logger/index.js";
 import { DEFAULT_SESSION } from "../core/constants.js";
 import { newTraceId, preview } from "../logger/trace.js";
-import { consumePendingGreeting } from "../core/conversation-store.js";
-import { config } from "../config/index.js";
+import { consumePendingGreeting, loadConversation } from "../core/conversation-store.js";
+import { config, getProviderForModel } from "../config/index.js";
 
 /**
  * ChatPiece — session-agnostic chat bridge.
@@ -184,6 +184,16 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
           break;
         }
       }
+    });
+
+    // system.event "router.switch" → SSE model_changed for ModelPicker.
+    // Emitted by ModelRouter whenever the effective model changes for a session.
+    // Allows ModelPicker to go event-driven instead of polling /chat/session-info.
+    this.bus.subscribe("system.event", (msg: any) => {
+      if (msg.event !== "router.switch") return;
+      const { sessionId, toModel } = msg.data ?? {};
+      if (!sessionId || !toModel) return;
+      this.broadcast(sessionId, { type: "model_changed", model: toModel, session: sessionId });
     });
 
     // chat.timeline → typed SSE bridge for per-session timeline entries.
@@ -386,7 +396,16 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
     const pool = this.streamClients.get(sid)!;
     pool.add(res);
 
+    // Heartbeat — SSE comment every 15s to prevent the socket from being
+    // silently closed by Chromium/OS when no events flow for a long period.
+    // Without this, an idle session drops the connection and the front
+    // loses all events (messages, thinking state, tool calls) until reload.
+    const heartbeat = setInterval(() => {
+      try { res.write(": heartbeat\n\n"); } catch { clearInterval(heartbeat); }
+    }, 15_000);
+
     req.on("close", () => {
+      clearInterval(heartbeat);
       pool.delete(res);
       if (pool.size === 0) this.streamClients.delete(sid);
     });
@@ -429,8 +448,20 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
         return;
       }
       if (!this.sessions.has(sid)) {
+        // Session not yet materialized — try to hydrate from disk so the chat
+        // panel can show history on first open without triggering a full session
+        // creation (which would load the system prompt, start pieces, etc.).
+        log.info({ sid }, "ChatPiece.handleHistory: session not in memory, trying disk");
+        const provider = getProviderForModel(config.model);
+        const saved = loadConversation(sid, provider);
+        if (!saved || saved.messages.length === 0) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("[]");
+          return;
+        }
+        const entries = parseMessagesToHistory(saved.messages as any[]);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end("[]");
+        res.end(JSON.stringify(entries));
         return;
       }
       const managed = this.sessions.get(sid);

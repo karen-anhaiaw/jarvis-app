@@ -69,6 +69,41 @@ export interface Settings {
    *  code fallback is the stack-agnostic "generic" role (F3.13: the old
    *  hardcoded default leaked a personal role name into core). */
   delegate?: { defaultRole?: string };
+  /** Hermes (jarvis-plugin-mnemosyne) configuration — mirrors the plugin's
+   *  ctx.config shape so settings.user.json can override defaults without
+   *  touching plugin.json. The plugin reads from ctx.config (which is the
+   *  plugin entry in settings.pieces[id].config), not from this top-level
+   *  key directly — this type exists for tooling/documentation only. */
+  hermes?: {
+    backgroundReview?: {
+      /** Whether the BackgroundReviewPiece runs at all. Default: false. */
+      enabled: boolean;
+      /** Run a review pass every N session turns. Default: 5. */
+      reviewEveryNTurns?: number;
+      /** Fire a review after N minutes of idle. Default: 5. */
+      idleTriggerMinutes?: number;
+      /** Max seconds to wait for the fork session to complete. Default: 60. */
+      timeoutSeconds?: number;
+    };
+    domainGraph?: {
+      /** Enable domain-merge pass during consolidation. Default: false. */
+      enabled: boolean;
+      /** LLM tier for the merge pass ("haiku" | "sonnet"). Default: "haiku". */
+      mergeModel?: string;
+      /** Seed domains injected into every merge prompt. */
+      seedDomains?: string[];
+    };
+    skillPromotion?: {
+      /** Promote high-reinforcement workflow memories to SKILL.md files. Default: false. */
+      enabled: boolean;
+      /** LLM tier for skill generation ("haiku" | "sonnet"). Default: "sonnet". */
+      model?: string;
+      /** Minimum reinforcement count before a workflow is eligible. Default: 2. */
+      minReinforcements?: number;
+      /** Override the skills output directory. Default: ~/.jarvis/skills/. */
+      skillsDir?: string;
+    };
+  };
 }
 
 const SETTINGS_DIR = jarvisHome();

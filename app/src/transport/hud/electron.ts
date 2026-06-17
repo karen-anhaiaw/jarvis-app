@@ -9,7 +9,16 @@ export function launchHud(statusUrl: string): void {
   writeFileSync(electronMain, `
 const { app, BrowserWindow, screen, globalShortcut } = require('electron');
 const http = require('http');
+const https = require('https');
 const url = require('url');
+// Protocol-aware helpers — server uses HTTPS/h2 with self-signed cert.
+// rejectUnauthorized:false is required for self-signed localhost cert.
+const _tlsOpts = { rejectUnauthorized: false };
+const nuGet = (u, cb) => (u.startsWith('https:') ? https : http).get(u, _tlsOpts, cb);
+const nuRequest = (opts, cb) => {
+  const mod = (opts.protocol === 'https:' || opts.port === 50052) ? https : http;
+  return mod.request(Object.assign({}, opts, _tlsOpts), cb);
+};
 
 /**
  * Global hotkey for voice push-to-talk (toggle on/off).
@@ -47,9 +56,8 @@ function createBrowserWindow(id, url, partition) {
   bwin.on('closed', () => {
     browserWindows.delete(id);
     // notify Node server that window was closed
-    const http2 = require('http');
     const body = JSON.stringify({ id, event: 'closed' });
-    const req = http2.request({
+    const req = nuRequest({
       hostname: 'localhost', port: 50052,
       path: '/plugins/browser/event', method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
@@ -62,6 +70,7 @@ function createBrowserWindow(id, url, partition) {
 }
 
 // Grant microphone permission for Web Speech API
+app.commandLine.appendSwitch('ignore-certificate-errors');
 app.commandLine.appendSwitch('enable-speech-dispatcher');
 
 app.whenReady().then(() => {
@@ -116,6 +125,15 @@ app.whenReady().then(() => {
     win.show();
   });
 
+  // Hide instead of close — keeps the backend alive on macOS.
+  // Cmd+Q still quits fully via the app menu.
+  win.on('close', (e) => {
+    if (!app.isQuiting) {
+      e.preventDefault();
+      win.hide();
+    }
+  });
+
   win.loadURL('${statusUrl}');
 
   // ── Global voice hotkey ──
@@ -136,9 +154,14 @@ app.whenReady().then(() => {
     console.error('[hotkey] register error:', err);
   }
 
-  // Capture ALL console messages for debugging
+  // Capture ALL renderer console messages — log via console so they appear in
+  // the Electron process stdout (captured by the parent TS process below).
+  // level: 0=verbose, 1=info, 2=warning, 3=error.
   win.webContents.on('console-message', (event, level, message) => {
-    console.log('[E' + level + ']', message.slice(0, 300));
+    const msg = message.slice(0, 500);
+    if (level >= 3)      console.error('[renderer]', msg);
+    else if (level >= 2) console.warn('[renderer]', msg);
+    else                 console.log('[renderer]', msg);
   });
 
   // Auto-reload when server comes back after restart
@@ -150,19 +173,25 @@ app.whenReady().then(() => {
   // Intercepts target="_blank" anchor clicks (setWindowOpenHandler) and any
   // navigation away from the local dev server (will-navigate). Both delegate
   // to shell.openExternal so the OS default browser handles the URL.
-  const { shell } = require('electron');
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (!url.startsWith('http://localhost') && !url.startsWith('file://')) {
-      shell.openExternal(url);
-    }
-    return { action: 'deny' }; // always deny — Electron never opens a new window
-  });
-  win.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith('http://localhost') && !url.startsWith('file://')) {
-      event.preventDefault();
-      shell.openExternal(url);
-    }
-  });
+  // Applied to the main window here AND to every detached panel window
+  // so links work identically wherever a panel lives.
+  function attachExternalLinks(wc) {
+    wc.setWindowOpenHandler(({ url: openUrl }) => {
+      if (!openUrl.startsWith('https://localhost') && !openUrl.startsWith('http://localhost') && !openUrl.startsWith('file://')) {
+        const { shell } = require('electron');
+        shell.openExternal(openUrl).catch(() => {});
+      }
+      return { action: 'deny' };
+    });
+    wc.on('will-navigate', (event, navUrl) => {
+      if (!navUrl.startsWith('https://localhost') && !navUrl.startsWith('http://localhost') && !navUrl.startsWith('file://')) {
+        event.preventDefault();
+        const { shell } = require('electron');
+        shell.openExternal(navUrl).catch(() => {});
+      }
+    });
+  }
+  attachExternalLinks(win.webContents);
 
   // ── Detach panel: create a child BrowserWindow for a single panel ──
   function detachPanel(panelId, title, x, y, width, height) {
@@ -195,6 +224,7 @@ app.whenReady().then(() => {
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
     child.loadURL('${statusUrl}?panel=' + encodeURIComponent(panelId));
+    attachExternalLinks(child.webContents);
     child.once('ready-to-show', () => {
       child.show();
       // On macOS, child windows open behind transparent fullscreen parents.
@@ -209,9 +239,8 @@ app.whenReady().then(() => {
     const saveDetachedLayout = () => {
       if (child.isDestroyed()) return;
       const b = child.getBounds();
-      const http2 = require('http');
       const postData = JSON.stringify({ panelId, x: b.x, y: b.y, width: b.width, height: b.height });
-      const req2 = http2.request({ hostname: 'localhost', port: 50052, path: '/hud/detach-layout', method: 'POST',
+      const req2 = nuRequest({ hostname: 'localhost', port: 50052, path: '/hud/detach-layout', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) } });
       req2.write(postData);
       req2.end();
@@ -229,9 +258,8 @@ app.whenReady().then(() => {
         ).catch(() => {});
       }
       // Persist detached=false in settings so it won't auto-restore on next launch
-      const http4 = require('http');
-      const postData = JSON.stringify({ panelId });
-      const req3 = http4.request({ hostname: 'localhost', port: 50052, path: '/hud/reattach', method: 'POST',
+        const postData = JSON.stringify({ panelId });
+      const req3 = nuRequest({ hostname: 'localhost', port: 50052, path: '/hud/reattach', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) } });
       req3.write(postData);
       req3.end();
@@ -242,8 +270,7 @@ app.whenReady().then(() => {
 
   // ── Auto-restore detached panels from previous session ──
   setTimeout(() => {
-    const http3 = require('http');
-    http3.get('http://localhost:50052/hud/detached', (resp) => {
+    nuGet('https://localhost:50052/hud/detached', (resp) => {
       let data = '';
       resp.on('data', c => data += c);
       resp.on('end', () => {
@@ -457,16 +484,49 @@ app.whenReady().then(() => {
       }); return;
     }
 
+    // GET /open-url?url=<encoded> — open a URL in the OS default browser.
+    // Used by plugin renderers that can't call shell.openExternal directly
+    // (contextIsolation:true blocks Electron APIs from the renderer process).
+    if (parsed.pathname === '/open-url' && req.method === 'GET') {
+      const target = parsed.searchParams?.get('url') ?? '';
+      if (target.startsWith('http://') || target.startsWith('https://')) {
+        const { shell } = require('electron');
+        shell.openExternal(target).catch(() => {});
+        res.writeHead(204); res.end();
+      } else {
+        res.writeHead(400); res.end('invalid url');
+      }
+      return;
+    }
+
     res.writeHead(404);
     res.end();
   }).listen(50053);
+});
+
+app.on('before-quit', () => {
+  app.isQuiting = true;
 });
 
 app.on('will-quit', () => {
   try { globalShortcut.unregisterAll(); } catch {}
 });
 
-app.on('window-all-closed', () => app.quit());
+// On macOS, closing the main window hides it instead of quitting the app.
+// This keeps the Node backend alive so SSE connections, actors, cron jobs,
+// and Slack hooks survive a "close". The user can reopen via the dock icon.
+// To fully quit, use Cmd+Q or the app menu.
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+  // On macOS: do nothing — keeps the process alive.
+});
+
+app.on('activate', () => {
+  // Reopen/show the main window when the user clicks the dock icon.
+  if (win && !win.isDestroyed()) {
+    win.show();
+  }
+});
 `);
 
   // With npm workspaces, electron may be hoisted to monorepo root
@@ -475,7 +535,24 @@ app.on('window-all-closed', () => app.quit());
   const electronPath = existsSync(localElectron) ? localElectron : rootElectron;
 
   const child = spawn(electronPath, [electronMain], {
-    stdio: "inherit",
+    // Pipe stdout/stderr so we can forward renderer logs to pino (log file).
+    // stdin stays inherited (not needed but harmless to pipe too).
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  // Forward Electron stdout/stderr lines to pino so renderer console messages
+  // (and any native Electron errors) land in the persistent log file.
+  child.stdout?.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split("\n")) {
+      const t = line.trim();
+      if (t) log.info({ electron: true }, t);
+    }
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split("\n")) {
+      const t = line.trim();
+      if (t) log.warn({ electron: true }, t);
+    }
   });
 
   // Kill Electron when Node process exits
