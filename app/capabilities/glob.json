@@ -1,18 +1,43 @@
 {
   "name": "glob",
+  "category": "filesystem",
   "description": "Find files matching a glob pattern. Returns file paths sorted by modification time (newest first). Supports deep patterns like '**/*.ts'. Excludes node_modules, .git, dist by default.",
   "type": "script",
   "command": "bash",
-  "args": ["capabilities/scripts/glob-find.sh", "${pattern}", "${path}", "${limit}", "${sort}", "${exclude}"],
+  "args": [
+    "capabilities/scripts/glob-find.sh",
+    "${pattern}",
+    "${path}",
+    "${limit}",
+    "${sort}",
+    "${exclude}"
+  ],
   "input_schema": {
     "type": "object",
     "properties": {
-      "pattern": { "type": "string", "description": "Glob pattern (e.g. '**/*.ts', 'src/**/*.test.js', '*.json')" },
-      "path": { "type": "string", "description": "Base directory to search in (default: current directory)" },
-      "limit": { "type": "number", "description": "Max results to return (default: 200)" },
-      "sort": { "type": "string", "description": "Sort order: 'modified' (default, newest first), 'name' (alphabetical)" },
-      "exclude": { "type": "string", "description": "Additional glob patterns to exclude, comma-separated (e.g. '*.test.ts,*.spec.ts')" }
+      "pattern": {
+        "type": "string",
+        "description": "Glob pattern (e.g. '**/*.ts', 'src/**/*.test.js', '*.json')"
+      },
+      "path": {
+        "type": "string",
+        "description": "Base directory to search in (default: current directory)"
+      },
+      "limit": {
+        "type": "number",
+        "description": "Max results to return (default: 200)"
+      },
+      "sort": {
+        "type": "string",
+        "description": "Sort order: 'modified' (default, newest first), 'name' (alphabetical)"
+      },
+      "exclude": {
+        "type": "string",
+        "description": "Additional glob patterns to exclude, comma-separated (e.g. '*.test.ts,*.spec.ts')"
+      }
     },
-    "required": ["pattern"]
+    "required": [
+      "pattern"
+    ]
   }
 }

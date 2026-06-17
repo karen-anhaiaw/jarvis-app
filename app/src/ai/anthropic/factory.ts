@@ -5,6 +5,7 @@ import type { AISession, AISessionFactory, CreateWithPromptOptions } from "../ty
 import type { EventBus } from "../../core/bus.js";
 import { AnthropicSession } from "./session.js";
 import { config } from "../../config/index.js";
+import { DEFAULT_SESSION } from "../../core/constants.js";
 import { log } from "../../logger/index.js";
 
 type CapabilityDef = { name: string; description: string; input_schema: Record<string, unknown> };
@@ -43,15 +44,19 @@ export class AnthropicSessionFactory implements AISessionFactory {
 
   /**
    * Build system blocks for actor sessions.
-   * Actors get a clean, focused prompt: actor-system.md + role only.
-   * No jarvis-system.md, no CLAUDE.md instructions, no core contexts, no plugin instructions.
-   * This prevents actors from inheriting the JARVIS identity and persona.
+   * Actors get: jarvis.md (CLAUDE.md) instructions + actor-system.md + role.
+   * No jarvis-system.md, no core contexts, no plugin instructions (those are JARVIS-specific).
    */
   private buildCustomSystemBlocks(basePromptOverride?: string, roleContext?: string, sessionId?: string): TextBlockParam[] {
     const blocks: TextBlockParam[] = [];
 
-    // Block 0: actor identity (actor-system.md) + role
+    // Block 0: jarvis.md (CLAUDE.md) + actor-system.md + role
     const parts: string[] = [];
+
+    const instructions = this.getInstructions();
+    if (instructions) {
+      parts.push(`<system-reminder>\n${instructions}\n</system-reminder>`);
+    }
 
     if (basePromptOverride) {
       parts.push(basePromptOverride);
@@ -92,6 +97,10 @@ export class AnthropicSessionFactory implements AISessionFactory {
       label,
       bus: this.bus,
       restoredSessionId,
+      // Effort policy (F3.12): the human-facing default session gets the top
+      // tier; actors/subagents run "high". Policy lives HERE — the provider
+      // session must not interpret magic label names.
+      highEffort: label === DEFAULT_SESSION,
     });
   }
 
@@ -163,6 +172,8 @@ export class AnthropicSessionFactory implements AISessionFactory {
       label,
       bus: this.bus,
       restoredSessionId: options?.restoredSessionId,
+      // Effort policy (F3.12): see createWithPrompt — same rule, one place.
+      highEffort: label === DEFAULT_SESSION,
     });
 
     if (options?.restoreMessages && options.restoreMessages.length > 0) {

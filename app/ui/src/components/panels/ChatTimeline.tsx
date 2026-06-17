@@ -145,8 +145,9 @@ export type ChatEntry =
    */
   | { kind: 'thinking_text'; text: string; source?: string; session?: string; live?: boolean; expanded?: boolean }
   | { kind: 'capability'; name: string; id: string; args?: string; status: 'running' | 'done' | 'cancelled'; ms?: number; output?: string; expanded?: boolean }
-  | { kind: 'compaction'; engine: 'api' | 'fallback'; tokensBefore: number; tokensAfter: number; summary: string; expanded?: boolean }
-  | { kind: 'compaction_pending'; engine: 'fallback'; tokensBefore: number; reason?: 'forced' | 'threshold'; startedAt: number }
+  | { kind: 'compaction'; engine: 'api' | 'fallback' | 'sliding-window'; tokensBefore: number; tokensAfter: number; summary: string; expanded?: boolean }
+  | { kind: 'compaction_pending'; engine: 'fallback'; tokensBefore: number; reason?: 'forced' | 'threshold' | 'growth' | 'sliding-window'; startedAt: number }
+  | { kind: 'compaction_failed'; engine: 'fallback'; tokensBefore: number; reason: string }
   | { kind: 'bash_result'; command: string; output: string; exitCode: number; ms: number; expanded?: boolean }
   | { kind: 'system'; text: string; subtype?: string; detail?: string; session?: string; expanded?: boolean }
   | {
@@ -957,7 +958,11 @@ export const ChatTimeline = React.memo(function ChatTimeline({
 
         if (entry.kind === 'compaction_pending') {
           const beforeK = Math.round(entry.tokensBefore / 1000)
-          const reasonLabel = entry.reason === 'forced' ? 'forced' : 'threshold'
+          const reasonLabel =
+            entry.reason === 'forced' ? 'forced' :
+            entry.reason === 'growth' ? 'abrupt growth' :
+            entry.reason === 'sliding-window' ? 'sliding window' :
+            'threshold'
           return (
             <div key={i} style={{ marginBottom: '2px' }}>
               <div
@@ -981,10 +986,37 @@ export const ChatTimeline = React.memo(function ChatTimeline({
           )
         }
 
+        if (entry.kind === 'compaction_failed') {
+          const beforeK = Math.round(entry.tokensBefore / 1000)
+          return (
+            <div key={i} style={{ marginBottom: '2px' }}>
+              <div
+                style={{
+                  padding: '3px 8px',
+                  borderRadius: '4px',
+                  fontSize: '10px',
+                  borderLeft: '3px solid #ff5555',
+                  background: '#1a1e2e',
+                  color: '#ff5555',
+                  fontFamily: 'var(--font-mono)',
+                }}
+              >
+                ⚠ Compaction failed — history preserved ({beforeK}K tokens intact)
+                <div style={{ marginTop: '2px', fontSize: '9px', color: '#888', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {entry.reason}
+                </div>
+              </div>
+            </div>
+          )
+        }
+
         if (entry.kind === 'compaction') {
           const beforeK = Math.round(entry.tokensBefore / 1000)
           const afterK = Math.round(entry.tokensAfter / 1000)
-          const badge = entry.engine === 'fallback' ? ' (fallback)' : ''
+          const badge =
+            entry.engine === 'fallback' ? ' (fallback)' :
+            entry.engine === 'sliding-window' ? ' (sliding window)' :
+            ''
           return (
             <div key={i} style={{ marginBottom: '2px' }}>
               <div
@@ -1024,10 +1056,25 @@ export const ChatTimeline = React.memo(function ChatTimeline({
         }
 
         if (entry.kind === 'error') {
-          // Extract a short human-readable message from the raw API error string.
-          // The full error is too noisy — try to surface just the inner message.
+          // "aborted" is a user-initiated cancel — render as a subtle grey note,
+          // not a red error banner (the user already clicked Stop).
           const raw = entry.message ?? ''
-          const inner = raw.match(/\"message\":\"([^"]+)\"/)?.[1]
+          if (raw === 'aborted') {
+            return (
+              <div key={i} style={{ marginBottom: '4px' }}>
+                <div style={{
+                  padding: '4px 10px',
+                  fontSize: '10px',
+                  color: '#666',
+                  fontFamily: 'var(--font-mono)',
+                  fontStyle: 'italic',
+                }}>— stopped —</div>
+              </div>
+            )
+          }
+          // For real API errors (now pre-formatted by the backend as "[STATUS] type: msg"),
+          // display as-is. Fallback: try to extract inner message from legacy raw JSON.
+          const inner = raw.match(/"message":"([^"]+)"/)?.[1]
             ?? raw.match(/message: ([^,}\n]+)/)?.[1]
             ?? raw.slice(0, 200)
           return (

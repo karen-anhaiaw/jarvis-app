@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { MessageParam, ContentBlockParam, ToolResultBlockParam } from "@anthropic-ai/sdk/resources/messages";
 import type { CapabilityCall, CapabilityResult } from "../types.js";
+import { AnthropicSession } from "./session.js";
 
 /**
  * Regression test for the duplicate `tool_use` id bug.
@@ -184,6 +185,140 @@ describe("anthropic session — tool_use id deduplication (regression)", () => {
     const ids = collectToolUseIds(messages);
     expect(ids).toHaveLength(20);
     expect(new Set(ids).size).toBe(20); // no duplicates
+  });
+
+  // ─── addToolResults dedup against history ───────────────────────────
+  // Real-world race: cleanupAbortedTools injects a synthetic placeholder
+  // tool_result for an aborted call, then the real (stale) capability.result
+  // arrives later while the session is back in waiting_tools. addToolResults
+  // must NOT push a second tool_result for an id that already has one in
+  // history, otherwise Anthropic rejects with
+  //   "Found multiple 'tool_result' blocks with id: ..."
+
+  function makeSession(): AnthropicSession {
+    return new AnthropicSession({
+      model: "claude-haiku-4-5",
+      systemPrompt: "test",
+      getTools: () => [],
+      label: "test",
+    });
+  }
+
+  it("addToolResults skips entries whose tool_use_id already has a tool_result in history", () => {
+    const session = makeSession();
+    // Bypass setMessages — see comment in next test. We need a raw history
+    // ending with an unsatisfied tool_use(tu_new) so addToolResults is the
+    // thing under test, not the restore-path sanitizer.
+    (session as any).messages = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tu_stale", name: "bash", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tu_stale",
+            content: "[Tool execution was aborted by user]",
+            is_error: true,
+          },
+        ],
+      },
+      { role: "assistant", content: "ok, what next?" },
+      { role: "user", content: "now do Y" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tu_new", name: "bash", input: {} }],
+      },
+    ] as MessageParam[];
+
+    // Simulate stale + fresh result arriving in the same batch.
+    const calls: CapabilityCall[] = [
+      { id: "tu_new", name: "bash", input: {} },
+    ];
+    const results: CapabilityResult[] = [
+      { tool_use_id: "tu_stale", content: "late real result", is_error: false },
+      { tool_use_id: "tu_new", content: "fresh", is_error: false },
+    ];
+
+    session.addToolResults(calls, results);
+
+    const msgs = session.getMessages() as MessageParam[];
+    const lastUser = msgs[msgs.length - 1];
+    expect(lastUser.role).toBe("user");
+    expect(Array.isArray(lastUser.content)).toBe(true);
+    const blocks = lastUser.content as any[];
+    // Only the fresh result was pushed — stale entry was dropped.
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ type: "tool_result", tool_use_id: "tu_new" });
+
+    // Sanity: tu_stale appears exactly once across the whole history.
+    let stale = 0;
+    for (const m of msgs) {
+      if (!Array.isArray(m.content)) continue;
+      for (const b of m.content as any[]) {
+        if (b?.type === "tool_result" && b.tool_use_id === "tu_stale") stale++;
+      }
+    }
+    expect(stale).toBe(1);
+  });
+
+  it("addToolResults dedupes duplicates inside a single results batch", () => {
+    const session = makeSession();
+    // Bypass setMessages: it runs sanitizeMessages which would auto-inject a
+    // synthetic tool_result for the orphan tool_use, polluting the test
+    // setup. We want a raw "API just streamed tool_use(tu_x), waiting for
+    // results" state.
+    (session as any).messages = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tu_x", name: "bash", input: {} }],
+      },
+    ] as MessageParam[];
+
+    const calls: CapabilityCall[] = [{ id: "tu_x", name: "bash", input: {} }];
+    // Executor retried internally without dedup
+    const results: CapabilityResult[] = [
+      { tool_use_id: "tu_x", content: "first", is_error: false },
+      { tool_use_id: "tu_x", content: "duplicate", is_error: false },
+    ];
+
+    session.addToolResults(calls, results);
+
+    const msgs = session.getMessages() as MessageParam[];
+    const lastUser = msgs[msgs.length - 1];
+    const blocks = lastUser.content as any[];
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ type: "tool_result", tool_use_id: "tu_x", content: "first" });
+  });
+
+  it("addToolResults is a no-op when ALL results are already in history", () => {
+    const session = makeSession();
+    session.setMessages([
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tu_done", name: "bash", input: {} }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "tu_done", content: "first" }],
+      },
+    ] as MessageParam[]);
+
+    const before = session.getMessages().length;
+    const calls: CapabilityCall[] = [{ id: "tu_done", name: "bash", input: {} }];
+    const results: CapabilityResult[] = [
+      { tool_use_id: "tu_done", content: "duplicate arriving late", is_error: false },
+    ];
+
+    session.addToolResults(calls, results);
+
+    // No new message should have been appended.
+    expect(session.getMessages().length).toBe(before);
   });
 
   it("every tool_use has a matching tool_result (API invariant)", () => {

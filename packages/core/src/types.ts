@@ -38,6 +38,31 @@ export interface AIRequestMessage extends BusMessage {
   images?: ImageAttachment[];
   replyTo?: string;
   /**
+   * Optional per-turn system reminders.
+   *
+   * Each entry is wrapped in `<system-reminder>...</system-reminder>` and
+   * prepended to `text` BEFORE the prompt is sent to the API. The chat
+   * timeline shows only `text` (clean), but the API sees reminders + text.
+   *
+   * Use case: turn-scoped instructions from plugins (e.g. STT forces
+   * `voice_say`, never-forget injects persistent reminders, future tools
+   * may add task-list context) without polluting the visible conversation.
+   *
+   * Persistence: the composed prompt (reminders + text) is persisted in the
+   * AI session message history, so the LLM continues to see the reminders
+   * in subsequent turns via prompt caching. The user-visible chat timeline
+   * keeps showing only `text`.
+   *
+   * Multiple sources: if multiple publishers ever need to inject reminders
+   * for the same turn, concatenate the arrays in order — entries are emitted
+   * sequentially in the final prompt.
+   *
+   * Compatibility: optional field added in @jarvis/core 0.5.0. Plugins built
+   * against older core versions still work — they simply omit `systems` and
+   * the prompt is sent verbatim.
+   */
+  systems?: string[];
+  /**
    * Optional payload for dispatch metadata.
    *
    * Conventional keys (consumed by core pieces):
@@ -101,6 +126,75 @@ export interface SystemEventMessage extends BusMessage {
   channel: "system.event";
   event: string;
   data: Record<string, unknown>;
+}
+
+// ─── Turn summaries (Pillar B — F5) ─────────────────────────────────────
+// Published by jarvis-core as `system.event` with `event: "turn.summary"`
+// and `data` shaped as TurnSummary. One summary per conversation turn
+// (one traceId): prompt dispatch → session idle, spanning 1..N API
+// round-trips. Public API from 0.8.0 — plugins may subscribe and consume.
+// See docs/features/turn-tracker.md for the full design.
+
+/** Per-tool execution stat inside a TurnSummary. */
+export interface TurnToolStat {
+  /** Shortened tool name (same form the chat timeline shows). */
+  name: string;
+  /** Provider tool_use id — joins ai.stream tool_start/tool_done events. */
+  toolUseId: string;
+  /**
+   * Registry-measured wall time of THIS call (not the batch).
+   * Absent — not 0 — when the result never arrived (e.g. abort mid-tools).
+   */
+  durationMs?: number;
+  isError: boolean;
+}
+
+/**
+ * One conversation turn, aggregated. Emitted exactly once per traceId on
+ * `system.event: turn.summary` when the turn closes (completed, aborted
+ * or error). All usage numbers default to 0 — never NaN/undefined.
+ */
+export interface TurnSummary {
+  traceId: string;
+  sessionId: string;
+  /** ai.request source: "chat-input", "cron", an actor session id, "drain:combined", … */
+  source: string;
+  /** Epoch ms. */
+  startedAt: number;
+  endedAt: number;
+  durationMs: number;
+  /**
+   * First text delta − startedAt (user-perceived latency). Absent when the
+   * turn streamed no text. Only the FIRST delta of the turn sets it.
+   */
+  ttftMs?: number;
+  /** API calls in this turn (≥1 unless the turn errored before dispatch). */
+  roundTrips: number;
+  /** Model observed on the last round-trip. */
+  model?: string;
+  /** stop_reason of the round-trip that ended the turn. */
+  stopReason?: string;
+  outcome: "completed" | "aborted" | "error";
+  /** Present when outcome === "error". */
+  error?: string;
+  /** Total streamed text length (chars). */
+  textChars: number;
+  tools: TurnToolStat[];
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    /** input + cacheRead + cacheWrite (everything billed on the input side). */
+    totalInput: number;
+    /** totalInput + output. */
+    total: number;
+  };
+  /**
+   * Server-side estimate by model-family pricing. Undefined for unknown
+   * families — consumers must render "—", never fabricate a number.
+   */
+  costUsd?: number;
 }
 
 // chat.anchor — pieces declare/remove/clear UI anchors that float above the

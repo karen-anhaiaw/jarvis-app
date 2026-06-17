@@ -33,11 +33,14 @@ import type { ChatPiece } from "../input/chat-piece.js";
 import { log } from "../logger/index.js";
 import { load as loadSettings } from "../core/settings.js";
 import { loadRouteState, saveRouteState } from "../core/conversation-store.js";
+import { getProviderForModel, getCurrentProvider } from "../config/index.js";
 
 // Anthropic public list price per 1M tokens.
 // Used ONLY for cost estimates in banners — actual billing is whatever
 // LiteLLM/Anthropic charges. Ratios are correct for relative comparison.
 const PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
+  "claude-fable-5":              { input: 10.00, output: 50.00, cacheWrite: 12.50, cacheRead: 1.00 },
+  "claude-opus-4-8":             { input: 5.00,  output: 25.00, cacheWrite: 6.25,  cacheRead: 0.50 },
   "claude-opus-4-7":             { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
   "claude-opus-4-6":             { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
   "claude-opus-4-5":             { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
@@ -49,7 +52,7 @@ const PRICING: Record<string, { input: number; output: number; cacheWrite: numbe
 };
 
 function priceOf(model: string) {
-  return PRICING[model] ?? PRICING["claude-opus-4-7"]; // worst-case fallback
+  return PRICING[model] ?? PRICING["claude-opus-4-8"]; // worst-case fallback
 }
 
 interface RoutingConfig {
@@ -69,14 +72,20 @@ interface RoutingConfig {
   };
 }
 
+// Tier structure (2026-06, post Fable 5 launch):
+//   heavy   = claude-fable-5   — Mythos-class, max capability, $10/$50 per MTok
+//   default = claude-opus-4-8  — complex reasoning, agentic coding, $5/$25 per MTok
+//   light   = claude-sonnet-4-6 — speed + intelligence balance, $3/$15 per MTok
+//   utility = claude-haiku-4-5  — fastest, cheapest, for subtasks, $1/$5 per MTok
 const DEFAULTS: RoutingConfig = {
   enabled: true,
-  default: "claude-sonnet-4-6",
-  heavy:   "claude-opus-4-7",
-  light:   "claude-haiku-4-5",
+  default: "claude-opus-4-8",
+  heavy:   "claude-fable-5",
+  light:   "claude-sonnet-4-6",
   utility: "claude-haiku-4-5",
   aliases: {
-    opus:   "claude-opus-4-7",
+    fable:  "claude-fable-5",
+    opus:   "claude-opus-4-8",
     sonnet: "claude-sonnet-4-6",
     haiku:  "claude-haiku-4-5",
   },
@@ -84,7 +93,7 @@ const DEFAULTS: RoutingConfig = {
     degradeOnLargeContext: {
       enabled: true,
       threshold: 150_000,
-      from: "claude-opus-4-7",
+      from: "claude-opus-4-8",
       to:   "claude-sonnet-4-6",
     },
   },
@@ -181,6 +190,17 @@ export class ModelRouterPiece implements Piece {
     this.bus = bus;
     bus.subscribe<AIRequestMessage>("ai.request", (msg) => this.onRequest(msg));
 
+    // Session lifecycle eviction (F3.14): sticky routes and pending overrides
+    // for closed sessions leaked forever (review 2026-06-10). Dropping them
+    // also prevents persisting dead routes to disk on stop().
+    bus.subscribe("system.event", (msg: any) => {
+      if (msg.event !== "session.closed") return;
+      const sessionId = msg.data?.sessionId as string | undefined;
+      if (!sessionId) return;
+      this.routes.delete(sessionId);
+      this.pendingOverrides.delete(sessionId);
+    });
+
     // Hook: when a brand-new session is created by SessionManager, apply any
     // override we computed earlier but couldn't dispatch (sticky from disk,
     // prefix from the very first message, etc).
@@ -270,7 +290,11 @@ export class ModelRouterPiece implements Piece {
     }
     let r = this.routes.get(sessionId);
     if (!r) {
-      r = { sticky: cfg.default, switchCount: 0 };
+      // If the session already exists with a sticky model override (set by a piece
+      // before the first ai.request, e.g. slack-hook pinning Haiku), seed the
+      // route from that override instead of cfg.default so we don't stomp it.
+      const existingSticky = (this.sessions.peek(sessionId) as any)?.session?.stickyModelOverride;
+      r = { sticky: existingSticky ?? cfg.default, switchCount: 0 };
       this.routes.set(sessionId, r);
     }
     return r;
@@ -517,8 +541,10 @@ export class ModelRouterPiece implements Piece {
 }
 
 function shortName(model: string): string {
-  if (model.includes("opus")) return "Opus";
+  if (model.includes("fable"))  return "Fable";
+  if (model.includes("mythos")) return "Mythos";
+  if (model.includes("opus"))   return "Opus";
   if (model.includes("sonnet")) return "Sonnet";
-  if (model.includes("haiku")) return "Haiku";
+  if (model.includes("haiku"))  return "Haiku";
   return model;
 }

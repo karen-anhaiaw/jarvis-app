@@ -1,35 +1,16 @@
+// src/logger/index.ts
+//
+// Logger wiring — file transport, rotation, console mirror. The buffer/proxy
+// logic lives in ./buffer.ts (pure, unit-tested); this module owns only the
+// import-time side effects (rotation, transport workers) and re-exports the
+// buffer API so existing consumers keep importing from "logger/index.js".
 import pino from "pino";
-
-export type LogEntry = {
-  seq: number;
-  timestamp: string;
-  level: string;
-  msg: string;
-};
-
-const MAX_BUFFER = 500;
-const logBuffer: LogEntry[] = [];
-const listeners: Set<(entry: LogEntry) => void> = new Set();
-let nextSeq = 0;
-
-function pushEntry(entry: LogEntry) {
-  logBuffer.push(entry);
-  if (logBuffer.length > MAX_BUFFER) logBuffer.shift();
-  for (const fn of listeners) fn(entry);
-}
-
-export function getLogBuffer(): LogEntry[] {
-  return [...logBuffer];
-}
-
-export function onLogEntry(fn: (entry: LogEntry) => void): () => void {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
-}
-
 import { mkdirSync, existsSync, renameSync, unlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { jarvisPath } from "../core/paths.js";
+import { wrapWithBuffer } from "./buffer.js";
+
+export { getLogBuffer, onLogEntry, type LogEntry } from "./buffer.js";
 
 // Always write logs to file
 const LOG_DIR = jarvisPath("logs");
@@ -61,8 +42,11 @@ const consoleLevel = process.env.LOG_LEVEL ?? "silent";
 
 const destination = pino.transport({
   targets: [
-    // Always write to file
-    { target: "pino-pretty", options: { colorize: false, destination: LOG_FILE }, level: "debug" },
+    // File: raw NDJSON (one JSON object per line) — F4 item 19. The old
+    // pino-pretty file produced multi-line ctx blocks that were unparseable
+    // by tooling; NDJSON is jq/grep-friendly and machine-readable. Console
+    // (below) remains the human-pretty surface.
+    { target: "pino/file", options: { destination: LOG_FILE }, level: "debug" },
     // Console only if LOG_LEVEL is set
     ...(consoleLevel !== "silent"
       ? [{ target: "pino-pretty", options: { colorize: true }, level: consoleLevel }]
@@ -73,27 +57,6 @@ const destination = pino.transport({
 // The actual pino logger — always writes to file, optionally to console
 const pinoLogger = pino({ level: "debug" }, destination);
 
-// Proxy that intercepts log calls to also push to the in-memory buffer
-export const log = new Proxy(pinoLogger, {
-  get(target, prop, receiver) {
-    const val = Reflect.get(target, prop, receiver);
-    if (typeof prop === "string" && ["trace", "debug", "info", "warn", "error", "fatal"].includes(prop)) {
-      return (...args: any[]) => {
-        // Extract message from pino's calling convention
-        const msg = typeof args[0] === "string" ? args[0]
-          : typeof args[1] === "string" ? args[1]
-          : String(args[0]);
-
-        pushEntry({
-          seq: nextSeq++,
-          timestamp: new Date().toISOString(),
-          level: prop,
-          msg,
-        });
-
-        return (val as Function).apply(target, args);
-      };
-    }
-    return val;
-  },
-});
+// Buffered proxy: every level call (including from child loggers) also lands
+// in the in-memory ring buffer that feeds the HUD log panel and /logs SSE.
+export const log = wrapWithBuffer(pinoLogger);

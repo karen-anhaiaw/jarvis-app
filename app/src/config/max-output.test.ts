@@ -16,6 +16,11 @@ import { getMaxOutput } from "./index.js";
  * caps, update getMaxOutput and this test together.
  */
 describe("getMaxOutput", () => {
+  it("returns 128k for Fable/Mythos models", () => {
+    expect(getMaxOutput("claude-fable-5")).toBe(128_000);
+    expect(getMaxOutput("claude-mythos-5")).toBe(128_000);
+  });
+
   it("returns 128k for Opus models", () => {
     expect(getMaxOutput("claude-opus-4-7")).toBe(128_000);
     expect(getMaxOutput("claude-opus-4-6")).toBe(128_000);
@@ -39,6 +44,7 @@ describe("getMaxOutput", () => {
 
   it("always returns at least 16k (never the old 8192 bug value)", () => {
     const models = [
+      "claude-fable-5",
       "claude-opus-4-7",
       "claude-sonnet-4-6",
       "claude-haiku-4-5",
@@ -57,7 +63,7 @@ describe("getMaxOutput", () => {
     // Plus preamble text and JSON structure = comfortably under 16k.
     // The old 8192 cap was too tight; all current caps must be > 16k.
     const minRequired = 16_000;
-    for (const m of ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"]) {
+    for (const m of ["claude-fable-5", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"]) {
       expect(getMaxOutput(m)).toBeGreaterThan(minRequired);
     }
   });

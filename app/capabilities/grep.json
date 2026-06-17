@@ -1,22 +1,63 @@
 {
   "name": "grep",
+  "category": "filesystem",
   "description": "Search for a pattern in file contents. Supports regex. Returns matching file paths by default (files_with_matches), matching lines (content), or match counts (count).",
   "type": "script",
   "command": "bash",
-  "args": ["capabilities/scripts/grep-search.sh", "${pattern}", "${path}", "${include}", "${context}", "${output_mode}", "${case_insensitive}", "${multiline}", "${limit}", "${type}"],
+  "args": [
+    "capabilities/scripts/grep-search.sh",
+    "${pattern}",
+    "${path}",
+    "${include}",
+    "${context}",
+    "${output_mode}",
+    "${case_insensitive}",
+    "${multiline}",
+    "${limit}",
+    "${type}"
+  ],
   "input_schema": {
     "type": "object",
     "properties": {
-      "pattern": { "type": "string", "description": "Regex pattern to search for" },
-      "path": { "type": "string", "description": "Directory or file to search in (default: current directory)" },
-      "include": { "type": "string", "description": "Glob pattern to filter files (e.g. '*.ts', '*.{js,jsx}')" },
-      "type": { "type": "string", "description": "File type filter (e.g. 'js', 'py', 'ts', 'rust', 'go')" },
-      "output_mode": { "type": "string", "description": "Output mode: 'files_with_matches' (default, file paths only), 'content' (matching lines), 'count' (match counts per file)" },
-      "context": { "type": "number", "description": "Lines of context around each match. Only applies to output_mode=content (default: 0)" },
-      "case_insensitive": { "type": "boolean", "description": "Case insensitive search (default: false)" },
-      "multiline": { "type": "boolean", "description": "Enable multiline matching where . matches newlines (default: false)" },
-      "limit": { "type": "number", "description": "Max results to return (default: 250)" }
+      "pattern": {
+        "type": "string",
+        "description": "Regex pattern to search for"
+      },
+      "path": {
+        "type": "string",
+        "description": "Directory or file to search in (default: current directory)"
+      },
+      "include": {
+        "type": "string",
+        "description": "Glob pattern to filter files (e.g. '*.ts', '*.{js,jsx}')"
+      },
+      "type": {
+        "type": "string",
+        "description": "File type filter (e.g. 'js', 'py', 'ts', 'rust', 'go')"
+      },
+      "output_mode": {
+        "type": "string",
+        "description": "Output mode: 'files_with_matches' (default, file paths only), 'content' (matching lines), 'count' (match counts per file)"
+      },
+      "context": {
+        "type": "number",
+        "description": "Lines of context around each match. Only applies to output_mode=content (default: 0)"
+      },
+      "case_insensitive": {
+        "type": "boolean",
+        "description": "Case insensitive search (default: false)"
+      },
+      "multiline": {
+        "type": "boolean",
+        "description": "Enable multiline matching where . matches newlines (default: false)"
+      },
+      "limit": {
+        "type": "number",
+        "description": "Max results to return (default: 250)"
+      }
     },
-    "required": ["pattern"]
+    "required": [
+      "pattern"
+    ]
   }
 }

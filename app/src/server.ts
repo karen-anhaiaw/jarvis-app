@@ -1,5 +1,7 @@
 // src/server.ts
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createSecureServer, type Http2ServerRequest, type Http2ServerResponse } from "node:http2";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { loadTlsCert } from "./transport/tls.js";
 import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import { join, extname } from "node:path";
 import { homedir } from "node:os";
@@ -7,6 +9,7 @@ import { execSync, exec } from "node:child_process";
 import type { ChatPiece } from "./input/chat-piece.js";
 import { load as loadSettings, save as saveSettings } from "./core/settings.js";
 import { log, getLogBuffer, onLogEntry } from "./logger/index.js";
+import { DEFAULT_SESSION } from "./core/constants.js";
 
 const THEMES_DIR = join(homedir(), ".jarvis", "themes");
 
@@ -89,7 +92,7 @@ type CapabilitiesProvider = () => Array<{ name: string; description: string; cat
 type RouteHandler = (req: IncomingMessage, res: ServerResponse) => void;
 
 export class HttpServer {
-  private server: ReturnType<typeof createServer>;
+  private server: ReturnType<typeof createSecureServer>;
   private port: number;
   private chatPiece: ChatPiece;
   private getHudState: HudStateProvider;
@@ -110,8 +113,16 @@ export class HttpServer {
     this.getHudState = getHudState;
     this.getCapabilities = getCapabilities;
     this.onAbort = onAbort;
-    this.server = createServer(this.handle.bind(this));
-    this.server.listen(port, () => log.info({ port }, "HttpServer: listening"));
+    const tls = loadTlsCert();
+    this.server = createSecureServer(
+      { ...tls, allowHTTP1: true },
+      // allowHTTP1: true means req/res are compatible at runtime even though
+      // Http2ServerRequest has a slightly different static type from IncomingMessage.
+      (this.handle.bind(this) as unknown) as (req: Http2ServerRequest, res: Http2ServerResponse) => void,
+    );
+    this.server.listen(port, () =>
+      log.info({ port, protocol: "https/h2" }, "HttpServer: listening on https://localhost:" + port)
+    );
   }
 
   setOnClearSession(handler: (sessionId: string) => void): void {
@@ -145,7 +156,7 @@ export class HttpServer {
   }
 
   get url(): string {
-    return `http://localhost:${this.port}`;
+    return `https://localhost:${this.port}`;
   }
 
   private handle(req: IncomingMessage, res: ServerResponse): void {
@@ -202,6 +213,24 @@ export class HttpServer {
 
     if (req.url?.startsWith("/chat/history") && req.method === "GET") {
       this.chatPiece.handleHistory(req, res);
+      return;
+    }
+
+    if (req.url?.startsWith("/chat/session-info") && req.method === "GET") {
+      this.chatPiece.handleSessionInfo(req, res);
+      return;
+    }
+
+    if (req.url === "/chat/models" && req.method === "GET") {
+      // Import is synchronous-safe here: config/index.ts is already loaded at
+      // startup. We use a dynamic import only to avoid circular-ref issues at
+      // module level; the Promise resolves immediately from the module cache.
+      import("./config/index.js").then(({ getModelCatalog }) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(getModelCatalog()));
+      }).catch(() => {
+        res.writeHead(500); res.end();
+      });
       return;
     }
 
@@ -512,9 +541,12 @@ export class HttpServer {
     }
 
     // Plugin renderer compilation endpoint
-    // URL: /plugins/{name}/renderers/{file}.js
-    if (req.url?.startsWith("/plugins/") && req.url?.endsWith(".js")) {
-      const parts = req.url.split("/");
+    // URL: /plugins/{name}/renderers/{file}.js[?v=cache-buster]
+    // Strip query string before matching — the ?v= cache-buster must not
+    // prevent the route from being recognised (endsWith(".js") fails otherwise).
+    const reqPath = req.url?.split("?")[0] ?? "";
+    if (reqPath.startsWith("/plugins/") && reqPath.endsWith(".js")) {
+      const parts = reqPath.split("/");
       // parts = ["", "plugins", name, "renderers", "file.js"]
       if (parts.length === 5 && parts[3] === "renderers") {
         const pluginName = parts[2];
@@ -568,11 +600,21 @@ export class HttpServer {
     }
 
     const cacheKey = `${pluginName}/${fileName}`;
-    const stat = statSync(filePath);
+    // Use the latest mtime across ALL files in the renderers dir so that
+    // changes to imported sub-components (e.g. MemoryCard.tsx imported by
+    // MnemosynePanel.tsx) invalidate the bundle for the entrypoint too.
+    const rendererDir = filePath.replace(/[^/\\]+$/, "");
+    let maxMtime = statSync(filePath).mtimeMs;
+    try {
+      const { readdirSync } = await import("fs");
+      for (const f of readdirSync(rendererDir)) {
+        try { const m = statSync(join(rendererDir, f)).mtimeMs; if (m > maxMtime) maxMtime = m; } catch { /* skip */ }
+      }
+    } catch { /* non-critical */ }
     const cached = this.rendererCache.get(cacheKey);
 
-    if (cached && cached.mtime === stat.mtimeMs) {
-      res.writeHead(200, { "Content-Type": "application/javascript" });
+    if (cached && cached.mtime === maxMtime) {
+      res.writeHead(200, { "Content-Type": "application/javascript", "Cache-Control": "no-store" });
       res.end(cached.js);
       return;
     }
@@ -614,9 +656,9 @@ export class HttpServer {
       });
 
       const js = result.outputFiles[0].text;
-      this.rendererCache.set(cacheKey, { js, mtime: stat.mtimeMs });
+      this.rendererCache.set(cacheKey, { js, mtime: maxMtime });
 
-      res.writeHead(200, { "Content-Type": "application/javascript" });
+      res.writeHead(200, { "Content-Type": "application/javascript", "Cache-Control": "no-store" });
       res.end(js);
     } catch (err) {
       log.error({ pluginName, fileName, err: String(err) }, "HttpServer: renderer compilation failed");
@@ -661,13 +703,13 @@ export class HttpServer {
 
         // Bash is a global side-effect — broadcast to the root session only.
         // Actor/other-session bash would need its own endpoint carrying sessionId.
-        this.chatPiece.broadcastEvent("main", {
+        this.chatPiece.broadcastEvent(DEFAULT_SESSION, {
           type: "bash_result",
           command,
           output,
           exitCode,
           ms,
-          session: "main",
+          session: DEFAULT_SESSION,
         });
       });
     });

@@ -16,6 +16,11 @@ export type HudComponentState = {
   size: { width: number; height: number };
   data: Record<string, unknown>;
   renderer?: { plugin: string; file: string };
+  /** Per-panel monotonic revision stamped by the backend (F6 hud-truth).
+   *  Absent on older servers — gap detection is skipped then. */
+  rev?: number;
+  /** Epoch ms of the last REAL content change (F6 staleness). */
+  updatedAt?: number;
 };
 
 export type HudReactor = {

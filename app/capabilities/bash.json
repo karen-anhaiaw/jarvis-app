@@ -1,16 +1,33 @@
 {
   "name": "bash",
+  "category": "filesystem",
   "description": "Execute a shell command and return stdout/stderr. Use for system commands, git, npm, build tools, and any CLI operation. Supports configurable timeout and working directory.",
   "type": "script",
   "command": "bash",
-  "args": ["capabilities/scripts/bash-exec.sh", "${command}", "${timeout}", "${cwd}"],
+  "args": [
+    "capabilities/scripts/bash-exec.sh",
+    "${command}",
+    "${timeout}",
+    "${cwd}"
+  ],
   "input_schema": {
     "type": "object",
     "properties": {
-      "command": { "type": "string", "description": "The shell command to execute" },
-      "timeout": { "type": "number", "description": "Timeout in seconds (default: 30, max: 600)" },
-      "cwd": { "type": "string", "description": "Working directory for the command (default: project root)" }
+      "command": {
+        "type": "string",
+        "description": "The shell command to execute"
+      },
+      "timeout": {
+        "type": "number",
+        "description": "Timeout in seconds (default: 30, max: 600)"
+      },
+      "cwd": {
+        "type": "string",
+        "description": "Working directory for the command (default: project root)"
+      }
     },
-    "required": ["command"]
+    "required": [
+      "command"
+    ]
   }
 }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react'
 import type { HudState } from '../types/hud'
-import { DraggablePanel } from './DraggablePanel'
+import { DraggablePanel, focusPanel } from './DraggablePanel'
 import { renderers } from './renderers/index'
 import { CoreNodeOverlay } from './CoreNodeOverlay'
 import { ChatPanel } from './panels/ChatPanel'
@@ -48,8 +48,13 @@ const pluginRendererCache: Record<string, React.LazyExoticComponent<React.Compon
 function getPluginRenderer(plugin: string, file: string) {
   const key = `${plugin}/${file}`
   if (!pluginRendererCache[key]) {
+    // Each new cache entry gets a unique bust so re-imports after panel
+    // close/reopen always fetch a fresh bundle from the server.
+    // Using a per-entry counter (not Date.now at module load) means
+    // every new lazy() call gets a unique URL defeating the ES module cache.
+    const bust = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     pluginRendererCache[key] = lazy(() =>
-      import(/* @vite-ignore */ `/plugins/${plugin}/renderers/${file}.js`)
+      import(/* @vite-ignore */ `/plugins/${plugin}/renderers/${file}.js?v=${bust}`)
     )
   }
   return pluginRendererCache[key]
@@ -79,140 +84,116 @@ const STATUS_LABELS: Record<string, string> = {
 
 interface CtxMenuState { x: number; y: number }
 
+// ── Z-index tiers ──────────────────────────────────────────────────────────
+// Panels: unlimited (react-rnd managed, brought to front on click)
+// Menu backdrop: 9999999999998  Menu / submenu: 9999999999999
+// ───────────────────────────────────────────────────────────────────────────
+
 function HudContextMenu({
   menu,
   onClose,
   allComponents,
+  chatPanels,
   hiddenPanels,
   onTogglePanel,
 }: {
   menu: CtxMenuState
   onClose: () => void
   allComponents: HudState['components']
+  chatPanels: Array<{ id: string; name: string }>
   hiddenPanels: Set<string>
   onTogglePanel: (id: string, visible: boolean) => void
 }) {
-  // Close on click-outside or Escape
+  const [chatSubOpen, setChatSubOpen] = React.useState(false)
+  const chatRowRef = React.useRef<HTMLDivElement>(null)
+  const menuRef = React.useRef<HTMLDivElement>(null)
+  const [subLeft, setSubLeft] = React.useState(0)
+  const [subTop, setSubTop]   = React.useState(0)
+
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  // Group components by plugin/piece prefix
-  const groups: Record<string, typeof allComponents> = {}
-  for (const c of allComponents) {
-    // derive group from pieceId: "jarvis-plugin-actors/actor-pool" → "actors"
-    // or plain "anthropic-metrics" → "anthropic"
-    let group = 'core'
-    if (c.id.startsWith('actor-')) group = 'actors'
-    else if (c.id.includes('anthropic')) group = 'anthropic'
-    else if (c.id.includes('capability')) group = 'capabilities'
-    else if (c.id.includes('task')) group = 'tasks'
-    else if (c.id.includes('canvas')) group = 'canvas'
-    else if (c.id.includes('chat')) group = 'chat'
-    else if (c.id.includes('model') || c.id.includes('provider')) group = 'model'
-    else if (c.id.includes('diff') || c.id.includes('hud-show')) group = 'viewer'
-    if (!groups[group]) groups[group] = []
-    groups[group].push(c)
-  }
+  // Recompute submenu position whenever it opens (after paint)
+  React.useEffect(() => {
+    if (!chatSubOpen) return
+    const id = requestAnimationFrame(() => {
+      const mr = menuRef.current?.getBoundingClientRect()
+      const rr = chatRowRef.current?.getBoundingClientRect()
+      if (mr && rr) { setSubLeft(mr.right + 4); setSubTop(rr.top) }
+    })
+    return () => cancelAnimationFrame(id)
+  }, [chatSubOpen])
 
-  const statusDot = (c: typeof allComponents[0]) => {
-    const visible = !hiddenPanels.has(c.id) && c.visible !== false
-    const color = !visible ? '#444'
-      : c.status === 'running' ? '#50fa7b'
-      : c.status === 'error' ? '#ff5555'
-      : '#4af'
-    return (
-      <span style={{
-        display: 'inline-block', width: 6, height: 6,
-        borderRadius: '50%', background: color,
-        marginRight: 6, flexShrink: 0, marginTop: 1,
-      }} />
-    )
-  }
+  const row: React.CSSProperties = { display: 'flex', alignItems: 'center', padding: '4px 12px', cursor: 'pointer' }
+  const hl = (e: React.MouseEvent, on: boolean) => { (e.currentTarget as HTMLElement).style.background = on ? 'rgba(68,170,255,0.10)' : 'transparent' }
+  const dot = (color: string) => <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: color, marginRight: 8, flexShrink: 0 }} />
+  const menuBox: React.CSSProperties = { position: 'fixed', zIndex: 9999999999999, background: '#0d1117', border: '1px solid #2a3040', borderRadius: 6, minWidth: 200, boxShadow: '0 8px 32px rgba(0,0,0,0.7)', fontFamily: 'var(--font-mono)', fontSize: 11, color: '#cfd8e8', overflow: 'hidden' }
+
+  // All non-chat panels — flat list, sorted by name
+  const panels = allComponents
+    .filter(c => c.id !== 'chat-output' && c.id !== 'chat-input' && c.renderer?.file !== 'ChatPanel')
+    .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))
 
   return (
     <>
-      {/* backdrop */}
-      <div
-        onClick={onClose}
-        style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
-      />
-      {/* menu */}
-      <div
-        style={{
-          position: 'fixed',
-          left: menu.x, top: menu.y,
-          zIndex: 9999,
-          background: '#0d1117',
-          border: '1px solid #2a3040',
-          borderRadius: 6,
-          minWidth: 220,
-          boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-          fontFamily: 'var(--font-mono)',
-          fontSize: 11,
-          color: '#cfd8e8',
-          overflow: 'hidden',
-        }}
-        onClick={e => e.stopPropagation()}
-      >
-        {/* header */}
-        <div style={{
-          padding: '6px 12px 5px',
-          fontSize: 9, letterSpacing: '1.5px',
-          color: '#4a5a6a', borderBottom: '1px solid #1a2030',
-          fontFamily: 'var(--font-display)', textTransform: 'uppercase',
-        }}>
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 9999999999998 }} />
+
+      {/* main menu */}
+      <div ref={menuRef} style={{ ...menuBox, left: menu.x, top: menu.y }} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: '6px 12px 5px', fontSize: 9, letterSpacing: '1.5px', color: '#4a5a6a', borderBottom: '1px solid #1a2030', fontFamily: 'var(--font-display)', textTransform: 'uppercase' }}>
           HUDs
         </div>
 
-        {Object.entries(groups).sort().map(([group, comps]) => (
-          <div key={group}>
-            {/* group label */}
-            <div style={{
-              padding: '4px 12px 2px',
-              fontSize: 9, letterSpacing: '1px',
-              color: '#3a4a5a', textTransform: 'uppercase',
-              fontFamily: 'var(--font-display)',
-            }}>
-              {group}
-            </div>
-            {comps.map(c => {
-              const visible = !hiddenPanels.has(c.id) && c.visible !== false
-              return (
-                <div
-                  key={c.id}
-                  onClick={() => { onTogglePanel(c.id, visible); onClose() }}
-                  style={{
-                    display: 'flex', alignItems: 'flex-start',
-                    padding: '4px 12px',
-                    cursor: 'pointer',
-                    opacity: visible ? 1 : 0.45,
-                    transition: 'background 0.1s',
-                  }}
-                  onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'rgba(68,170,255,0.08)'}
-                  onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
-                >
-                  {statusDot(c)}
-                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {c.name || c.id}
-                  </span>
-                  <span style={{ marginLeft: 8, color: '#3a4a5a', fontSize: 9 }}>
-                    {visible ? 'hide' : 'show'}
-                  </span>
-                </div>
-              )
-            })}
-          </div>
-        ))}
+        {/* Chats → submenu trigger */}
+        <div
+          ref={chatRowRef}
+          style={{ ...row, background: chatSubOpen ? 'rgba(68,170,255,0.10)' : 'transparent' }}
+          onClick={() => setChatSubOpen(o => !o)}
+          onMouseEnter={e => { if (!chatSubOpen) hl(e, true) }}
+          onMouseLeave={e => { if (!chatSubOpen) hl(e, false) }}
+        >
+          {dot(chatPanels.length > 0 ? '#50fa7b' : '#444')}
+          <span style={{ flex: 1 }}>Chats</span>
+          <span style={{ color: '#4a6a8a', fontSize: 9, marginLeft: 8 }}>▶</span>
+        </div>
 
-        {allComponents.length === 0 && (
-          <div style={{ padding: '8px 12px', color: '#4a5a6a', fontSize: 10 }}>
-            No panels registered
-          </div>
-        )}
+        {/* all other panels — flat */}
+        {panels.map(c => {
+          const visible = !hiddenPanels.has(c.id) && c.visible !== false
+          const color = !visible ? '#444' : c.status === 'running' ? '#50fa7b' : c.status === 'error' ? '#ff5555' : '#4af'
+          return (
+            <div key={c.id} style={{ ...row, opacity: visible ? 1 : 0.45 }}
+              onClick={() => { onTogglePanel(c.id, visible); onClose() }}
+              onMouseEnter={e => hl(e, true)} onMouseLeave={e => hl(e, false)}
+            >
+              {dot(color)}
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name || c.id}</span>
+              <span style={{ color: '#3a4a5a', fontSize: 9, marginLeft: 8 }}>{visible ? 'hide' : 'show'}</span>
+            </div>
+          )
+        })}
       </div>
+
+      {/* chat submenu */}
+      {chatSubOpen && (
+        <div style={{ ...menuBox, left: subLeft, top: subTop }} onClick={e => e.stopPropagation()}>
+          {chatPanels.length === 0
+            ? <div style={{ padding: '8px 12px', color: '#4a5a6a', fontSize: 10 }}>No chats open</div>
+            : chatPanels.map(cp => (
+              <div key={cp.id} style={row}
+                onMouseEnter={e => hl(e, true)} onMouseLeave={e => hl(e, false)}
+                onClick={() => { focusPanel(cp.id); onClose() }}
+              >
+                {dot('#50fa7b')}
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cp.name}</span>
+              </div>
+            ))
+          }
+        </div>
+      )}
     </>
   )
 }
@@ -265,7 +246,12 @@ export function HudRenderer({ state }: { state: HudState }) {
 
   const openContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
-    setCtxMenu({ x: e.clientX, y: e.clientY })
+    // Clamp so the menu never spawns below / right of the viewport
+    const MENU_W = 220
+    const MENU_H = 400 // conservative upper bound
+    const x = Math.min(e.clientX, window.innerWidth  - MENU_W - 8)
+    const y = Math.min(e.clientY, window.innerHeight - MENU_H - 8)
+    setCtxMenu({ x, y })
   }, [])
 
   const togglePanel = useCallback((id: string, currentlyVisible: boolean) => {
@@ -333,6 +319,21 @@ export function HudRenderer({ state }: { state: HudState }) {
     : state.reactor.status === 'loading' ? '#a6f'
     : '#f44'
 
+  // Build chat panel list: main + all actor/session chats.
+  // Use the full components array (not otherComps) so hidden chats still appear
+  // in the menu and can be focused/revealed.
+  const chatPanels = [
+    ...(chatOutputComp ? [{ id: 'chat-output', name: 'main' }] : []),
+    ...state.components
+      .filter(c =>
+        c.id !== 'chat-output' &&
+        c.id !== 'chat-input' &&
+        c.id !== 'hud-core-node' &&
+        c.renderer?.file === 'ChatPanel'
+      )
+      .map(c => ({ id: c.id, name: c.name || c.id })),
+  ]
+
   return (
     <div className="hudRoot" onContextMenu={openContextMenu}>
       {ctxMenu && (
@@ -340,6 +341,7 @@ export function HudRenderer({ state }: { state: HudState }) {
           menu={ctxMenu}
           onClose={() => setCtxMenu(null)}
           allComponents={state.components.filter(c => c.id !== 'hud-core-node')}
+          chatPanels={chatPanels}
           hiddenPanels={hiddenPanels}
           onTogglePanel={togglePanel}
         />
@@ -403,6 +405,7 @@ export function HudRenderer({ state }: { state: HudState }) {
                 onClose={() => hidePanel(comp.id)}
                 onDetach={detachPanel}
                 persistLayout={!comp.ephemeral}
+                updatedAt={comp.updatedAt}
               >
                 <BuiltinRenderer state={comp} />
               </DraggablePanel>
@@ -427,6 +430,7 @@ export function HudRenderer({ state }: { state: HudState }) {
                   onClose={() => hidePanel(comp.id)}
                   onDetach={detachPanel}
                   persistLayout={!comp.ephemeral}
+                  updatedAt={comp.updatedAt}
                 >
                   <PluginErrorBoundary fallback={<GenericRenderer state={comp} />}>
                     <CoreRenderer state={comp} />
@@ -453,6 +457,7 @@ export function HudRenderer({ state }: { state: HudState }) {
                 onClose={() => hidePanel(comp.id)}
                 onDetach={detachPanel}
                 persistLayout={!comp.ephemeral}
+                updatedAt={comp.updatedAt}
               >
                 <PluginErrorBoundary fallback={<GenericRenderer state={comp} />}>
                 <Suspense fallback={<GenericRenderer state={comp} />}>
@@ -479,6 +484,7 @@ export function HudRenderer({ state }: { state: HudState }) {
                 onClose={() => hidePanel(comp.id)}
                 onDetach={detachPanel}
                 persistLayout={!comp.ephemeral}
+                updatedAt={comp.updatedAt}
               >
                 <GenericRenderer state={comp} />
               </DraggablePanel>

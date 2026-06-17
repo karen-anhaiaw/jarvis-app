@@ -3,6 +3,7 @@ import { ChatTimeline, type ChatEntry } from './ChatTimeline'
 import { ChatAnchorSlot } from './ChatAnchorSlot'
 import { chatAnchorRegistry, useAnchors } from '../../hooks/useChatAnchors'
 import { SlashMenu } from './SlashMenu'
+import { ModelPicker } from './ModelPicker'
 
 interface PendingImage {
   label: string
@@ -15,6 +16,7 @@ interface ChatPanelFeatures {
   slashMenu?: boolean
   images?: boolean
   compaction?: boolean
+  modelPicker?: boolean
 }
 
 /**
@@ -39,6 +41,7 @@ const defaultFeatures: ChatPanelFeatures = {
   slashMenu: true,
   images: true,
   compaction: true,
+  modelPicker: true,
 }
 
 const defaultUserLabel = (source?: string) => {
@@ -107,6 +110,10 @@ export function ChatPanel({
   // They render as faint cards under the JARVIS thinking indicator until the
   // backend drains them and they materialize as real user messages.
   const [pendingQueue, setPendingQueue] = useState<Array<{ text: string; source?: string; hasImages?: boolean }>>([])
+  const [sseConnected, setSseConnected] = useState(true)
+  // Current model for this session — hydrated via SSE model_changed events.
+  // Replaces ModelPicker's per-instance polling of /chat/session-info.
+  const [sessionModel, setSessionModel] = useState<string | null>(null)
 
   // Mirror of streaming/thinking state read inside the SSE callback — that
   // useEffect closes over initial values, so reading state directly there
@@ -180,14 +187,50 @@ export function ChatPanel({
       .catch(() => {})
   }, [historyUrl])
 
-  // SSE stream scoped to this sessionId
+  // SSE stream scoped to this sessionId — with auto-reconnect on error.
+  // The native EventSource reconnects automatically in browsers, but Electron
+  // does NOT — once the connection drops the source goes CLOSED and stays there.
+  // We replicate the HUD stream pattern: onerror → close → setTimeout(2s) → reconnect.
   useEffect(() => {
-    const source = new EventSource(streamUrl)
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let cancelled = false
+    let cleanup = () => {}
 
-    source.onmessage = (event) => {
+    function connect() {
+      if (cancelled) return
+      const source = new EventSource(streamUrl)
+
+      source.onopen = () => setSseConnected(true)
+
+      source.onerror = () => {
+        source.close()
+        setSseConnected(false)
+        if (!cancelled) {
+          reconnectTimer = setTimeout(connect, 2000)
+        }
+      }
+
+      cleanup = () => source.close()
+
+      source.onmessage = (event) => {
       const data = JSON.parse(event.data)
 
       switch (data.type) {
+        // Authoritative state snapshot from the backend stack.
+        // Takes precedence over inferred state from individual events.
+        // idle → clear thinking+streaming; processing → thinking; waiting_tools → thinking.
+        case 'model_changed':
+          setSessionModel(data.model ?? null)
+          break
+        case 'session_state':
+          if (data.state === 'idle') {
+            setIsThinking(false)
+            setIsStreaming(false)
+          } else {
+            // processing or waiting_tools → session is active
+            setIsThinking(true)
+          }
+          break
         case 'user':
           setEntries(prev => [...prev, { kind: 'message', role: 'user', text: data.text, images: data.images, source: data.source, session: data.session }])
           setIsThinking(true)
@@ -199,25 +242,59 @@ export function ChatPanel({
           break
         case 'done':
           setIsStreaming(false)
-          setIsThinking(false)
+          // isThinking is managed by session_state — do not set it here.
+          // session_state:idle arrives before/with 'done' and is authoritative.
           setStreamingText(prev => {
             if (prev) {
               setEntries(msgs => [...msgs, { kind: 'message', role: 'assistant', text: prev, source: data.source, session: data.session }])
+            } else if (data.fullText) {
+              // No deltas accumulated (slash commands, non-streaming paths) —
+              // render the payload's fullText directly. Without this branch the
+              // result of /model, /compact etc. was silently dropped.
+              setEntries(msgs => [...msgs, { kind: 'message', role: 'assistant', text: data.fullText, source: data.source, session: data.session }])
             }
             return ''
           })
-          // Turn finished — collapse any live `thinking_text` entries (intermediate
-          // model text emitted between tool calls) into their compact, clickable form.
-          setEntries(prev => prev.map(e =>
-            e.kind === 'thinking_text' && e.live ? { ...e, live: false, expanded: false } : e
-          ))
+          // Turn finished — collapse intermediate `thinking_text` entries and
+          // promote the last one to a proper `message` if streamingText was empty.
+          //
+          // This handles the pattern: model responds (text → thinking_text on
+          // tool_start) → tool calls (e.g. memory_reinforce) → no further deltas
+          // → done arrives with streamingText=''. Without this, the assistant
+          // response stays trapped in a thinking_text entry and never appears as
+          // a message in the timeline.
+          setEntries(prev => {
+            // Find the last live thinking_text entry — that is the final assistant
+            // response when no deltas were emitted after the last tool call.
+            const lastLiveIdx = (() => {
+              for (let i = prev.length - 1; i >= 0; i--) {
+                if (prev[i].kind === 'thinking_text' && (prev[i] as any).live) return i
+              }
+              return -1
+            })()
+            // Only promote if there is no assistant message entry already for
+            // this turn (i.e. streamingText was empty when done fired).
+            const hasMessageAfterLastTool = prev.some((e, i) =>
+              e.kind === 'message' && (e as any).role === 'assistant' && i > lastLiveIdx
+            )
+            return prev.map((e, i) => {
+              if (e.kind !== 'thinking_text' || !(e as any).live) return e
+              const isLast = i === lastLiveIdx
+              if (isLast && !hasMessageAfterLastTool && lastLiveIdx !== -1) {
+                // Promote: convert the last live thinking_text to a message entry.
+                return { kind: 'message', role: 'assistant', text: (e as any).text, source: (e as any).source, session: (e as any).session } as any
+              }
+              // All other live thinking_text entries collapse normally.
+              return { ...e, live: false, expanded: false }
+            })
+          })
           // Turn finished — choice cards captured during the turn now land
           // at the very end of the conversation, AFTER any final assistant text.
           flushPendingChoices()
           break
         case 'error':
           setIsStreaming(false)
-          setIsThinking(false)
+          // isThinking managed by session_state — authoritative source.
           setStreamingText('')
           setEntries(prev => [
             // Collapse any live thinking_text from this turn before appending the error.
@@ -278,7 +355,10 @@ export function ChatPanel({
           break
         case 'aborted':
           setIsStreaming(false)
-          setIsThinking(false)
+          // Do NOT setIsThinking(false) here — session_state is the authoritative
+          // source. If drainQueue fires immediately after abort, session_state:processing
+          // arrives in the same SSE flush and must win. Letting aborted reset isThinking
+          // causes a race where the drain's thinking indicator gets wiped.
           setStreamingText(prev => {
             if (prev) {
               setEntries(msgs => [...msgs, { kind: 'message', role: 'assistant', text: prev, source: data.source, session: data.session, aborted: true }])
@@ -303,6 +383,29 @@ export function ChatPanel({
             reason: data.reason,
             startedAt: Date.now(),
           }])
+          break
+        case 'compaction_failed':
+          if (!features.compaction) break
+          // Engine B failed — history is preserved (doCompact failure
+          // semantics). Replace the pending ⏳ banner with a failure entry so
+          // it doesn't hang forever; append if no banner exists (e.g. failure
+          // event arrived after a reconnect dropped the start event).
+          setEntries(prev => {
+            const failEntry = {
+              kind: 'compaction_failed' as const,
+              engine: 'fallback' as const,
+              tokensBefore: data.tokensBefore ?? 0,
+              reason: data.reason ?? 'unknown error',
+            }
+            for (let idx = prev.length - 1; idx >= 0; idx--) {
+              if (prev[idx].kind === 'compaction_pending') {
+                const next = prev.slice()
+                next[idx] = failEntry
+                return next
+              }
+            }
+            return [...prev, failEntry]
+          })
           break
         case 'compaction':
           if (!features.compaction) break
@@ -439,9 +542,16 @@ export function ChatPanel({
           break
         }
       }
-    }
+    } // end source.onmessage
+    } // end connect()
 
-    return () => source.close()
+    connect()
+
+    return () => {
+      cancelled = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      cleanup()
+    }
   }, [streamUrl, features.compaction, flushPendingChoices])
 
   // ESC to abort — fires when this panel's textarea has focus
@@ -749,7 +859,27 @@ export function ChatPanel({
         onChoiceDismiss={handleAnchorChoiceDismiss}
       />
 
+      {!sseConnected && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          padding: '5px 12px',
+          background: 'rgba(255,160,0,0.12)',
+          borderTop: '1px solid rgba(255,160,0,0.3)',
+          fontSize: '11px',
+          color: '#fa0',
+          letterSpacing: '0.04em',
+        }}>
+          <span style={{ display: 'inline-block', width: '7px', height: '7px', borderRadius: '50%', background: '#fa0', animation: 'pulse-slow 1.2s ease-in-out infinite' }} />
+          RECONNECTING…
+        </div>
+      )}
+
       <div className="chatDockedInput">
+        {features.modelPicker && (
+          <ModelPicker sessionId={sessionId} sendUrl={sendUrl} externalModel={sessionModel} />
+        )}
         <div style={{ display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {features.slashMenu && (
             <SlashMenu

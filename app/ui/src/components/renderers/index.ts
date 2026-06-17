@@ -6,6 +6,7 @@ import { TokenCounterRenderer } from './TokenCounterRenderer'
 import { CapabilityExecutorRenderer } from './CapabilityExecutorRenderer'
 import { McpManagerRenderer } from './McpManagerRenderer'
 import { DiffViewerRenderer } from './DiffViewerRenderer'
+import { TurnInspectorRenderer } from './TurnInspectorRenderer'
 // ChatInput & ChatOutput rendered directly in HudRenderer as docked chat
 // ActorPoolRenderer lives in jarvis-plugin-actors (loaded as plugin renderer)
 // CoreNodeOverlay rendered directly in HudRenderer (wraps the orb)
@@ -19,6 +20,7 @@ export const renderers: Record<string, Renderer> = {
   "capability-executor": CapabilityExecutorRenderer,
   "mcp-manager": McpManagerRenderer,
   "diff-viewer": DiffViewerRenderer,
+  "turn-inspector": TurnInspectorRenderer,
   // actor-pool rendered via plugin renderer (jarvis-plugin-actors)
   // plugin renderers loaded dynamically (phase 2)
 }

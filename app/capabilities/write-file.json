@@ -1,16 +1,29 @@
 {
   "name": "write_file",
+  "category": "filesystem",
   "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Creates parent directories automatically. Preserves file permissions on overwrite. Ensures trailing newline.",
   "type": "script",
   "command": "bash",
-  "args": ["capabilities/scripts/write-file.sh", "${path}"],
+  "args": [
+    "capabilities/scripts/write-file.sh",
+    "${path}"
+  ],
   "stdin": "${content}",
   "input_schema": {
     "type": "object",
     "properties": {
-      "path": { "type": "string", "description": "Absolute path to the file to write" },
-      "content": { "type": "string", "description": "The full content to write to the file" }
+      "path": {
+        "type": "string",
+        "description": "Absolute path to the file to write"
+      },
+      "content": {
+        "type": "string",
+        "description": "The full content to write to the file"
+      }
     },
-    "required": ["path", "content"]
+    "required": [
+      "path",
+      "content"
+    ]
   }
 }

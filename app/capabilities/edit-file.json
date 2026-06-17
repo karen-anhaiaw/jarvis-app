@@ -1,18 +1,39 @@
 {
   "name": "edit_file",
+  "category": "filesystem",
   "description": "Replace an exact string in a file with new content. The old_string must match exactly (including whitespace/indentation). Fails if old_string is not unique unless replace_all is true.",
   "type": "script",
   "command": "bash",
-  "args": ["capabilities/scripts/edit-file.sh", "${path}", "${replace_all}"],
+  "args": [
+    "capabilities/scripts/edit-file.sh",
+    "${path}",
+    "${replace_all}"
+  ],
   "stdin": "${old_string}\n__EDIT_SEPARATOR__\n${new_string}",
   "input_schema": {
     "type": "object",
     "properties": {
-      "path": { "type": "string", "description": "Absolute path to the file to edit" },
-      "old_string": { "type": "string", "description": "The exact text to find and replace" },
-      "new_string": { "type": "string", "description": "The replacement text" },
-      "replace_all": { "type": "boolean", "description": "Replace all occurrences (default: false, replaces first only)" }
+      "path": {
+        "type": "string",
+        "description": "Absolute path to the file to edit"
+      },
+      "old_string": {
+        "type": "string",
+        "description": "The exact text to find and replace"
+      },
+      "new_string": {
+        "type": "string",
+        "description": "The replacement text"
+      },
+      "replace_all": {
+        "type": "boolean",
+        "description": "Replace all occurrences (default: false, replaces first only)"
+      }
     },
-    "required": ["path", "old_string", "new_string"]
+    "required": [
+      "path",
+      "old_string",
+      "new_string"
+    ]
   }
 }

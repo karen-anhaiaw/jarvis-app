@@ -63,6 +63,47 @@ export interface Settings {
   compaction?: CompactionSettings;
   theme?: string; // active theme name (maps to ~/.jarvis/themes/<name>/theme.json)
   cron?: CronSettings;
+  /** Delegate worker defaults (delegate_read_task, cron delegate mode).
+   *  defaultRole: role id from ~/.jarvis/roles/ used when the caller omits
+   *  one. Personal/site-specific roles belong in settings.user.json — the
+   *  code fallback is the stack-agnostic "generic" role (F3.13: the old
+   *  hardcoded default leaked a personal role name into core). */
+  delegate?: { defaultRole?: string };
+  /** Hermes (jarvis-plugin-mnemosyne) configuration — mirrors the plugin's
+   *  ctx.config shape so settings.user.json can override defaults without
+   *  touching plugin.json. The plugin reads from ctx.config (which is the
+   *  plugin entry in settings.pieces[id].config), not from this top-level
+   *  key directly — this type exists for tooling/documentation only. */
+  hermes?: {
+    backgroundReview?: {
+      /** Whether the BackgroundReviewPiece runs at all. Default: false. */
+      enabled: boolean;
+      /** Run a review pass every N session turns. Default: 5. */
+      reviewEveryNTurns?: number;
+      /** Fire a review after N minutes of idle. Default: 5. */
+      idleTriggerMinutes?: number;
+      /** Max seconds to wait for the fork session to complete. Default: 60. */
+      timeoutSeconds?: number;
+    };
+    domainGraph?: {
+      /** Enable domain-merge pass during consolidation. Default: false. */
+      enabled: boolean;
+      /** LLM tier for the merge pass ("haiku" | "sonnet"). Default: "haiku". */
+      mergeModel?: string;
+      /** Seed domains injected into every merge prompt. */
+      seedDomains?: string[];
+    };
+    skillPromotion?: {
+      /** Promote high-reinforcement workflow memories to SKILL.md files. Default: false. */
+      enabled: boolean;
+      /** LLM tier for skill generation ("haiku" | "sonnet"). Default: "sonnet". */
+      model?: string;
+      /** Minimum reinforcement count before a workflow is eligible. Default: 2. */
+      minReinforcements?: number;
+      /** Override the skills output directory. Default: ~/.jarvis/skills/. */
+      skillsDir?: string;
+    };
+  };
 }
 
 const SETTINGS_DIR = jarvisHome();
@@ -128,7 +169,20 @@ function mergeSections<T>(
   return result;
 }
 
-function deepMerge(base: Settings, override: Settings): Settings {
+/**
+ * FIELD-EXPLICIT merge of the two settings layers (default + user).
+ *
+ * ⚠️ MAINTENANCE TRAP: this is NOT a generic deep merge — every top-level
+ * Settings field MUST be listed here explicitly or it is silently DROPPED
+ * from load() even when present in the JSON files. Proven in production:
+ * `delegate` was added to the interface (F3.13) but not here, so the user's
+ * settings.user.json value vanished (caught in F3 live validation,
+ * 2026-06-11). When adding a field to `Settings`, add it here AND to
+ * settings-merge.test.ts.
+ *
+ * Exported for unit tests only — not part of any public plugin API.
+ */
+export function deepMerge(base: Settings, override: Settings): Settings {
   return {
     pieces: mergeSections(base.pieces, override.pieces),
     plugins: mergeSections(base.plugins, override.plugins),
@@ -141,6 +195,7 @@ function deepMerge(base: Settings, override: Settings): Settings {
     cron: {
       jobs: { ...base.cron?.jobs, ...override.cron?.jobs },
     },
+    delegate: override.delegate ?? base.delegate,
   };
 }
 

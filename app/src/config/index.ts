@@ -20,8 +20,10 @@ export const config: JarvisConfig = {
 };
 
 const MODEL_PROVIDERS: Record<string, string> = {
-  "claude-opus-4-7": "anthropic",
-  "claude-opus-4-6": "anthropic",
+  "claude-fable-5":   "anthropic",
+  "claude-opus-4-8":  "anthropic",
+  "claude-opus-4-7":  "anthropic",
+  "claude-opus-4-6":  "anthropic",
   "claude-sonnet-4-6": "anthropic",
   "claude-haiku-4-5": "anthropic",
   "gpt-4o": "openai",
@@ -59,6 +61,35 @@ export function getValidModels(): string[] {
   return Object.keys(MODEL_PROVIDERS);
 }
 
+/** Human-readable metadata for each known model. Drives the UI model picker. */
+export interface ModelMeta {
+  id: string;
+  label: string;
+  note: string;
+  provider: string;
+}
+
+/**
+ * Returns the full model catalog with display metadata.
+ * Single source of truth consumed by GET /chat/models — UI reads this,
+ * no per-UI hardcoding needed.
+ */
+export function getModelCatalog(): ModelMeta[] {
+  return [
+    { id: 'claude-fable-5',   label: 'Fable 5',      note: '1M · Frontier', provider: 'anthropic' },
+    { id: 'claude-opus-4-8',  label: 'Opus 4.8',     note: '1M · Max',      provider: 'anthropic' },
+    { id: 'claude-opus-4-7',  label: 'Opus 4.7',     note: '1M · Max',      provider: 'anthropic' },
+    { id: 'claude-opus-4-6',  label: 'Opus 4.6',     note: '1M · Max',      provider: 'anthropic' },
+    { id: 'claude-sonnet-4-6',label: 'Sonnet 4.6',   note: '1M · High',     provider: 'anthropic' },
+    { id: 'claude-haiku-4-5', label: 'Haiku 4.5',    note: '200K · Fast',   provider: 'anthropic' },
+    { id: 'gpt-4o',           label: 'GPT-4o',       note: 'OpenAI',        provider: 'openai'    },
+    { id: 'gpt-4o-mini',      label: 'GPT-4o Mini',  note: 'OpenAI · Fast', provider: 'openai'    },
+    { id: 'gpt-4.1',          label: 'GPT-4.1',      note: 'OpenAI',        provider: 'openai'    },
+    { id: 'o3',               label: 'o3',            note: 'OpenAI · Reason', provider: 'openai' },
+    { id: 'o4-mini',          label: 'o4-mini',       note: 'OpenAI · Fast', provider: 'openai'   },
+  ];
+}
+
 export function getCurrentProvider(): string {
   return getProviderForModel(config.model);
 }
@@ -68,13 +99,13 @@ export function getCurrentProvider(): string {
  * Without the header, all Claude 4.x models cap at 200k.
  *
  * Source: https://docs.anthropic.com/en/docs/build-with-claude/context-windows
- * Confirmed members (2026-04): opus-4-7, opus-4-6, sonnet-4-6.
+ * Confirmed members (2026-06): fable-5, mythos-5, opus-4-8, opus-4-7, opus-4-6, sonnet-4-6.
  * Sonnet 4.5, Sonnet 4, Haiku 4.5, all 3.x models → 200k only.
  */
 export function supportsLongContext(model?: string): boolean {
   const m = model ?? config.model;
   // Match exact model IDs (and dated variants like "claude-opus-4-7-20260101").
-  return /(?:^|-)(opus-4-7|opus-4-6|sonnet-4-6)(?:-|$)/.test(m);
+  return /(?:^|-)(fable-5|mythos-5|opus-4-8|opus-4-7|opus-4-6|sonnet-4-6)(?:-|$)/.test(m);
 }
 
 export function getMaxContext(model?: string): number {
@@ -98,6 +129,7 @@ export function getMaxContext(model?: string): number {
  */
 export function getMaxOutput(model?: string): number {
   const m = model ?? config.model;
+  if (m.includes("fable") || m.includes("mythos")) return 128_000;
   if (m.includes("opus")) return 128_000;
   if (m.includes("haiku")) return 64_000;
   if (m.includes("sonnet")) return 64_000;

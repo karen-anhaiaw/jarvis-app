@@ -33,7 +33,13 @@ export function registerSessionInspectorTools(
     },
     handler: async (input) => {
       const sessionId = (input.session_id as string | undefined) ?? (input.__sessionId as string | undefined) ?? "main";
-      const managed = sessions.get(sessionId);
+      // peek() — NEVER get(): get() lazily creates a session for any unknown
+      // id (phantom with the full default prompt). Inspection must be read-only.
+      // See docs/features/bdd/phantom-sessions.feature (G1).
+      const managed = sessions.peek(sessionId);
+      if (!managed) {
+        return { error: `Session not found: ${sessionId}`, available: sessions.listActive() };
+      }
       const messages = managed.session.getMessages() as unknown[];
       const breakdown = factory.getTokenBreakdown();
 
@@ -79,7 +85,11 @@ export function registerSessionInspectorTools(
       const offset = (input.offset as number | undefined) ?? 0;
       const limit = (input.limit as number | undefined) ?? 20;
 
-      const managed = sessions.get(sessionId);
+      // peek() — NEVER get(): inspection must not create phantom sessions.
+      const managed = sessions.peek(sessionId);
+      if (!managed) {
+        return { error: `Session not found: ${sessionId}`, available: sessions.listActive() };
+      }
       const messages = managed.session.getMessages() as unknown[];
       const slice = messages.slice(offset, offset + limit);
 

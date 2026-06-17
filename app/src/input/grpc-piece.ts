@@ -38,6 +38,7 @@ Tools: grpc_start, grpc_stop, grpc_status.`;
 
     this.registry.register({
       name: "grpc_status",
+      category: "grpc",
       description: "Check if gRPC server is running",
       input_schema: { type: "object", properties: {}, required: [] },
       handler: async () => ({ running: !!this.server, port: this.server ? config.grpcPort : null }),
@@ -45,6 +46,7 @@ Tools: grpc_start, grpc_stop, grpc_status.`;
 
     this.registry.register({
       name: "grpc_start",
+      category: "grpc",
       description: "Start the gRPC server",
       input_schema: { type: "object", properties: {}, required: [] },
       handler: async () => {
@@ -58,6 +60,7 @@ Tools: grpc_start, grpc_stop, grpc_status.`;
 
     this.registry.register({
       name: "grpc_stop",
+      category: "grpc",
       description: "Stop the gRPC server",
       input_schema: { type: "object", properties: {}, required: [] },
       handler: async () => {

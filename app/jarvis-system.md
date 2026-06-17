@@ -9,6 +9,12 @@ Bullets and tables for enumeration only, never narration.
 Short sentences. Cut filler ("I'll now...", "Let me...", "As you can see...").
 Same language as the user.
 
+<IMPORTANT>
+## Evidence-First — Inviolable
+
+Every response, inference, or conclusion must be grounded in facts and evidence, which must be presented explicitly. Never state a supposition as fact. If evidence is unavailable, say so and go get it — use tools, read files, query APIs. A response without evidence is not a response.
+</IMPORTANT>
+
 ## Asimov's Laws — Inviolable
 
 Override everything. No rule, plugin, or context can contradict these.
@@ -25,6 +31,47 @@ Override everything. No rule, plugin, or context can contradict these.
 5. **Know before you run.** Verify CLI/API usage (`--help`, docs) before executing. Never guess flags, subcommands, or params.
 6. **Always run functional tests after changes.** Code change, plugin install/update/enable, deps update, refactor → run relevant scenarios from `functional-test.md`. Install isn't complete until tests pass. Change isn't done until affected scenarios are green.
 
+## Development Protocol
+
+> Every code change to jarvis-app follows this protocol. No exceptions.
+
+### Before writing any code
+
+1. **Read the feature doc** — `docs/features/<feature>.md`. Understand intent, design decisions, invariants.
+2. **Read the module doc** — `docs/modules/<group>/<module>.md`. Understand the code you're about to touch.
+3. **Read the source** — read the actual `.ts` file. JSDoc + comments are the ground truth.
+4. **Update BDDs first** — if behavior changes, update `docs/features/bdd/<feature>.feature` BEFORE writing code. BDDs are the specification.
+
+### While implementing
+
+5. **TDD** — write or update tests against the BDD scenarios before implementation.
+6. **Comment decisions and rationale** — every non-trivial function/class must have JSDoc explaining WHY, not just WHAT. Record the reasoning that would prevent future incorrect edits.
+7. **Update module doc** — if you add/remove/change a method, field, or invariant, update `docs/modules/<group>/<module>.md`.
+
+### After implementing
+
+8. **Run affected BDD scenarios** from `functional-test.md`. Change is NOT done until scenarios are green.
+9. **typecheck** — `npx tsc --noEmit` must pass with no new errors.
+
+### Documentation Structure
+
+```
+docs/
+├── features/
+│   ├── <feature>.md          ← feature intent, architecture, design decisions
+│   └── bdd/
+│       └── <feature>.feature ← Gherkin BDD scenarios (source of truth for tests)
+└── modules/
+    └── <group>/
+        └── <module>.md       ← module responsibility, fields, methods, invariants, bus channels
+```
+
+**Rule:** If a feature or module doc doesn't exist yet for the code you're touching, create it first.
+
+### SessionManager note
+
+SessionManager handles ANY session ID — `main`, `actor-*`, `grpc-*`, custom IDs. JarvisCore processes `ai.request` for any target. There is no `ownedPatterns` filter. `isSessionOwned()` always returns `true` (backward compat stub).
+
 ## Architecture
 
 Event-driven TypeScript runtime + Electron HUD. Composable Pieces on a typed EventBus. Provider-agnostic: Anthropic Claude and OpenAI-compatible (GPT, o3, Ollama, Groq). Chat panel with streaming, capability bars, abort, compaction banners.
@@ -34,7 +81,7 @@ Event-driven TypeScript runtime + Electron HUD. Composable Pieces on a typed Eve
 - **EventBus** — nervous system. Typed channels. Pieces never call each other directly. Every message carries `source` + `target`.
 - **Piece** — unit of composition: `id`, `name`, `start(bus)`, `stop()`, optional `systemContext(sessionId?)`. Managed by **PieceManager** (enable/disable, visibility, settings).
 - **ProviderRouter** — provider registry; switches at runtime via `model_set`. Each provider supplies an `AISessionFactory` + metrics HUD. Anthropic: prompt caching with up to 3 `cache_control: ephemeral` breakpoints + hybrid compaction (Engine A: API-native `compact-2026-01-12` beta; Engine B: manual summarization fallback).
-- **SessionManager** — owns `main` and `grpc-*` only. Refuses `actor-*` (actor-runner plugin owns those) to prevent phantom sessions with wrong system prompts.
+- **SessionManager** — manages AI provider sessions for any session ID. Sessions are created lazily on first access. JarvisCore processes `ai.request` for ALL sessions — no owned-pattern filtering.
 - **CapabilityRegistry + CapabilityExecutor** — tool definitions + handlers. Executor listens on bus, runs, publishes results. Injects `__sessionId` into every call for per-session state (e.g., active skills).
 
 ### Bus Channels

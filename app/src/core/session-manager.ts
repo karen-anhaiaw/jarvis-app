@@ -1,6 +1,7 @@
 // src/core/session-manager.ts
 import type { AISession, AISessionFactory, CreateWithPromptOptions } from "../ai/types.js";
 import type { EventBus } from "./bus.js";
+import type { ProviderRouter } from "../ai/provider.js";
 import { log } from "../logger/index.js";
 import {
   saveConversation,
@@ -14,9 +15,24 @@ type SessionState = "idle" | "processing" | "waiting_tools";
 
 interface ManagedSession {
   session: AISession;
-  state: SessionState;
+  /**
+   * State stack — each push() adds a frame, each pop() removes the top.
+   * The current state is the top of the stack (last element).
+   * An empty stack means idle.
+   *
+   * Invariant: only "processing" and "waiting_tools" are pushed.
+   * "idle" is never a stack frame — it is derived from an empty stack.
+   */
+  stateStack: SessionState[];
   createdAt: number;
   pendingToolCalls?: import("../ai/types.js").CapabilityCall[];
+}
+
+/** Derived state from the stack top, or "idle" if empty. */
+function peekStack(managed: ManagedSession): SessionState {
+  return managed.stateStack.length > 0
+    ? managed.stateStack[managed.stateStack.length - 1]
+    : "idle";
 }
 
 /**
@@ -29,11 +45,20 @@ interface SessionCreationOptions {
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   private factory: AISessionFactory;
+  private providerRouter?: ProviderRouter;
   private currentProvider: string = "anthropic";
   private autoSaveTimer?: ReturnType<typeof setInterval>;
   private ephemeralSessions = new Set<string>();
   private bus?: EventBus;
   private static AUTO_SAVE_INTERVAL_MS = 30_000; // save every 30s
+
+  /**
+   * Global context injector — installed on every session (existing + future).
+   * Set once via setGlobalContextInjector(); applied in get() and getWithPrompt().
+   * This replaces the per-session onSessionCreated approach: a single fn covers
+   * all sessions regardless of when they are created.
+   */
+  private globalContextInjector?: (sessionId: string) => string[] | Promise<string[]>;
 
   /**
    * Tracks creation options per session so we can restore with the right prompt.
@@ -54,9 +79,49 @@ export class SessionManager {
     this.bus = bus;
   }
 
+  /**
+   * Register a global context injector called before every AI request,
+   * for every session. Replaces any previously registered injector.
+   * Also installs it retroactively on all currently loaded sessions.
+   */
+  setGlobalContextInjector(fn: (sessionId: string) => string[] | Promise<string[]>): void {
+    this.globalContextInjector = fn;
+    // Retroactively install on all already-loaded sessions.
+    for (const [, managed] of this.sessions) {
+      this.applyGlobalInjector(managed.session);
+    }
+  }
+
+  private applyGlobalInjector(session: unknown): void {
+    const setter = (session as { setContextInjector?: (fn: (sessionId: string) => string[] | Promise<string[]>) => void }).setContextInjector;
+    log.info({ hasInjector: !!this.globalContextInjector, hasSetter: typeof setter === "function" }, "SessionManager: applyGlobalInjector");
+    if (typeof setter !== "function") return;
+    if (this.globalContextInjector) setter.call(session, this.globalContextInjector);
+  }
+
   /** Set current provider name (needed for save/restore compatibility checks) */
   setProvider(provider: string): void {
     this.currentProvider = provider;
+  }
+
+  /**
+   * Wire the ProviderRouter so sessions can be created with the correct
+   * factory for their target model (cross-provider actors).
+   */
+  setProviderRouter(router: ProviderRouter): void {
+    this.providerRouter = router;
+  }
+
+  /**
+   * Resolve the factory to use for a given model.
+   * If a ProviderRouter is wired and the model belongs to a different provider,
+   * returns that provider's factory instead of the active one.
+   */
+  private factoryFor(model?: string): AISessionFactory {
+    if (model && this.providerRouter) {
+      return this.providerRouter.getFactoryForModel(model);
+    }
+    return this.factory;
   }
 
   /** Start auto-saving conversation state periodically */
@@ -155,10 +220,11 @@ export class SessionManager {
 
       managed = {
         session,
-        state: "idle",
+        stateStack: [],
         createdAt: Date.now(),
       };
       this.sessions.set(sessionId, managed);
+      this.applyGlobalInjector(session);
       log.info({ sessionId, restored: !!restoreMessages }, "SessionManager: created new session");
       this.fireCreated(sessionId, managed);
     }
@@ -166,11 +232,100 @@ export class SessionManager {
   }
 
   /**
+   * Fork an existing session into a new ephemeral session.
+   *
+   * The fork clones the source session's message history so the Anthropic prompt
+   * cache can be reused: cache is keyed by model + identical token prefix, NOT by
+   * sessionId. A fork with the same history and the same restoredSessionId will hit
+   * the cache at ~10% of full-input cost.
+   *
+   * Cache-preservation invariants (PoC 2026-06-11):
+   *   R1: restoredSessionId from source is carried over so metadata.user_id (and
+   *       X-Claude-Code-Session-Id) are identical — same cache key prefix.
+   *   R2: The globalContextInjector is NOT applied to the fork (applyGlobalInjector
+   *       is deliberately skipped). Mnemosyne memories must not bias the classifier.
+   *   R3: getPluginContext uses label — fork gets a different label but plugin
+   *       contexts are label-agnostic in BP2, so BP1 cache remains unaffected.
+   *   R4: highEffort is mirrored from the source via (session as any) cast because
+   *       the field is declared `private readonly` — TS enforcement only, JS allows it.
+   *
+   * The forked session is ephemeral: never persisted, never restored on restart.
+   * MUST be closed after use via sessions.close(newId) to avoid ghost sessions.
+   *
+   * @param sourceId - existing session to clone history from (must exist)
+   * @param newId    - identifier for the fork (must not already exist)
+   * @returns the new ManagedSession
+   * @throws if sourceId is not found or newId already exists
+   */
+  fork(sourceId: string, newId: string): ManagedSession {
+    const source = this.sessions.get(sourceId);
+    if (!source) {
+      throw new Error(`SessionManager.fork: source session '${sourceId}' not found`);
+    }
+    if (this.sessions.has(newId)) {
+      throw new Error(`SessionManager.fork: target session '${newId}' already exists`);
+    }
+
+    const sourceSession = source.session;
+
+    // R1: reuse source's internal sessionId so the Anthropic client sends the
+    //     same X-Claude-Code-Session-Id → cache key prefix matches.
+    const restoredSessionId: string | undefined =
+      (sourceSession as any)._sessionId ?? (sourceSession as any).sessionId ?? undefined;
+
+    // R4: mirror the highEffort flag (private readonly — JS cast is fine)
+    const highEffort: boolean = (sourceSession as any).highEffort ?? false;
+
+    // Create the fork via standard get() — this goes through factory.create()
+    // which sets highEffort based on label (will be false for any non-"main" newId).
+    // We then patch it below (R4).
+    // IMPORTANT: get() calls applyGlobalInjector() — we must undo that (R2).
+    const managed = this.get(newId);
+    const forkedSession = managed.session;
+
+    // Seed with source history
+    forkedSession.setMessages?.(sourceSession.getMessages());
+
+    // R1: override internal session ID so cache key matches source
+    if (restoredSessionId) {
+      (forkedSession as any)._sessionId = restoredSessionId;
+    }
+
+    // R4: mirror effort flag (may differ if source is "main" with highEffort=true)
+    if (highEffort !== ((forkedSession as any).highEffort ?? false)) {
+      (forkedSession as any).highEffort = highEffort;
+    }
+
+    // R2: suppress context injector — fork must not be biased by Mnemosyne memories.
+    //     Undo the injector that get() just installed via applyGlobalInjector().
+    const setter = (forkedSession as {
+      setContextInjector?: (fn: (sessionId: string) => string[] | Promise<string[]>) => void;
+    }).setContextInjector;
+    if (typeof setter === "function") {
+      // Replace the global injector with a no-op so no memories are injected into the fork
+      setter.call(forkedSession, () => []);
+    }
+
+    // Mark ephemeral — fork is never saved to disk, never restored
+    this.setEphemeral(newId, true);
+
+    log.info(
+      { sourceId, newId, messages: sourceSession.getMessages().length, highEffort, restoredSessionId: !!restoredSessionId },
+      "SessionManager: forked session",
+    );
+
+    return managed;
+  }
+
+  /**
    * Get or create a session with custom prompt options.
    * If the session already exists, returns it (prompt options are ignored — they're set at creation).
    * If new, creates with createWithPrompt and optionally restores saved conversation.
+   *
+   * Pass `model` to use the correct provider factory for cross-provider actors
+   * (e.g. an actor with preferred_model: "gpt-4o" when the active provider is Anthropic).
    */
-  getWithPrompt(sessionId: string, options: CreateWithPromptOptions): ManagedSession {
+  getWithPrompt(sessionId: string, options: CreateWithPromptOptions & { model?: string }): ManagedSession {
     let managed = this.sessions.get(sessionId);
     if (managed) return managed;
 
@@ -182,8 +337,9 @@ export class SessionManager {
     const saved = loadConversation(sessionId, this.currentProvider);
     const restoredSessionId = saved?.instanceId ?? (saved as any)?.apiSessionId; // migrate old field
 
-    // Create with custom prompt + stable session id
-    const session = this.factory.createWithPrompt({ ...options, restoredSessionId });
+    // Resolve the factory for the target model (cross-provider actor support)
+    const factory = this.factoryFor(options.model);
+    const session = factory.createWithPrompt({ ...options, restoredSessionId });
 
     if (saved && saved.messages.length > 0) {
       session.setMessages?.(saved.messages);
@@ -195,47 +351,94 @@ export class SessionManager {
 
     managed = {
       session,
-      state: "idle",
+      stateStack: [],
       createdAt: Date.now(),
     };
     this.sessions.set(sessionId, managed);
-    log.info({ sessionId, hasRestore: !!(saved && saved.messages.length > 0) }, "SessionManager: created session with custom prompt");
+    this.applyGlobalInjector(session);
+    log.info({ sessionId, model: options.model, hasRestore: !!(saved && saved.messages.length > 0) }, "SessionManager: created session with custom prompt");
     this.fireCreated(sessionId, managed);
     return managed;
   }
 
-  setState(sessionId: string, state: SessionState): void {
+  /**
+   * Push a new state frame onto the session's stack.
+   * Called at the start of each operation (API call, tool execution).
+   * JarvisCore calls this; never call setState() for new code.
+   */
+  pushState(sessionId: string, state: Exclude<SessionState, "idle">): void {
     const managed = this.sessions.get(sessionId);
-    if (managed) {
-      const prev = managed.state;
-      managed.state = state;
-      // info-level so state transitions are visible without enabling debug.
-      // No-op transitions (idle→idle, processing→processing) are filtered to
-      // avoid noise from defensive callers.
-      if (prev !== state) {
-        log.info({ sessionId, from: prev, to: state }, "SessionManager: state changed");
-      } else {
-        log.trace({ sessionId, state }, "SessionManager: state set (no change)");
-      }
+    if (!managed) return;
+    const prev = peekStack(managed);
+    managed.stateStack.push(state);
+    log.info({ sessionId, pushed: state, stack: managed.stateStack, from: prev }, "SessionManager: state pushed");
+  }
 
-      // Save after each complete turn (when going back to idle) — skip ephemeral sessions
-      if (state === "idle" && !this.ephemeralSessions.has(sessionId)) {
-        this.save(sessionId);
-      }
+  /**
+   * Pop the top state frame from the session's stack.
+   * Called when an operation completes (API response, tool result, abort).
+   * Returns the new top state ("idle" if stack is now empty).
+   */
+  popState(sessionId: string): SessionState {
+    const managed = this.sessions.get(sessionId);
+    if (!managed) return "idle";
+    const popped = managed.stateStack.pop();
+    const next = peekStack(managed);
+    log.info({ sessionId, popped, stack: managed.stateStack, next }, "SessionManager: state popped");
+    // Save on return to idle — turn is complete
+    if (next === "idle" && !this.ephemeralSessions.has(sessionId)) {
+      this.save(sessionId);
     }
+    return next;
+  }
+
+  /**
+   * Abort the current operation: signal the AI provider to stop streaming,
+   * then pop the top frame. Does NOT clear the full stack — only the current
+   * operation is cancelled. The stack returns to whatever was below it.
+   */
+  abort(sessionId: string): SessionState {
+    const managed = this.sessions.get(sessionId);
+    if (!managed) return "idle";
+    managed.session.abort();
+    managed.pendingToolCalls = undefined;
+    const next = this.popState(sessionId);
+    log.info({ sessionId, next }, "SessionManager: aborted, popped state");
+    return next;
   }
 
   getState(sessionId: string): SessionState {
-    return this.sessions.get(sessionId)?.state ?? "idle";
+    const managed = this.sessions.get(sessionId);
+    if (!managed) return "idle";
+    return peekStack(managed);
   }
 
-  abort(sessionId: string): void {
+  /**
+   * @deprecated Use pushState/popState instead.
+   * Kept for backward compatibility with old callers during migration.
+   * Sets state directly by manipulating the stack to match the desired state.
+   */
+  setState(sessionId: string, state: SessionState): void {
     const managed = this.sessions.get(sessionId);
-    if (managed) {
-      managed.session.abort();
-      managed.pendingToolCalls = undefined;
-      managed.state = "idle";
-      log.info({ sessionId }, "SessionManager: aborted");
+    if (!managed) return;
+    const prev = peekStack(managed);
+    if (state === "idle") {
+      // Clear the entire stack — caller wants a hard reset to idle
+      if (managed.stateStack.length > 0) {
+        managed.stateStack.length = 0;
+        log.info({ sessionId, from: prev }, "SessionManager: setState(idle) — stack cleared");
+        if (!this.ephemeralSessions.has(sessionId)) this.save(sessionId);
+      }
+    } else {
+      // Replace top frame if already in a non-idle state, otherwise push
+      if (managed.stateStack.length > 0) {
+        managed.stateStack[managed.stateStack.length - 1] = state;
+      } else {
+        managed.stateStack.push(state);
+      }
+      if (prev !== state) {
+        log.info({ sessionId, from: prev, to: state }, "SessionManager: setState (legacy)");
+      }
     }
   }
 

@@ -1,5 +1,10 @@
 // src/core/hud-core-node.ts
-// HUD Core Node piece — reads graphRegistry.getTree() and pushes it to the HUD every 500ms.
+// HUD Core Node piece — pushes graphRegistry tree snapshots to the HUD.
+//
+// Previously used a setInterval of 500ms to poll for changes (causing constant re-renders
+// and high CPU in the Electron renderer even when nothing changed).
+// Now subscribes to graphRegistry.onChange() and publishes hud.update ONLY when the tree
+// actually mutates (register/unregister/update/setChildren). Zero publishes at rest.
 //
 // This piece is a pure reader — it never registers/unregisters graph nodes.
 // PieceManager owns core node registration; pieces enrich their nodes with children/meta.
@@ -9,19 +14,17 @@ import type { Piece } from "./piece.js";
 import { graphRegistry } from "./graph-registry.js";
 import { log } from "../logger/index.js";
 
-const UPDATE_INTERVAL_MS = 500;
-
 export class HudCoreNodePiece implements Piece {
   readonly id = "hud-core-node";
   readonly name = "Core Node";
 
   private bus!: EventBus;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private unsubscribe: (() => void) | null = null;
 
   async start(bus: EventBus): Promise<void> {
     this.bus = bus;
 
-    // Register HUD panel
+    // Register HUD panel and hydrate with the initial tree snapshot
     this.bus.publish({
       channel: "hud.update",
       source: this.id,
@@ -39,8 +42,8 @@ export class HudCoreNodePiece implements Piece {
       },
     });
 
-    // Push tree updates periodically
-    this.timer = setInterval(() => {
+    // Subscribe to registry mutations — publish only when something actually changes
+    this.unsubscribe = graphRegistry.onChange(() => {
       this.bus.publish({
         channel: "hud.update",
         source: this.id,
@@ -48,15 +51,15 @@ export class HudCoreNodePiece implements Piece {
         pieceId: this.id,
         data: { tree: graphRegistry.getTree() },
       });
-    }, UPDATE_INTERVAL_MS);
+    });
 
-    log.info("HudCoreNodePiece: started");
+    log.info("HudCoreNodePiece: started (event-driven, no polling)");
   }
 
   async stop(): Promise<void> {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
     }
     this.bus?.publish({
       channel: "hud.update",

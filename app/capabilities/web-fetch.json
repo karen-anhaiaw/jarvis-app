@@ -1,15 +1,28 @@
 {
   "name": "web_fetch",
+  "category": "web",
   "description": "Fetch a web page and return its content as readable text (HTML converted to markdown). Use to read documentation, articles, or any public URL.",
   "type": "script",
   "command": "bash",
-  "args": ["capabilities/scripts/web-fetch.sh", "${url}", "${max_length}"],
+  "args": [
+    "capabilities/scripts/web-fetch.sh",
+    "${url}",
+    "${max_length}"
+  ],
   "input_schema": {
     "type": "object",
     "properties": {
-      "url": { "type": "string", "description": "The URL to fetch" },
-      "max_length": { "type": "number", "description": "Maximum characters to return (default: 10000, max: 50000)" }
+      "url": {
+        "type": "string",
+        "description": "The URL to fetch"
+      },
+      "max_length": {
+        "type": "number",
+        "description": "Maximum characters to return (default: 10000, max: 50000)"
+      }
     },
-    "required": ["url"]
+    "required": [
+      "url"
+    ]
   }
 }

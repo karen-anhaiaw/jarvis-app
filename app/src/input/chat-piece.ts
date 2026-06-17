@@ -6,7 +6,10 @@ import type { AIRequestMessage, AIStreamMessage, HudUpdateMessage, ChatAnchorMes
 import type { CapabilityRegistry } from "../capabilities/registry.js";
 import type { SessionManager } from "../core/session-manager.js";
 import { log } from "../logger/index.js";
+import { DEFAULT_SESSION } from "../core/constants.js";
 import { newTraceId, preview } from "../logger/trace.js";
+import { consumePendingGreeting, loadConversation } from "../core/conversation-store.js";
+import { config, getProviderForModel } from "../config/index.js";
 
 /**
  * ChatPiece — session-agnostic chat bridge.
@@ -91,7 +94,14 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
           this.broadcast(msg.target, { type: "tool_cancelled", name: msg.toolName, id: msg.toolId, source, session: msg.target });
           break;
         case "aborted":
+          log.info({ sessionId: msg.target }, "ChatPiece: SSE → aborted");
           this.broadcast(msg.target, { type: "aborted", source, session: msg.target });
+          break;
+        // Authoritative session state from the backend stack push/pop.
+        // Forwarded verbatim so the frontend can use it as ground truth.
+        case "session_state" as any:
+          log.info({ sessionId: msg.target, state: (msg as any).state }, "ChatPiece: SSE → session_state");
+          this.broadcast(msg.target, { type: "session_state", state: (msg as any).state, session: msg.target });
           break;
         case "compaction":
           this.broadcast(msg.target, {
@@ -114,6 +124,20 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
             engine: (msg as any).compactionStart?.engine,
             tokensBefore: (msg as any).compactionStart?.tokensBefore,
             reason: (msg as any).compactionStart?.reason,
+            source,
+            session: msg.target,
+          });
+          break;
+        // compaction_failed is published by JarvisCore / main.ts runCompaction
+        // when Engine B fails (summarizer error, empty summary, backup write
+        // failure). History is preserved — the UI replaces the pending banner
+        // with a failure entry. Not in the public AIStreamMessage union — cast.
+        case "compaction_failed" as any:
+          this.broadcast(msg.target, {
+            type: "compaction_failed",
+            engine: (msg as any).compactionFailed?.engine,
+            tokensBefore: (msg as any).compactionFailed?.tokensBefore,
+            reason: (msg as any).compactionFailed?.reason,
             source,
             session: msg.target,
           });
@@ -160,6 +184,16 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
           break;
         }
       }
+    });
+
+    // system.event "router.switch" → SSE model_changed for ModelPicker.
+    // Emitted by ModelRouter whenever the effective model changes for a session.
+    // Allows ModelPicker to go event-driven instead of polling /chat/session-info.
+    this.bus.subscribe("system.event", (msg: any) => {
+      if (msg.event !== "router.switch") return;
+      const { sessionId, toModel } = msg.data ?? {};
+      if (!sessionId || !toModel) return;
+      this.broadcast(sessionId, { type: "model_changed", model: toModel, session: sessionId });
     });
 
     // chat.timeline → typed SSE bridge for per-session timeline entries.
@@ -221,14 +255,14 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
     this.bus.publish({
       channel: "hud.update", source: this.id, action: "add", pieceId: "chat-output",
       piece: { pieceId: "chat-output", type: "panel", name: "Chat", status: "running",
-        data: { sessionId: "main", assistantLabel: "JARVIS" },
+        data: { sessionId: DEFAULT_SESSION, assistantLabel: "JARVIS" },
         position: { x: 10, y: 480 }, size: { width: 1660, height: 280 } },
     });
 
     this.bus.publish({
       channel: "hud.update", source: this.id, action: "add", pieceId: "chat-input",
       piece: { pieceId: "chat-input", type: "panel", name: "Input", status: "running",
-        data: { sessionId: "main", assistantLabel: "JARVIS" },
+        data: { sessionId: DEFAULT_SESSION, assistantLabel: "JARVIS" },
         position: { x: 10, y: 768 }, size: { width: 1660, height: 44 } },
     });
 
@@ -316,8 +350,14 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
           slashCmd.handler(cmdArgs?.trim() ?? "", { sessionId: sid }).then((result) => {
             if (result.message) this.broadcast(sid, { type: "done", fullText: result.message, source: "system", session: sid });
             if (result.inject) log.info({ cmd: cmdName, injectLength: result.inject.length }, "ChatPiece: slash command injected content");
+            // Slash commands never reach JarvisCore, so no session_state:idle is
+            // ever emitted for them. The UI sets isThinking=true on the 'user'
+            // event and ONLY session_state clears it (done doesn't, by design) —
+            // without this, the chat shows "thinking..." forever after any slash.
+            this.broadcast(sid, { type: "session_state", state: "idle", session: sid });
           }).catch((err) => {
             this.broadcast(sid, { type: "error", error: `Slash command error: ${err}`, source: "system", session: sid });
+            this.broadcast(sid, { type: "session_state", state: "idle", session: sid });
           });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true }));
@@ -356,10 +396,44 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
     const pool = this.streamClients.get(sid)!;
     pool.add(res);
 
+    // Heartbeat — SSE comment every 15s to prevent the socket from being
+    // silently closed by Chromium/OS when no events flow for a long period.
+    // Without this, an idle session drops the connection and the front
+    // loses all events (messages, thinking state, tool calls) until reload.
+    const heartbeat = setInterval(() => {
+      try { res.write(": heartbeat\n\n"); } catch { clearInterval(heartbeat); }
+    }, 15_000);
+
     req.on("close", () => {
+      clearInterval(heartbeat);
       pool.delete(res);
       if (pool.size === 0) this.streamClients.delete(sid);
     });
+  }
+
+  /** GET /chat/session-info?sessionId=X — model and provider for the session. */
+  handleSessionInfo(req: IncomingMessage, res: ServerResponse): void {
+    const sid = this.parseQuerySessionId(req);
+    if (!sid) { this.send400(res, "sessionId query param is required"); return; }
+    try {
+      // peek() — NEVER get(): get() materializes a ghost session (main's full
+      // system prompt, wrong role) for unknown ids, and the ModelPicker polls
+      // this endpoint every 5s for every open panel. Same guard rationale as
+      // handleHistory's has() check below.
+      const managed = this.sessions?.peek(sid);
+      const session = managed?.session as any;
+      // Effective model = peekModel() (next ?? sticky ?? base). For sessions
+      // not yet materialized, report the provider default — what a brand-new
+      // session would use — so the HUD shows the truthful upcoming model
+      // instead of a placeholder.
+      const model = session?.peekModel?.() ?? session?.stickyModelOverride ?? config.model ?? null;
+      const provider = session?.constructor?.name?.replace("Session", "").toLowerCase() ?? null;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ model, provider }));
+    } catch {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ model: null, provider: null }));
+    }
   }
 
   /** GET /chat/history?sessionId=X — parsed session messages. */
@@ -374,13 +448,31 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
         return;
       }
       if (!this.sessions.has(sid)) {
+        // Session not yet materialized — try to hydrate from disk so the chat
+        // panel can show history on first open without triggering a full session
+        // creation (which would load the system prompt, start pieces, etc.).
+        log.info({ sid }, "ChatPiece.handleHistory: session not in memory, trying disk");
+        const provider = getProviderForModel(config.model);
+        const saved = loadConversation(sid, provider);
+        if (!saved || saved.messages.length === 0) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("[]");
+          return;
+        }
+        const entries = parseMessagesToHistory(saved.messages as any[]);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end("[]");
+        res.end(JSON.stringify(entries));
         return;
       }
       const managed = this.sessions.get(sid);
       const rawMessages = managed.session.getMessages() as any[];
       const entries = parseMessagesToHistory(rawMessages);
+      // Append startup greeting if one is pending (set by consumeStartupPrompt on boot).
+      // Consumed once so subsequent history requests don't repeat it.
+      const greeting = sid === DEFAULT_SESSION ? consumePendingGreeting() : null;
+      if (greeting) {
+        entries.push({ kind: "message", role: "assistant", text: greeting, source: "jarvis" });
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(entries));
     } catch (e) {
