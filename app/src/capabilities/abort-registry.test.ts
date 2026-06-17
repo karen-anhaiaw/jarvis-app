@@ -50,13 +50,13 @@ describe("AbortRegistry", () => {
 
   it("abort is session-isolated", () => {
     const s1 = reg.register("main", "tool-1");
-    const s9 = reg.register("actor-alice", "tool-9");
+    const s9 = reg.register("bg-alice", "tool-9");
 
     reg.abortSession("main");
 
     expect(s1.aborted).toBe(true);
     expect(s9.aborted).toBe(false);
-    expect(reg.activeCount("actor-alice")).toBe(1);
+    expect(reg.activeCount("bg-alice")).toBe(1);
   });
 
   it("abort on a session with no tools is a safe no-op", () => {

@@ -106,7 +106,7 @@ export class SessionManager {
 
   /**
    * Wire the ProviderRouter so sessions can be created with the correct
-   * factory for their target model (cross-provider actors).
+   * factory for their target model (cross-provider plugin-owned sessions).
    */
   setProviderRouter(router: ProviderRouter): void {
     this.providerRouter = router;
@@ -322,8 +322,9 @@ export class SessionManager {
    * If the session already exists, returns it (prompt options are ignored — they're set at creation).
    * If new, creates with createWithPrompt and optionally restores saved conversation.
    *
-   * Pass `model` to use the correct provider factory for cross-provider actors
-   * (e.g. an actor with preferred_model: "gpt-4o" when the active provider is Anthropic).
+   * Pass `model` to use the correct provider factory for cross-provider
+   * plugin-owned sessions (e.g. a plugin requesting preferred_model: "gpt-4o"
+   * while the active provider is Anthropic).
    */
   getWithPrompt(sessionId: string, options: CreateWithPromptOptions & { model?: string }): ManagedSession {
     let managed = this.sessions.get(sessionId);
@@ -337,7 +338,7 @@ export class SessionManager {
     const saved = loadConversation(sessionId, this.currentProvider);
     const restoredSessionId = saved?.instanceId ?? (saved as any)?.apiSessionId; // migrate old field
 
-    // Resolve the factory for the target model (cross-provider actor support)
+    // Resolve the factory for the target model (cross-provider plugin sessions)
     const factory = this.factoryFor(options.model);
     const session = factory.createWithPrompt({ ...options, restoredSessionId });
 
@@ -533,7 +534,7 @@ export class SessionManager {
     });
   }
 
-  /** List saved session labels from disk (e.g. ["main", "actor-alice", "actor-bob"]) */
+  /** List saved session labels from disk (e.g. ["main", "bg-alice", "bg-bob"]) */
   listSaved(prefix?: string): string[] {
     const all = listSavedSessions();
     return prefix ? all.filter(id => id.startsWith(prefix)) : all;

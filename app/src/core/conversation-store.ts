@@ -6,7 +6,7 @@ import { log } from "../logger/index.js";
 import { jarvisPath } from "./paths.js";
 
 export interface StoredConversation {
-  /** Stable label for this session (e.g. "main", "actor-jarvis"). */
+  /** Stable label for this session (e.g. "main" or any plugin-owned sessionId). */
   sessionId: string;
   /** Stable UUID for this session — sent as X-Claude-Code-Session-Id on every API call.
    *  Generated once on first save, preserved across restarts. */

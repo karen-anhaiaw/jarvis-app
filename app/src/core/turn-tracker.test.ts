@@ -173,12 +173,12 @@ describe("TurnTracker — idempotence and guards", () => {
 
   it("concurrent sessions track independent turns", () => {
     tracker.begin("main", "tA", "chat-input");
-    tracker.begin("actor-alice", "tB", "bus");
+    tracker.begin("bg-alice", "tB", "bus");
     tracker.complete("main", "tA");
 
     expect(summaries()).toHaveLength(1);
     expect(summaries()[0].traceId).toBe("tA");
-    expect(tracker.openTraceId("actor-alice")).toBe("tB");
+    expect(tracker.openTraceId("bg-alice")).toBe("tB");
   });
 
   it("never throws when publish fails", () => {

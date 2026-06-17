@@ -15,7 +15,7 @@
 //
 // Design choices:
 //   - Uses the existing AnthropicSessionFactory.createWithPrompt() — same
-//     code path as actor sessions, but we don't register the worker with the
+//     code path as plugin-owned sessions, but we don't register the worker with the
 //     SessionManager (it's truly ephemeral, lifecycle scoped to one call).
 //   - Tools available to the worker = same tool registry as the main session.
 //     The role's system prompt should constrain the worker to read-only ops

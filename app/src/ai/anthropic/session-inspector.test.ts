@@ -85,12 +85,12 @@ describe("session-inspector phantom guard (G1)", () => {
   });
 
   it("defaults to the calling session (__sessionId) when session_id is omitted", async () => {
-    const { sessions, factory } = makeMocks({ "actor-alice": { messages: [{ role: "user" }] } });
+    const { sessions, factory } = makeMocks({ "bg-alice": { messages: [{ role: "user" }] } });
     registerSessionInspectorTools(registry, sessions as any, factory as any);
 
-    const out = await callTool(registry, "session_info", { __sessionId: "actor-alice" });
+    const out = await callTool(registry, "session_info", { __sessionId: "bg-alice" });
 
-    expect(out.sessionId).toBe("actor-alice");
+    expect(out.sessionId).toBe("bg-alice");
     expect(out.messageCount).toBe(1);
   });
 });

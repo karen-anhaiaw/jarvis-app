@@ -43,14 +43,15 @@ export class AnthropicSessionFactory implements AISessionFactory {
   }
 
   /**
-   * Build system blocks for actor sessions.
-   * Actors get: jarvis.md (CLAUDE.md) instructions + actor-system.md + role.
+   * Build system blocks for sessions created with a custom prompt override
+   * (typically plugin-owned sessions). Composition: jarvis.md (CLAUDE.md)
+   * instructions + caller-provided basePromptOverride + roleContext.
    * No jarvis-system.md, no core contexts, no plugin instructions (those are JARVIS-specific).
    */
   private buildCustomSystemBlocks(basePromptOverride?: string, roleContext?: string, sessionId?: string): TextBlockParam[] {
     const blocks: TextBlockParam[] = [];
 
-    // Block 0: jarvis.md (CLAUDE.md) + actor-system.md + role
+    // Block 0: jarvis.md (CLAUDE.md) + caller's basePromptOverride + role
     const parts: string[] = [];
 
     const instructions = this.getInstructions();
@@ -98,8 +99,8 @@ export class AnthropicSessionFactory implements AISessionFactory {
       bus: this.bus,
       restoredSessionId,
       // Effort policy (F3.12): the human-facing default session gets the top
-      // tier; actors/subagents run "high". Policy lives HERE — the provider
-      // session must not interpret magic label names.
+      // tier; background plugin-owned sessions run "high". Policy lives HERE —
+      // the provider session must not interpret magic label names.
       highEffort: label === DEFAULT_SESSION,
     });
   }

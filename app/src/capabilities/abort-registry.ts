@@ -34,7 +34,7 @@ export class AbortRegistry {
   /**
    * Create and track an AbortController for one tool execution.
    *
-   * @param sessionId - Owning session ("main", "actor-alice", ...)
+   * @param sessionId - Owning session ("main" or any plugin-owned sessionId)
    * @param toolUseId - Tool use id from the provider (CapabilityCall.id).
    *                    When absent (defensive), a unique synthetic key is used
    *                    so two anonymous registrations never collide.

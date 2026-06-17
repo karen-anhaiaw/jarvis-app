@@ -14,8 +14,8 @@ import { config, getProviderForModel } from "../config/index.js";
 /**
  * ChatPiece — session-agnostic chat bridge.
  *
- * The core chat piece does NOT know about "main", "actor-*" or any specific
- * session id. It receives a sessionId as an opaque string on every request and
+ * The core chat piece does NOT know about "main" or any plugin-owned session
+ * id pattern. It receives a sessionId as an opaque string on every request and
  * routes SSE clients, history lookups and ai.request publishes to/for that
  * exact session id.
  *
@@ -243,7 +243,7 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
     // NOTE: We deliberately do NOT mirror ai.request here as type:"user".
     // The timeline must reflect "what was sent to the API", not "what
     // arrived in the bus". The session owner (JarvisCore for main/grpc-*,
-    // or any plugin owning custom sessionIds like actor-*) is responsible
+    // or any plugin owning custom sessionIds) is responsible
     // for emitting `prompt_dispatched` (handled above) at the moment a
     // prompt is actually sent to the model — which is also the moment we
     // want the user entry to appear in the timeline. Until then, a queued
@@ -368,7 +368,7 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
 
     // ChatPiece is plugin-agnostic. It does NOT mirror type:"user" itself.
     // The session OWNER (JarvisCore for main/grpc-*, or any plugin that
-    // owns actor-* / custom session prefixes) is responsible for emitting
+    // owns custom session prefixes) is responsible for emitting
     // `prompt_dispatched` (timeline) when the prompt actually goes to the
     // API and `pending_queue` (queue cards) while it waits. Frontend just
     // renders whatever SSE delivers.

@@ -9,7 +9,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
  * Contract:
  *   - ChatPiece is plugin-agnostic. It NEVER mirrors type:"user" itself.
  *   - The session OWNER (JarvisCore for main/grpc-*, or any plugin owning
- *     custom sessionIds like actor-*) is responsible for emitting
+ *     custom sessionIds) is responsible for emitting
  *     `prompt_dispatched` (timeline) when the prompt actually goes to the
  *     model and `pending_queue` (queue cards) while it waits.
  *   - ChatPiece only publishes `ai.request` on the bus and lets the owner
@@ -63,20 +63,20 @@ describe("ChatPiece.handleSend — session-agnostic routing", () => {
     expect(sent.statusCode).toBe(200);
   });
 
-  it("does NOT broadcast type:'user' for plugin-owned sessions either (actor-*)", async () => {
-    // Same contract as core-owned sessions: the plugin owner (actor-runner)
-    // is responsible for emitting prompt_dispatched. ChatPiece stays neutral.
+  it("does NOT broadcast type:'user' for plugin-owned sessions either", async () => {
+    // Same contract as core-owned sessions: the plugin owner (e.g. a
+    // session-orchestrator) emits prompt_dispatched. ChatPiece stays neutral.
     const { bus, published } = makeBus();
     const piece = new ChatPiece();
     (piece as any).bus = bus;
 
     const broadcastSpy = vi.spyOn(piece as any, "broadcast");
 
-    const { req, res, sent } = makeReqRes({ sessionId: "actor-jarvis-imp", prompt: "fix the bug" });
+    const { req, res, sent } = makeReqRes({ sessionId: "bg-jarvis-imp", prompt: "fix the bug" });
     await piece.handleSend(req, res);
 
     const aiReq = published.find((m: any) => m.channel === "ai.request");
-    expect(aiReq.target).toBe("actor-jarvis-imp");
+    expect(aiReq.target).toBe("bg-jarvis-imp");
     expect(aiReq.text).toBe("fix the bug");
 
     const userBroadcasts = broadcastSpy.mock.calls.filter(
@@ -95,7 +95,7 @@ describe("ChatPiece.handleSend — session-agnostic routing", () => {
     piece.setOwnedSessionMatcher((sid) => sid === "main");
 
     const broadcastSpy = vi.spyOn(piece as any, "broadcast");
-    const { req, res } = makeReqRes({ sessionId: "actor-x", prompt: "hi" });
+    const { req, res } = makeReqRes({ sessionId: "bg-x", prompt: "hi" });
     await piece.handleSend(req, res);
 
     const userBroadcasts = broadcastSpy.mock.calls.filter(
@@ -172,7 +172,7 @@ describe("ChatPiece.handleSessionInfo — ghost-session guard", () => {
     const managed = { session: { stickyModelOverride: "claude-opus-4-8" } };
     (piece as any).sessions = { peek: () => managed, get: vi.fn() };
 
-    const { req, res, sent } = makeGetReqRes("/chat/session-info?sessionId=actor-x");
+    const { req, res, sent } = makeGetReqRes("/chat/session-info?sessionId=bg-x");
     piece.handleSessionInfo(req, res);
 
     const body = JSON.parse(sent.body);

@@ -35,7 +35,7 @@ export class OpenAISessionFactory implements AISessionFactory {
     log.info("OpenAISessionFactory: bus wired");
   }
 
-  /** Create a session with custom system prompt overrides (actor mode) */
+  /** Create a session with custom system prompt overrides (custom-prompt mode) */
   createWithPrompt(options: CreateWithPromptOptions): AISession {
     const { label, basePromptOverride, roleContext } = options;
     const basePrompt = this.getSystemPrompt();

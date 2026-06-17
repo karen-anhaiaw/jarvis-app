@@ -23,15 +23,15 @@ describe("buildDispatchText — inter-session attribution & reply routing", () =
   });
 
   it("plugin notification without replyTo stays plain (source is not a session)", () => {
-    const r = buildDispatchText({ text: "memory saved", source: "mnemosyne", sourceIsLiveSession: false });
+    const r = buildDispatchText({ text: "memory saved", source: "plugin-source", sourceIsLiveSession: false });
     expect(r).toBe("memory saved");
   });
 
   it("inter-session WITH replyTo carries origin + reply routing", () => {
-    const r = buildDispatchText({ text: "What is 2+2?", source: "actor-alice", replyTo: "main", sourceIsLiveSession: true });
+    const r = buildDispatchText({ text: "What is 2+2?", source: "bg-alice", replyTo: "main", sourceIsLiveSession: true });
     const b = blocks(r)!;
     expect(b).toHaveLength(2);
-    expect(b[0].text).toContain('sent by session "actor-alice"');
+    expect(b[0].text).toContain('sent by session "bg-alice"');
     expect(b[0].text).toContain('bus_publish');
     expect(b[0].text).toContain('target: "main"');
     expect(b[1].text).toBe("What is 2+2?");
@@ -49,10 +49,10 @@ describe("buildDispatchText — inter-session attribution & reply routing", () =
   it("inter-session WITHOUT replyTo carries origin attribution only (NEW)", () => {
     // The bare-"pong" fix: fire-and-forget from a live session must identify
     // the sender and must NOT instruct any reply.
-    const r = buildDispatchText({ text: "pong", source: "actor-alpha", sourceIsLiveSession: true });
+    const r = buildDispatchText({ text: "pong", source: "bg-alpha", sourceIsLiveSession: true });
     const b = blocks(r)!;
     expect(b).toHaveLength(2);
-    expect(b[0].text).toContain('sent by session "actor-alpha"');
+    expect(b[0].text).toContain('sent by session "bg-alpha"');
     expect(b[0].text).toContain("fire-and-forget");
     expect(b[0].text).not.toContain("bus_publish");
     expect(b[1].text).toBe("pong");
@@ -60,7 +60,7 @@ describe("buildDispatchText — inter-session attribution & reply routing", () =
 
   it("reminders compose with the preamble in block 1", () => {
     const reminder = "<system-reminder>\nbe brief\n</system-reminder>\n\n";
-    const r = buildDispatchText({ text: "hi", source: "actor-alice", replyTo: "main", reminderBlock: reminder, sourceIsLiveSession: true });
+    const r = buildDispatchText({ text: "hi", source: "bg-alice", replyTo: "main", reminderBlock: reminder, sourceIsLiveSession: true });
     const b = blocks(r)!;
     expect(b[1].text).toBe(reminder + "hi");
   });

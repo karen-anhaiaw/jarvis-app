@@ -17,7 +17,7 @@
 //   4. Sticky model                          → no change, no banner, no cost.
 //
 // State:
-//   Map<sessionId, SessionRoute> — independent sticky per session (main, actor-*, grpc-*).
+//   Map<sessionId, SessionRoute> — independent sticky per session (main, grpc-*, plugin-owned).
 //   Persisted via conversation-store hooks (saveRouteState/loadRouteState).
 //
 // Bus events emitted:
@@ -340,8 +340,8 @@ export class ModelRouterPiece implements Piece {
     // Apply override on the target session — or queue it if the session
     // doesn't exist yet (first turn). The onSessionCreated hook will drain.
     //
-    // We use STICKY (not next-only) override here because the actor-runner
-    // plugin and other consumers may bypass the bus on continuation turns
+    // We use STICKY (not next-only) override here because a session-orchestrator
+    // plugin (and other consumers) may bypass the bus on continuation turns
     // (calling session.sendAndStream() / session.continueAndStream() directly).
     // A "next-only" override would be consumed by turn 1 and lost on turn 2.
     // Sticky persists until the next routing decision changes it — which is

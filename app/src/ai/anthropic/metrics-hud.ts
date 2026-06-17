@@ -41,8 +41,8 @@ interface SessionBucket {
   /** Timestamp of the last usage event that set lastModel. Drives the
    *  "most recent model across buckets" aggregation — without it, the
    *  aggregate picked the last-INSERTED bucket's model (Map iteration
-   *  order), showing stale models when background sessions (actors,
-   *  mnemosyne) ran on a different model than the active chat session. */
+   *  order), showing stale models when background plugin-owned sessions
+   *  ran on a different model than the active chat. */
   lastModelAt: number;
   requestHistory: RequestSnapshot[];
 }
@@ -60,7 +60,7 @@ export class AnthropicMetricsHud implements Piece {
   private bus!: EventBus;
   private unsubs: Array<() => void> = [];
 
-  /** Per-session buckets. Key = sessionId ("main", "actor-alice", etc). */
+  /** Per-session buckets. Key = sessionId ("main" or any plugin-owned sessionId). */
   private buckets = new Map<string, SessionBucket>();
 
   /** Current HUD scope: "ALL" (aggregate) or a specific sessionId. */
@@ -393,8 +393,8 @@ export class AnthropicMetricsHud implements Piece {
 
     // lastModel = model from the bucket with the most RECENT usage event.
     // Comparing by lastModelAt (not Map insertion order) — otherwise any
-    // later-created background bucket (actor, mnemosyne) would shadow the
-    // active session's model in the HUD display.
+    // later-created background bucket (any plugin-owned session) would
+    // shadow the active session's model in the HUD display.
     let newestAt = -1;
     for (const b of this.buckets.values()) {
       if (b.lastModel && b.lastModelAt > newestAt) {

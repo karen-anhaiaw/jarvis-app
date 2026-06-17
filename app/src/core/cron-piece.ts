@@ -48,7 +48,7 @@ interface CronJob {
 
 // ─── Fire-time target validation (phantom prevention, G2) ──────────────────
 // WHY: cron targets are persisted at creation. If the target session dies
-// (killed actor, old grpc session), publishing ai.request to it would make
+// (killed plugin session, old grpc session), publishing ai.request to it would make
 // JarvisCore lazily CREATE a phantom session with the DEFAULT system prompt
 // — not the role the id originally had — which then persists to disk and
 // resurrects on every subsequent fire. Pure functions so they are unit-

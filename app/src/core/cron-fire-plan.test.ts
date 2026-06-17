@@ -11,11 +11,11 @@ describe("cron fire-time target validation (G2)", () => {
   // ── planPromptFire ──────────────────────────────────────────────────────
 
   it("fires for a live target", () => {
-    expect(planPromptFire("actor-alice", aliveSet(["actor-alice"]))).toEqual({ action: "fire" });
+    expect(planPromptFire("bg-alice", aliveSet(["bg-alice"]))).toEqual({ action: "fire" });
   });
 
   it("skips with warning for a dead target", () => {
-    expect(planPromptFire("actor-dead", aliveSet([]))).toEqual({ action: "skip-warn" });
+    expect(planPromptFire("bg-dead", aliveSet([]))).toEqual({ action: "skip-warn" });
   });
 
   it("always fires for the default session even when not yet materialized", () => {
@@ -27,12 +27,12 @@ describe("cron fire-time target validation (G2)", () => {
   // ── planDelegateReply ───────────────────────────────────────────────────
 
   it("delivers to a live reply_to without redirect", () => {
-    expect(planDelegateReply("actor-alice", aliveSet(["actor-alice"])))
-      .toEqual({ target: "actor-alice", redirected: false });
+    expect(planDelegateReply("bg-alice", aliveSet(["bg-alice"])))
+      .toEqual({ target: "bg-alice", redirected: false });
   });
 
   it("redirects a dead reply_to to the default session", () => {
-    expect(planDelegateReply("actor-dead", aliveSet([])))
+    expect(planDelegateReply("bg-dead", aliveSet([])))
       .toEqual({ target: DEFAULT_SESSION, redirected: true });
   });
 

@@ -31,7 +31,7 @@ export type CapabilityExecutionListener = (toolName: string, isError: boolean, t
  * hardcoding "main".
  */
 export interface SlashCommandContext {
-  /** Session that issued the command ("main", "actor-alice", etc). */
+  /** Session that issued the command ("main" or any plugin-owned sessionId). */
   sessionId?: string;
 }
 

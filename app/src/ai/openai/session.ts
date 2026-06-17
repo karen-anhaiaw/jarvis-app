@@ -32,7 +32,7 @@ export class OpenAISession implements AISession {
   private nextModelOverride?: string;
   private stickyModelOverride?: string;
 
-  // ── Tool filtering (actor support) ───────────────────────────────────
+  // ── Tool filtering (plugin-session support) ───────────────────────────
   private toolFilter?: (toolName: string) => boolean;
 
   // ── Context injector (Mnemosyne support) ─────────────────────────────

@@ -197,7 +197,7 @@ export function installDeathWatch(opts: DeathWatchOptions = {}): void {
 
   // ─── unhandledRejection ─────────────────────────────────────────────
   // Some async chain rejected without a .catch. By default, log + continue —
-  // these are usually recoverable (one stray actor crash shouldn't kill JARVIS).
+  // these are usually recoverable (one stray plugin-session crash shouldn't kill JARVIS).
   // Set exitOnUnhandledRejection:true to be strict.
   process.on("unhandledRejection", (reason, promise) => {
     try {

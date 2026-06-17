@@ -125,7 +125,7 @@ export interface AISession {
   peekModel?(): string;
 
   // ─── Per-session tool filtering (optional) ──────────────────────────────
-  // Plugins (e.g. actor-runner) can restrict the visible tool surface by role.
+  // Plugins (e.g. a session-orchestrator) can restrict the visible tool surface by role.
   // Implemented by wrapping `getTools()` — the filter is consulted on every
   // API call, so tools registered later still respect it.
 

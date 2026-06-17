@@ -46,8 +46,8 @@ import { TurnTracker } from "./turn-tracker.js";
 //     (legacy contract preserved — plugins that request answers rely on it).
 //   - a LIVE-SESSION source WITHOUT replyTo → origin-only preamble marking it
 //     fire-and-forget (the "bare pong" fix; no reply instruction).
-//   - non-session sources without replyTo (voice-stt, canvas, mnemosyne,
-//     system, grpc, plugins) → plain text, unchanged.
+//   - non-session sources without replyTo (e.g. system events, grpc, voice
+//     stream, canvas updates, plugin notifications) → plain text, unchanged.
 
 export function buildDispatchText(opts: {
   text: string;
@@ -726,9 +726,9 @@ export class JarvisCore implements Piece {
     // sourceIsLiveSession: bus_publish stamps the caller's sessionId as source,
     // so a live-session source = session-to-session traffic. It must carry
     // origin attribution even without replyTo — otherwise the receiving LLM
-    // mistakes it for human input (evidenced 2026-06-10: bare "pong" from an
-    // actor arrived in main with zero context). Non-session sources
-    // (voice-stt, canvas, mnemosyne, system, grpc) keep legacy plain delivery.
+    // mistakes it for human input (evidenced 2026-06-10: bare "pong" from a
+    // plugin-owned session arrived in main with zero context). Non-session sources (system,
+    // grpc, voice stream, canvas, plugin notifications) keep legacy plain delivery.
     const dispatchText = buildDispatchText({
       text,
       source: msg.source,
@@ -1495,7 +1495,7 @@ export class JarvisCore implements Piece {
   /**
    * Announce that one or more prompts are about to be sent to the AI for
    * this session. Frontend renders one user entry per item, using each
-   * preserved source so labels (chat, actor-*, grpc, etc.) stay accurate.
+   * preserved source so labels (chat, grpc, plugin-owned sessionIds, etc.) stay accurate.
    *
    * Emitted from two places:
    *  - handlePrompt() when the session was idle: a single item.
@@ -1591,14 +1591,15 @@ export class JarvisCore implements Piece {
    *
    * Rationale (decided 2026-06-01):
    *   The central reactor (the orange "JARVIS THINKING" core) historically
-   *   reflected the AGGREGATED state of every active session — any actor
-   *   processing a request lit the core. That was confusing because each
-   *   actor already has its own indicator in the Actor Pool panel, and the
-   *   core implied that "main" was busy when it wasn't.
+   *   reflected the AGGREGATED state of every active session — any background
+   *   session processing a request lit the core. That was confusing because
+   *   each background session has its own indicator in whatever panel the
+   *   owning plugin renders, and the core implied "main" was busy when it
+   *   wasn't.
    *
-   *   New rule: the reactor mirrors ONLY the `main` session. Actor activity
-   *   is surfaced exclusively through the Actor Pool indicators. The core
-   *   is the user's personal "are you thinking about MY request?" signal.
+   *   New rule: the reactor mirrors ONLY the `main` session. Background-session
+   *   activity is surfaced exclusively through plugin-provided indicators.
+   *   The core is the user's personal "are you thinking about MY request?" signal.
    *
    * Priority for main: waiting_tools > processing > online.
    * `main` absent or idle → "online".

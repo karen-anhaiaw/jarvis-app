@@ -21,14 +21,14 @@ describe("planQueueDrain — segmented drain (F2.6)", () => {
   });
 
   it("head with replyTo dispatches solo", () => {
-    const q = [item({ source: "actor-alice", replyTo: "main" }), item({})];
-    const plan = planQueueDrain(q, live(["actor-alice"]));
+    const q = [item({ source: "bg-alice", replyTo: "main" }), item({})];
+    const plan = planQueueDrain(q, live(["bg-alice"]));
     expect(plan).toEqual({ mode: "solo", item: q[0] });
   });
 
   it("head inter-session fire-and-forget (live source) dispatches solo", () => {
-    const q = [item({ source: "actor-alpha" })];
-    const plan = planQueueDrain(q, live(["actor-alpha"]));
+    const q = [item({ source: "bg-alpha" })];
+    const plan = planQueueDrain(q, live(["bg-alpha"]));
     expect(plan).toEqual({ mode: "solo", item: q[0] });
   });
 
@@ -36,10 +36,10 @@ describe("planQueueDrain — segmented drain (F2.6)", () => {
     const q = [
       item({ text: "p1" }),
       item({ text: "p2" }),
-      item({ source: "actor-x", replyTo: "main", text: "r" }),
+      item({ source: "bg-x", replyTo: "main", text: "r" }),
       item({ text: "p3" }),
     ];
-    const plan = planQueueDrain(q, live(["actor-x"]));
+    const plan = planQueueDrain(q, live(["bg-x"]));
     expect(plan.mode).toBe("combine");
     expect((plan as any).items.map((i: QueuedDrainItem) => i.text)).toEqual(["p1", "p2"]);
   });
@@ -52,7 +52,7 @@ describe("planQueueDrain — segmented drain (F2.6)", () => {
   });
 
   it("non-session plugin source without replyTo combines (no attribution needed)", () => {
-    const q = [item({ source: "mnemosyne", text: "memory note" }), item({ text: "user msg" })];
+    const q = [item({ source: "plugin-source", text: "memory note" }), item({ text: "user msg" })];
     const plan = planQueueDrain(q, live([]));
     expect(plan.mode).toBe("combine");
     expect((plan as any).items).toHaveLength(2);

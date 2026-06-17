@@ -5,7 +5,7 @@ import { getMaxOutput } from "./index.js";
  * Regression test for the tool_use truncation bug.
  *
  * Bug: `max_tokens: 8192` in AnthropicSession limited how large a tool_use
- * input JSON could be. When an actor tried write_file with content >~8KB or
+ * input JSON could be. When a plugin session tried write_file with content >~8KB or
  * bash with a large command, the model truncated the JSON mid-stream, the
  * SDK returned `input: {}` or partial args, and capabilities failed with
  * `command is required` / `content is required`.

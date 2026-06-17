@@ -513,7 +513,7 @@ app.on('will-quit', () => {
 });
 
 // On macOS, closing the main window hides it instead of quitting the app.
-// This keeps the Node backend alive so SSE connections, actors, cron jobs,
+// This keeps the Node backend alive so SSE connections, plugin sessions, cron jobs,
 // and Slack hooks survive a "close". The user can reopen via the dock icon.
 // To fully quit, use Cmd+Q or the app menu.
 app.on('window-all-closed', () => {
