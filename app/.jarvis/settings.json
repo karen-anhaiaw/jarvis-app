@@ -71,9 +71,32 @@
       "enabled": true
     },
     "jarvis-plugin-browser": {
-      "repo": "local",
-      "enabled": true,
-      "path": "/Users/giovani.barili/.jarvis/plugins/jarvis-plugin-browser"
+      "repo": "github.com/giovanibarili/jarvis-plugin-browser",
+      "enabled": true
+    },
+    "jarvis-plugin-canvas": {
+      "repo": "github.com/giovanibarili/jarvis-plugin-canvas",
+      "enabled": true
+    },
+    "jarvis-plugin-mnemosyne": {
+      "repo": "github.com/giovanibarili/jarvis-plugin-mnemosyne",
+      "enabled": true
+    },
+    "jarvis-plugin-never-forget": {
+      "repo": "github.com/giovanibarili/jarvis-plugin-never-forget",
+      "enabled": true
+    },
+    "jarvis-plugin-voice": {
+      "repo": "github.com/giovanibarili/jarvis-plugin-voice",
+      "enabled": true
+    },
+    "jarvis-plugin-slack-hook": {
+      "repo": "github.com/giovanibarili/jarvis-plugin-slack-hook",
+      "enabled": true
+    },
+    "jarvis-plugin-kanban": {
+      "repo": "github.com/giovanibarili/jarvis-plugin-kanban",
+      "enabled": true
     }
   },
   "compaction": {
