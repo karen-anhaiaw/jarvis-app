@@ -74,10 +74,18 @@ cat > "$APP_DIR/Contents/MacOS/jarvis" << LAUNCHER
 #!/bin/bash
 # Load shell environment (API keys, PATH, etc.)
 source "\$HOME/.zshrc" 2>/dev/null || source "\$HOME/.bash_profile" 2>/dev/null || true
-JARVIS_DIR="$REPO_DIR/app"
+REPO_DIR="$REPO_DIR"
+JARVIS_DIR="\$REPO_DIR/app"
 export PATH="/opt/homebrew/bin:/usr/local/bin:\$PATH"
+# Redirect this whole shell to the log so bootstrap output is also captured.
+exec > /tmp/jarvis.log 2>&1
+# Sync ~/.jarvis scaffolding + committed defaults from the repo on every boot.
+# Non-fatal: a bootstrap failure must not block the JARVIS launch.
+echo "--- bootstrap ---"
+"\$REPO_DIR/scripts/bootstrap.sh" || echo "(bootstrap failed, continuing)"
+echo "--- jarvis ---"
 cd "\$JARVIS_DIR"
-exec npx tsx src/main.ts > /tmp/jarvis.log 2>&1
+exec npx tsx src/main.ts
 LAUNCHER
 
 chmod +x "$APP_DIR/Contents/MacOS/jarvis"
