@@ -1,31 +1,8 @@
 // src/main.ts
-// Load ~/.jarvis/.env BEFORE any module that reads process.env (Anthropic SDK in
-// session.ts, factories, etc.). Zero-dep: tiny parser, sets keys with override
-// so ~/.jarvis/.env is always the source of truth — wins over stale shell exports.
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
-(function loadDotEnv() {
-  // Canonical: ~/.jarvis/.env. Fallback: app/.env (legacy / tests).
-  const home = process.env.JARVIS_HOME ?? join(homedir(), ".jarvis");
-  const envPath = existsSync(join(home, ".env"))
-    ? join(home, ".env")
-    : join(process.cwd(), ".env");
-  if (!existsSync(envPath)) return;
-  try {
-    const raw = readFileSync(envPath, "utf-8");
-    for (const line of raw.split(/\r?\n/)) {
-      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-      if (!m) continue;
-      let val = m[2];
-      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-        val = val.slice(1, -1);
-      }
-      process.env[m[1]] = val;
-    }
-  } catch { /* ignore — fall back to shell env */ }
-})();
-
+// Credentials come from exactly two places:
+//   1. settings.user.json → providers.<name>.{apiKey,baseUrl}  (canonical)
+//   2. shell env vars     → ANTHROPIC_API_KEY / OPENAI_API_KEY  (fallback)
+// The provider modules apply (1) on top of (2) at boot; no dotenv loader.
 import { EventBus } from "./core/bus.js";
 import { SessionManager } from "./core/session-manager.js";
 import { JarvisCore } from "./core/jarvis.js";
@@ -150,8 +127,9 @@ async function main() {
   // Tell ChatPiece which sessions JarvisCore owns. For owned sessions
   // (main, grpc-*, etc.), JarvisCore emits prompt_dispatched and ChatPiece
   // stays out of the timeline-mirroring business. For non-owned sessions
-  // (e.g. actor-* handled by the actors plugin), ChatPiece must mirror
-  // user-typed input as type:"user" SSE immediately so the panel renders it.
+  // (plugin-owned sessionIds, e.g. a session-orchestrator plugin),
+  // ChatPiece must mirror user-typed input as type:"user" SSE immediately
+  // so the panel renders it.
   chatPiece.setOwnedSessionMatcher((sid) => jarvisCore.isSessionOwned(sid));
 
   // clear_session — clears only the calling session (memory + disk), archives first
@@ -303,7 +281,7 @@ async function main() {
 
   // /compact slash command — force context compaction (Engine B) on the CALLING session.
   // Handler receives ctx.sessionId from ChatPiece, so it acts on whichever session
-  // typed the slash (main, actor-X, etc) instead of hardcoding "main".
+  // typed the slash (main or any plugin-owned sessionId) instead of hardcoding "main".
   capabilityRegistry.registerSlashCommand({
     name: "compact",
     description: "Force context compaction — summarizes conversation to free tokens",
@@ -558,9 +536,10 @@ async function main() {
     try {
       hudState.stopReconciliation();
       sessions.stopAutoSave();
-      // Stop pieces FIRST — actor-runner cleans up ephemeral sessions before we save
+      // Stop pieces FIRST — pieces that own ephemeral sessions (e.g. session-orchestrator
+      // plugin) get a chance to clean them up before we persist.
       await pieceManager.stopAll();
-      // Now save remaining sessions (ephemeral ones already cleaned by actor-runner)
+      // Now save remaining sessions (ephemeral ones already cleaned by their owner)
       sessions.saveAll();
       const activeProvider = providerRouter.getActiveProvider();
       if (activeProvider) await activeProvider.metricsPiece.stop();

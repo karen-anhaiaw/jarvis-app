@@ -8,7 +8,6 @@
 //   import { jarvisHome, jarvisPath } from "./paths.js";
 //   const settingsDir = jarvisHome();          // ~/.jarvis
 //   const logDir = jarvisPath("logs");         // ~/.jarvis/logs
-//   const envFile = jarvisPath(".env");        // ~/.jarvis/.env
 
 import { join } from "node:path";
 import { homedir } from "node:os";

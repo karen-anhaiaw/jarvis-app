@@ -64,7 +64,7 @@ export class AnthropicSession implements AISession {
    * Per-session tool result size cap (chars). When set, any tool_result whose
    * serialized content exceeds this limit is truncated with a notice appended.
    * `undefined` = no limit (default, full result injected into context).
-   * Use for sessions with tight token budgets (e.g. Slack connector, Haiku actors).
+   * Use for sessions with tight token budgets (e.g. Slack connector, Haiku-tier plugin sessions).
    */
   private toolResultMaxChars?: number;
   private messages: MessageParam[] = [];
@@ -138,12 +138,16 @@ export class AnthropicSession implements AISession {
   }) {
     this._sessionId = opts.restoredSessionId ?? crypto.randomUUID();
     this.highEffort = opts.highEffort ?? false;
-    // One Anthropic client per session, with NuLLM/LiteLLM identity headers
-    // mirroring Claude Code CLI so traffic is attributed to the `claude_code`
-    // bucket in nullm_vendor_usage_by_event (AI Tools Dashboard pipeline).
-    // X-Claude-Code-Session-Id is set here once and reused for every request
-    // this session ever issues — no per-call header overrides needed.
+    // Explicit auth: pass apiKey/baseURL from process.env (which provider.ts
+    // populates from settings.user.json) so the SDK doesn't auto-read a
+    // conflicting ANTHROPIC_AUTH_TOKEN — when both env vars are set, the SDK
+    // sends Authorization: Bearer using AUTH_TOKEN, which a LiteLLM/Bedrock
+    // gateway may prefer over x-api-key. Passing authToken: null disables
+    // that side entirely.
     this.client = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY ?? null,
+      baseURL: process.env.ANTHROPIC_BASE_URL,
+      authToken: null,
       defaultHeaders: {
         "User-Agent": "claude-cli/2.1.112 (external, cli)",
         "X-Claude-Code-Session-Id": this._sessionId,
@@ -271,8 +275,8 @@ export class AnthropicSession implements AISession {
   }
 
   /**
-   * Set a per-session tool filter. Called by plugins (e.g. actor-runner) to
-   * restrict the visible tool surface based on role configuration.
+   * Set a per-session tool filter. Called by plugins (e.g. a session-orchestrator)
+   * to restrict the visible tool surface based on role configuration.
    * Pass `undefined` to clear (reverts to all tools visible).
    */
   setToolFilter(filter: ((toolName: string) => boolean) | undefined): void {
@@ -720,7 +724,7 @@ export class AnthropicSession implements AISession {
 
     // Use the session's effective model to determine the correct context window.
     // getMaxContext() without args falls back to config.model (the global/main model),
-    // which is wrong for actor sessions that may use a different model — they would
+    // which is wrong for plugin-owned sessions that may use a different model — they would
     // get 200K instead of 1M, causing premature compaction at ~160K tokens.
     const maxCtx = getMaxContext(this.stickyModelOverride ?? this.getBaseModel());
     // Trigger at 80% of the context window — down from 95% to give the summarizer
@@ -1438,7 +1442,7 @@ export class AnthropicSession implements AISession {
       }
 
       // effort: "max" for high-effort sessions (factory marks the default
-      // session), "high" for actors/subagents. NOTE: some models don't support
+      // session), "high" for background sessions. NOTE: some models don't support
       // "xhigh" — use "max" which is universally accepted by all models that
       // support the effort-2025-11-24 beta header.
       const effort = modelSupportsEffort ? (this.highEffort ? "max" : "high") : undefined;
