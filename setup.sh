@@ -28,24 +28,147 @@ dim()     { printf "${DIM}  %s${RESET}\n" "$1"; }
 step()    { printf "  ${DIM}→${RESET} %s\n" "$1"; }
 
 ask() {
+  # Reads a line from the terminal. UI is written to /dev/tty so the prompt
+  # stays visible when called via $(...) capture; only the result goes to stdout.
   local prompt="$1" default="$2" result
   if [ -n "$default" ]; then
-    printf "  %s ${DIM}[%s]${RESET}: " "$prompt" "$default"
-    read -r result
+    printf "  %s ${DIM}[%s]${RESET}: " "$prompt" "$default" >/dev/tty
+    read -r result </dev/tty
     echo "${result:-$default}"
   else
-    printf "  %s: " "$prompt"
-    read -r result
+    printf "  %s: " "$prompt" >/dev/tty
+    read -r result </dev/tty
     echo "$result"
   fi
 }
 
 ask_secret() {
+  # Reads a secret from the terminal with no echo. UI is written to /dev/tty
+  # so the prompt is visible even when called via $(...) capture.
   local prompt="$1" result
-  printf "  %s: " "$prompt"
-  read -rs result
-  echo ""
+  printf "  %s: " "$prompt" >/dev/tty
+  read -rs result </dev/tty
+  echo "" >/dev/tty
   echo "$result"
+}
+
+prompt_api_key() {
+  # Prompts for an API key with provider-specific guidance. UI is written to
+  # /dev/tty so it works under $(...) capture; only the key value goes to stdout.
+  local provider="$1" url="$2" prefix="$3" example="${4:-}"
+  {
+    echo ""
+    printf "  ${BOLD}%s API key${RESET}\n" "$provider"
+    printf "    ${DIM}→ Get one at:${RESET} %s\n" "$url"
+    printf "    ${DIM}→ Starts with${RESET} \"%s\"" "$prefix"
+    [ -n "$example" ] && printf " ${DIM}(e.g. %s)${RESET}" "$example"
+    echo ""
+    printf "    ${DIM}→ Input is hidden while you type — paste and press Enter.${RESET}\n"
+    echo ""
+  } >/dev/tty
+  ask_secret "Paste your $provider API key"
+}
+
+# Ping a provider's models endpoint. Writes a brief response body excerpt
+# (up to a few hundred chars) to /tmp/jarvis-setup-ping.body so callers can
+# surface meaningful proxy error messages. Echoes the HTTP status code;
+# "000" on connection error / timeout / DNS failure.
+PING_BODY_FILE="/tmp/jarvis-setup-ping.body"
+
+ping_anthropic() {
+  curl -sk -o "$PING_BODY_FILE" -w "%{http_code}" -X GET "${2%/}/v1/models" \
+    -H "x-api-key: $1" -H "anthropic-version: 2023-06-01" \
+    --max-time 10 2>/dev/null || echo "000"
+}
+
+ping_openai() {
+  curl -sk -o "$PING_BODY_FILE" -w "%{http_code}" -X GET "${2%/}/models" \
+    -H "Authorization: Bearer $1" --max-time 10 2>/dev/null || echo "000"
+}
+
+# Best-effort extraction of a human-readable error from the ping response.
+# Tries to pull error.message from a JSON body; falls back to first 200 chars.
+extract_ping_error() {
+  [ -f "$PING_BODY_FILE" ] || { echo ""; return; }
+  local msg
+  msg=$(node -e "try{const b=require('fs').readFileSync('$PING_BODY_FILE','utf8');const j=JSON.parse(b);process.stdout.write(j.error?.message||j.message||'')}catch{}" 2>/dev/null || true)
+  if [ -n "$msg" ]; then
+    echo "$msg" | head -c 240
+  else
+    head -c 200 "$PING_BODY_FILE" 2>/dev/null | tr -d '\n'
+  fi
+}
+
+# Validates a provider key against the canonical (default) endpoint first.
+# On any non-200, prompts the user for a proxy/gateway base URL and retries.
+# Echoes the validated base URL to stdout (or empty if validation skipped /
+# the user pressed Enter with a default-endpoint pass). Returns 0 on success,
+# 1 if the user skipped or the proxy also failed.
+#
+#   $1 provider display label (Anthropic|OpenAI)
+#   $2 provider id for JSON path (anthropic|openai)
+#   $3 the key value
+#   $4 default base URL
+#   $5 ping function name
+#   $6 initial candidate URL (from env var) — tested first if non-empty
+validate_provider_key() {
+  local label="$1" provider_id="$2" key="$3" default_base="$4" ping_fn="$5" initial="${6:-}"
+  local base status candidates_label err
+
+  if [ -n "$initial" ] && [ "$initial" != "$default_base" ]; then
+    base="$initial"
+    candidates_label="suggested URL"
+  else
+    base="$default_base"
+    candidates_label="default endpoint"
+  fi
+
+  {
+    echo ""
+    printf "  ${BLUE}⠋${RESET} Validating %s key against %s (%s)...\n" "$label" "$base" "$candidates_label"
+  } >/dev/tty
+
+  status=$($ping_fn "$key" "$base")
+  if [ "$status" = "200" ]; then
+    success "$label key valid (HTTP 200 @ $base)" >/dev/tty
+    [ "$base" != "$default_base" ] && echo "$base"
+    return 0
+  fi
+
+  err=$(extract_ping_error)
+  {
+    warn "$label key rejected at $base (HTTP $status)"
+    [ -n "$err" ] && dim "Server says: $err"
+    dim "If you reach $label through a proxy (LiteLLM, Bedrock gateway, etc.),"
+    dim "enter its base URL now. Leave blank to skip — you can fix later in"
+    dim "~/.jarvis/settings.user.json (providers.${provider_id}.baseUrl)."
+    echo ""
+  } >/dev/tty
+
+  local custom
+  custom=$(ask "Custom $label base URL (blank to skip)" "$initial")
+
+  if [ -z "$custom" ]; then
+    warn "$label key validation skipped — saving as-is" >/dev/tty
+    return 1
+  fi
+
+  printf "  ${BLUE}⠋${RESET} Re-testing against %s...\n" "$custom" >/dev/tty
+  status=$($ping_fn "$key" "$custom")
+  if [ "$status" = "200" ]; then
+    success "$label key valid (HTTP 200 @ $custom)" >/dev/tty
+    echo "$custom"
+    return 0
+  fi
+
+  err=$(extract_ping_error)
+  {
+    warn "$label key still rejected at $custom (HTTP $status)"
+    [ -n "$err" ] && dim "Server says: $err"
+    dim "Saving the URL anyway — review ~/.jarvis/settings.user.json after setup."
+  } >/dev/tty
+  echo "$custom"
+  return 1
 }
 
 confirm() {
@@ -204,10 +327,22 @@ DEFAULT_MODEL=""
 JARVIS_DIR="${JARVIS_HOME:-$HOME/.jarvis}"
 
 # --- Key detection ---
-# Priority: environment → ~/.jarvis/.env → shell config files
+# Priority: environment → settings.user.json → shell config files
+SETTINGS_USER_EARLY="${JARVIS_DIR}/settings.user.json"
+
+key_from_settings() {
+  local provider="$1"
+  [ -f "$SETTINGS_USER_EARLY" ] || return 1
+  node -e "try{const s=JSON.parse(require('fs').readFileSync('$SETTINGS_USER_EARLY','utf8'));process.stdout.write(s.providers?.['$1']?.apiKey||'')}catch{}" "$provider" 2>/dev/null
+}
 
 detect_key() {
   local var_name="$1"
+  local provider=""
+  case "$var_name" in
+    ANTHROPIC_API_KEY) provider="anthropic" ;;
+    OPENAI_API_KEY)    provider="openai"    ;;
+  esac
   local found=""
 
   # 1. Current environment
@@ -217,9 +352,9 @@ detect_key() {
     return 0
   fi
 
-  # 2. ~/.jarvis/.env
-  if [ -f "$JARVIS_DIR/.env" ]; then
-    found=$(grep "^${var_name}=" "$JARVIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+  # 2. settings.user.json (providers.<provider>.apiKey)
+  if [ -n "$provider" ]; then
+    found=$(key_from_settings "$provider" || true)
     if [ -n "$found" ]; then
       echo "$found"
       return 0
@@ -242,14 +377,19 @@ detect_key() {
 
 describe_source() {
   local var_name="$1"
+  local provider=""
+  case "$var_name" in
+    ANTHROPIC_API_KEY) provider="anthropic" ;;
+    OPENAI_API_KEY)    provider="openai"    ;;
+  esac
 
   eval "local env_val=\"\${$var_name:-}\""
   [ -n "$env_val" ] && { echo "environment variable"; return; }
 
-  if [ -f "$JARVIS_DIR/.env" ]; then
+  if [ -n "$provider" ]; then
     local v
-    v=$(grep "^${var_name}=" "$JARVIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
-    [ -n "$v" ] && { echo "~/.jarvis/.env"; return; }
+    v=$(key_from_settings "$provider" || true)
+    [ -n "$v" ] && { echo "~/.jarvis/settings.user.json"; return; }
   fi
 
   for rc in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bashrc" "$HOME/.bash_profile"; do
@@ -280,7 +420,7 @@ if [ -n "$DETECTED_OPENAI" ]; then
   success "Found OpenAI API key — $(mask_key "$DETECTED_OPENAI") (from $OPENAI_SOURCE)"
 fi
 
-$FOUND_ANY || dim "No existing API keys found in environment, .env, or shell config."
+$FOUND_ANY || dim "No existing API keys found in environment, settings.user.json, or shell config."
 
 echo ""
 
@@ -310,8 +450,8 @@ elif [ -n "$DETECTED_ANTHROPIC" ]; then
     DEFAULT_MODEL="claude-sonnet-4-6"
   fi
   if confirm "Also configure OpenAI?"; then
-    OPENAI_KEY=$(ask_secret "Enter your OpenAI API key (sk-...)")
-    [ -z "$OPENAI_KEY" ] && warn "Skipped — you can add it later in ~/.jarvis/.env"
+    OPENAI_KEY=$(prompt_api_key "OpenAI" "https://platform.openai.com/api-keys" "sk-")
+    [ -z "$OPENAI_KEY" ] && warn "Skipped — you can add it later in ~/.jarvis/settings.user.json (providers.openai.apiKey)"
   fi
 
 elif [ -n "$DETECTED_OPENAI" ]; then
@@ -320,7 +460,7 @@ elif [ -n "$DETECTED_OPENAI" ]; then
     DEFAULT_MODEL="gpt-4o"
   fi
   if confirm "Also configure Anthropic? (recommended)"; then
-    ANTHROPIC_KEY=$(ask_secret "Enter your Anthropic API key (sk-ant-...)")
+    ANTHROPIC_KEY=$(prompt_api_key "Anthropic" "https://console.anthropic.com/settings/keys" "sk-ant-")
     [ -n "$ANTHROPIC_KEY" ] && DEFAULT_MODEL="claude-sonnet-4-6"
   fi
 fi
@@ -339,18 +479,18 @@ if [ -z "$ANTHROPIC_KEY" ] && [ -z "$OPENAI_KEY" ]; then
 
   case $PROVIDER_CHOICE in
     1)
-      ANTHROPIC_KEY=$(ask_secret "Enter your Anthropic API key (sk-ant-...)")
+      ANTHROPIC_KEY=$(prompt_api_key "Anthropic" "https://console.anthropic.com/settings/keys" "sk-ant-")
       [ -z "$ANTHROPIC_KEY" ] && fail "API key is required."
       DEFAULT_MODEL="claude-sonnet-4-6"
       ;;
     2)
-      OPENAI_KEY=$(ask_secret "Enter your OpenAI API key (sk-...)")
+      OPENAI_KEY=$(prompt_api_key "OpenAI" "https://platform.openai.com/api-keys" "sk-")
       [ -z "$OPENAI_KEY" ] && fail "API key is required."
       DEFAULT_MODEL="gpt-4o"
       ;;
     3)
-      ANTHROPIC_KEY=$(ask_secret "Enter your Anthropic API key (sk-ant-...)")
-      OPENAI_KEY=$(ask_secret "Enter your OpenAI API key (sk-...)")
+      ANTHROPIC_KEY=$(prompt_api_key "Anthropic" "https://console.anthropic.com/settings/keys" "sk-ant-")
+      OPENAI_KEY=$(prompt_api_key "OpenAI" "https://platform.openai.com/api-keys" "sk-")
       [ -z "$ANTHROPIC_KEY" ] && [ -z "$OPENAI_KEY" ] && fail "At least one API key is required."
       DEFAULT_MODEL="claude-sonnet-4-6"
       ;;
@@ -360,9 +500,20 @@ if [ -z "$ANTHROPIC_KEY" ] && [ -z "$OPENAI_KEY" ]; then
   esac
 fi
 
-# Validate key format (non-blocking warning)
-if [ -n "$ANTHROPIC_KEY" ] && [[ ! "$ANTHROPIC_KEY" =~ ^sk-ant- ]]; then
-  warn "Anthropic key doesn't start with sk-ant- — this may not work"
+# Validate keys against the provider endpoint NOW (before npm install / build),
+# so the user gets fast feedback on bad keys / proxy needs. Resulting baseUrl
+# overrides (if any) are persisted to settings.user.json in Step 5.
+ANTHROPIC_BASE_URL_OVERRIDE=""
+OPENAI_BASE_URL_OVERRIDE=""
+
+if [ -n "$ANTHROPIC_KEY" ]; then
+  ANTHROPIC_BASE_URL_OVERRIDE=$(validate_provider_key \
+    "Anthropic" "anthropic" "$ANTHROPIC_KEY" "https://api.anthropic.com" ping_anthropic "${ANTHROPIC_BASE_URL:-}") || true
+fi
+
+if [ -n "$OPENAI_KEY" ]; then
+  OPENAI_BASE_URL_OVERRIDE=$(validate_provider_key \
+    "OpenAI" "openai" "$OPENAI_KEY" "https://api.openai.com/v1" ping_openai "${OPENAI_BASE_URL:-}") || true
 fi
 
 [ -z "$DEFAULT_MODEL" ] && DEFAULT_MODEL="claude-sonnet-4-6"
@@ -372,6 +523,8 @@ PROVIDER_LABEL=""
 [ -n "$ANTHROPIC_KEY" ] && PROVIDER_LABEL="Anthropic"
 [ -n "$OPENAI_KEY" ] && PROVIDER_LABEL="${PROVIDER_LABEL:+$PROVIDER_LABEL + }OpenAI"
 success "Provider: $PROVIDER_LABEL | Default model: $DEFAULT_MODEL"
+[ -n "$ANTHROPIC_BASE_URL_OVERRIDE" ] && dim "Anthropic baseUrl: $ANTHROPIC_BASE_URL_OVERRIDE"
+[ -n "$OPENAI_BASE_URL_OVERRIDE" ]    && dim "OpenAI baseUrl:    $OPENAI_BASE_URL_OVERRIDE"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Step 3: Install Dependencies
@@ -428,6 +581,10 @@ mkdir -p "$JARVIS_DIR"
 step "Config dir: $JARVIS_DIR"
 echo ""
 
+# Committed defaults (~/.jarvis/settings.json) are synced from the repo by
+# scripts/bootstrap.sh, which the JARVIS.app launcher runs on every boot.
+# No need to sync here — setup.sh's job is the interactive wizard part.
+
 # --- settings.user.json ---
 SETTINGS_USER="$JARVIS_DIR/settings.user.json"
 
@@ -461,33 +618,41 @@ EOJSON
   success "Created settings.user.json (model: $DEFAULT_MODEL)"
 fi
 
-# --- .env (chmod 600 — API keys are sensitive) ---
-ENV_FILE="$JARVIS_DIR/.env"
+# Persist API keys + baseUrls into providers.<provider>.{apiKey,baseUrl}.
+# settings.user.json is the single canonical store for credentials — the
+# runtime reads from there directly (or falls back to shell env vars if a
+# field is missing). No separate .env file.
+node -e "
+  const fs = require('fs');
+  const [path, anthroKey, anthroUrl, openaiKey, openaiUrl] = process.argv.slice(1);
+  const s = JSON.parse(fs.readFileSync(path, 'utf8'));
+  s.providers = s.providers || {};
+  const set = (provider, field, value) => {
+    if (!value) return;
+    s.providers[provider] = s.providers[provider] || {};
+    s.providers[provider][field] = value;
+  };
+  set('anthropic', 'apiKey',  anthroKey);
+  set('anthropic', 'baseUrl', anthroUrl);
+  set('openai',    'apiKey',  openaiKey);
+  set('openai',    'baseUrl', openaiUrl);
+  fs.writeFileSync(path, JSON.stringify(s, null, 2) + '\n');
+" "$SETTINGS_USER" "$ANTHROPIC_KEY" "$ANTHROPIC_BASE_URL_OVERRIDE" "$OPENAI_KEY" "$OPENAI_BASE_URL_OVERRIDE"
 
-write_env() {
-  : > "$ENV_FILE"
-  [ -n "$ANTHROPIC_KEY" ] && echo "ANTHROPIC_API_KEY=$ANTHROPIC_KEY" >> "$ENV_FILE"
-  [ -n "$OPENAI_KEY" ]    && echo "OPENAI_API_KEY=$OPENAI_KEY"    >> "$ENV_FILE"
-  chmod 600 "$ENV_FILE"
-}
+# settings.user.json now contains secrets — lock it down.
+chmod 600 "$SETTINGS_USER"
+success "settings.user.json updated (mode 600)"
+[ -n "$ANTHROPIC_KEY" ]               && dim "  providers.anthropic.apiKey  saved"
+[ -n "$ANTHROPIC_BASE_URL_OVERRIDE" ] && dim "  providers.anthropic.baseUrl saved"
+[ -n "$OPENAI_KEY" ]                  && dim "  providers.openai.apiKey     saved"
+[ -n "$OPENAI_BASE_URL_OVERRIDE" ]    && dim "  providers.openai.baseUrl    saved"
 
-if [ -f "$ENV_FILE" ]; then
-  EXISTING_ANTHROPIC=$(grep "^ANTHROPIC_API_KEY=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
-  EXISTING_OPENAI=$(grep "^OPENAI_API_KEY=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
-
-  NEEDS_UPDATE=false
-  [ -n "$ANTHROPIC_KEY" ] && [ "$ANTHROPIC_KEY" != "$EXISTING_ANTHROPIC" ] && NEEDS_UPDATE=true
-  [ -n "$OPENAI_KEY" ]    && [ "$OPENAI_KEY"    != "$EXISTING_OPENAI"    ] && NEEDS_UPDATE=true
-
-  if $NEEDS_UPDATE; then
-    write_env
-    success "~/.jarvis/.env updated"
-  else
-    success "~/.jarvis/.env is up to date"
-  fi
-else
-  write_env
-  success "~/.jarvis/.env created (permissions: 600)"
+# Migrate any legacy ~/.jarvis/.env (no longer read by JARVIS) — keys are now
+# in settings.user.json. We remove it to avoid drift and confusion.
+LEGACY_ENV="$JARVIS_DIR/.env"
+if [ -f "$LEGACY_ENV" ]; then
+  rm -f "$LEGACY_ENV"
+  dim "Removed legacy ~/.jarvis/.env (credentials now live in settings.user.json)"
 fi
 
 # --- mcp.json (create default if missing) ---
@@ -583,11 +748,7 @@ if confirm "Run full system validation?" "y"; then
   else
     RUNNING_INSTANCE=false
 
-    # Source ~/.jarvis/.env for keys
-    set -a
-    # shellcheck disable=SC1090
-    [ -f "$ENV_FILE" ] && source "$ENV_FILE" || true
-    set +a
+    # No env sourcing needed: JARVIS reads credentials from settings.user.json.
 
     # Start headless (no Electron window during test)
     cd "$REPO_DIR/app"
@@ -599,7 +760,7 @@ if confirm "Run full system validation?" "y"; then
     SERVER_READY=false
     for i in $(seq 1 30); do
       printf "\r  ${BLUE}⠋${RESET} Starting JARVIS... (%ds)" "$i"
-      if curl -sf "http://localhost:$HUD_PORT/hud" &>/dev/null; then
+      if curl -skf "https://localhost:$HUD_PORT/hud" &>/dev/null; then
         SERVER_READY=true
         break
       fi
@@ -632,7 +793,7 @@ if confirm "Run full system validation?" "y"; then
   if [ "${SKIP_CHECKS:-false}" = "false" ]; then
 
     # ── Check 2: HTTP server responding ─────────────
-    HUD_RESPONSE=$(curl -sf "http://localhost:$HUD_PORT/hud" 2>/dev/null || true)
+    HUD_RESPONSE=$(curl -skf "https://localhost:$HUD_PORT/hud" 2>/dev/null || true)
     if echo "$HUD_RESPONSE" | grep -q '"reactor"'; then
       check_pass "HTTP server responding on port $HUD_PORT"
     else
@@ -664,63 +825,57 @@ for c in d.get('components',[]):
     fi
 
     # ── Check 4: AI provider reachable ──────────────
+    # Key validation already happened inline in Step 2 (with interactive proxy
+    # URL fallback). This is just a smoke test against the baseUrl currently
+    # persisted in settings.user.json. Credentials come from settings.user.json
+    # (canonical) with a fallback to the shell env var — mirrors the runtime.
+    get_settings_field() {
+      node -e "try{const s=JSON.parse(require('fs').readFileSync('$SETTINGS_USER','utf8'));process.stdout.write(s.providers?.['$1']?.['$2']||'')}catch{}" 2>/dev/null || true
+    }
+
     PROVIDER_OK=false
-    if [ -n "$ANTHROPIC_KEY" ] || [ -n "$(grep '^ANTHROPIC_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)" ]; then
-      # Minimal Anthropic API ping — count tokens only, no actual message
-      ANTHRO_KEY="${ANTHROPIC_KEY:-$(grep '^ANTHROPIC_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)}"
-      HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-        -X POST "https://api.anthropic.com/v1/messages" \
-        -H "x-api-key: $ANTHRO_KEY" \
-        -H "anthropic-version: 2023-06-01" \
-        -H "content-type: application/json" \
-        -d '{"model":"claude-haiku-4-5","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
-        --max-time 10 2>/dev/null || echo "000")
-      if [ "$HTTP_STATUS" = "200" ]; then
-        check_pass "Anthropic API key valid (HTTP 200)"
+    ANTHRO_KEY=$(get_settings_field "anthropic" "apiKey")
+    ANTHRO_KEY="${ANTHRO_KEY:-${ANTHROPIC_KEY:-${ANTHROPIC_API_KEY:-}}}"
+    if [ -n "$ANTHRO_KEY" ]; then
+      ANTHRO_BASE=$(get_settings_field "anthropic" "baseUrl"); ANTHRO_BASE="${ANTHRO_BASE:-https://api.anthropic.com}"
+      STATUS=$(ping_anthropic "$ANTHRO_KEY" "$ANTHRO_BASE")
+      if [ "$STATUS" = "200" ]; then
+        check_pass "Anthropic key valid (HTTP 200 @ $ANTHRO_BASE)"
         PROVIDER_OK=true
-      elif [ "$HTTP_STATUS" = "401" ]; then
-        check_fail "Anthropic API key invalid (HTTP 401 — check ~/.jarvis/.env)"
-      elif [ "$HTTP_STATUS" = "000" ]; then
-        check_warn "Anthropic API unreachable (network timeout)"
       else
-        check_warn "Anthropic API returned HTTP $HTTP_STATUS"
+        check_fail "Anthropic key rejected (HTTP $STATUS @ $ANTHRO_BASE)"
+        dim "Edit $SETTINGS_USER (providers.anthropic.{apiKey,baseUrl})"
       fi
     fi
 
-    if ! $PROVIDER_OK && { [ -n "$OPENAI_KEY" ] || grep -q '^OPENAI_API_KEY=' "$ENV_FILE" 2>/dev/null; }; then
-      OAPI_KEY="${OPENAI_KEY:-$(grep '^OPENAI_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)}"
-      HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-        -X GET "https://api.openai.com/v1/models" \
-        -H "Authorization: Bearer $OAPI_KEY" \
-        --max-time 10 2>/dev/null || echo "000")
-      if [ "$HTTP_STATUS" = "200" ]; then
-        check_pass "OpenAI API key valid (HTTP 200)"
+    OAPI_KEY=$(get_settings_field "openai" "apiKey")
+    OAPI_KEY="${OAPI_KEY:-${OPENAI_KEY:-${OPENAI_API_KEY:-}}}"
+    if ! $PROVIDER_OK && [ -n "$OAPI_KEY" ]; then
+      OAPI_BASE=$(get_settings_field "openai" "baseUrl"); OAPI_BASE="${OAPI_BASE:-https://api.openai.com/v1}"
+      STATUS=$(ping_openai "$OAPI_KEY" "$OAPI_BASE")
+      if [ "$STATUS" = "200" ]; then
+        check_pass "OpenAI key valid (HTTP 200 @ $OAPI_BASE)"
         PROVIDER_OK=true
-      elif [ "$HTTP_STATUS" = "401" ]; then
-        check_fail "OpenAI API key invalid (HTTP 401 — check ~/.jarvis/.env)"
-      elif [ "$HTTP_STATUS" = "000" ]; then
-        check_warn "OpenAI API unreachable (network timeout)"
       else
-        check_warn "OpenAI API returned HTTP $HTTP_STATUS"
+        check_fail "OpenAI key rejected (HTTP $STATUS @ $OAPI_BASE)"
+        dim "Edit $SETTINGS_USER (providers.openai.{apiKey,baseUrl})"
       fi
     fi
 
-    # ── Check 5: Settings file valid JSON ───────────
+    # ── Check 5: Settings file integrity ────────────
     if node -e "JSON.parse(require('fs').readFileSync('$SETTINGS_USER','utf8'))" 2>/dev/null; then
       check_pass "settings.user.json is valid JSON"
     else
       check_fail "settings.user.json is malformed JSON"
     fi
 
-    # ── Check 6: .env permissions ───────────────────
-    if [ -f "$ENV_FILE" ]; then
-      ENV_PERMS=$(stat -f "%A" "$ENV_FILE" 2>/dev/null || stat -c "%a" "$ENV_FILE" 2>/dev/null || echo "unknown")
-      if [ "$ENV_PERMS" = "600" ]; then
-        check_pass "~/.jarvis/.env permissions: 600 (secure)"
-      else
-        check_warn "~/.jarvis/.env permissions: $ENV_PERMS (expected 600)"
-        chmod 600 "$ENV_FILE" && dim "  → fixed to 600"
-      fi
+    # ── Check 6: settings.user.json permissions ─────
+    SETTINGS_PERMS=$(stat -f "%A" "$SETTINGS_USER" 2>/dev/null || stat -c "%a" "$SETTINGS_USER" 2>/dev/null || echo "unknown")
+    if [ "$SETTINGS_PERMS" = "600" ]; then
+      check_pass "settings.user.json permissions: 600 (secure)"
+    else
+      check_warn "settings.user.json permissions: $SETTINGS_PERMS (expected 600 since it holds API keys)"
+      chmod 600 "$SETTINGS_USER" && dim "  → fixed to 600"
     fi
 
     # ── Check 7: macOS app (if applicable) ──────────
@@ -772,7 +927,7 @@ echo ""
 
 printf "  ${BOLD}Provider${RESET}   $PROVIDER_LABEL\n"
 printf "  ${BOLD}Model${RESET}      $DEFAULT_MODEL\n"
-printf "  ${BOLD}HUD${RESET}        http://localhost:50052\n"
+printf "  ${BOLD}HUD${RESET}        https://localhost:50052\n"
 printf "  ${BOLD}gRPC${RESET}       localhost:50051\n"
 
 echo ""
@@ -789,8 +944,7 @@ fi
 echo ""
 printf "  ${BOLD}Configuration:${RESET}\n"
 echo ""
-printf "    ${DIM}~/.jarvis/.env${RESET}               API keys ${DIM}(chmod 600)${RESET}\n"
-printf "    ${DIM}~/.jarvis/settings.user.json${RESET}  Model, pieces, plugins\n"
+printf "    ${DIM}~/.jarvis/settings.user.json${RESET}  API keys, model, providers, pieces ${DIM}(chmod 600)${RESET}\n"
 printf "    ${DIM}~/.jarvis/mcp.json${RESET}            MCP server connections\n"
 printf "    ${DIM}~/.jarvis/plugins/${RESET}            Installed plugins\n"
 
