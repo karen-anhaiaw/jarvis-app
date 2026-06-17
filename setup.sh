@@ -379,7 +379,11 @@ success "Provider: $PROVIDER_LABEL | Default model: $DEFAULT_MODEL"
 
 header "Step 3/6 — Dependencies"
 
-NPM_OPTS="--registry https://registry.npmjs.org/"
+# Force public npm registry — ignores user-level ~/.npmrc (which may point to
+# a private registry like Nubank CodeArtifact, JFrog, Verdaccio, etc.). A
+# project-level .npmrc also pins the registry when commands run from inside
+# the repo, but these flags make setup.sh robust regardless of cwd.
+NPM_OPTS="--userconfig=/dev/null --registry=https://registry.npmjs.org/"
 
 # The root workspace install covers app/ and packages/* in one shot.
 # We run app/ui separately because it has a Vite build step that npm

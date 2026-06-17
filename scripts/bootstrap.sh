@@ -65,10 +65,13 @@ for plugin in "${!PLUGINS[@]}"; do
     git clone --quiet "$git_url" "$dest" || { err "Failed to clone $plugin from $git_url"; continue; }
   fi
 
-  # Install npm deps if package.json exists
+  # Install npm deps if package.json exists.
+  # Force public registry — plugins live in ~/.jarvis/plugins/ (outside the
+  # repo) so they don't inherit the project-level .npmrc. We bypass the
+  # user's ~/.npmrc to avoid private registries (Nubank CodeArtifact, etc.)
   if [ -f "$dest/package.json" ]; then
     log "  Installing npm deps for $plugin..."
-    (cd "$dest" && npm install --silent 2>/dev/null) || warn "  npm install failed for $plugin"
+    (cd "$dest" && npm install --userconfig=/dev/null --registry=https://registry.npmjs.org/ --silent 2>/dev/null) || warn "  npm install failed for $plugin"
   fi
 done
 

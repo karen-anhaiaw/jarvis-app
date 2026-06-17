@@ -282,14 +282,17 @@ export class PluginManager implements Piece {
           continue;
         }
 
-        // Run npm install if package.json exists — non-fatal if it fails
+        // Run npm install if package.json exists — non-fatal if it fails.
+        // Force public registry and bypass the user's ~/.npmrc (which may
+        // point to a private registry like Nubank CodeArtifact). If the
+        // plugin ships its own .npmrc we honor that instead.
         const pkgPath = join(ps.path, "package.json");
         if (existsSync(pkgPath)) {
           try {
             const npmrcPath = join(ps.path, ".npmrc");
-            const npmrcFlag = existsSync(npmrcPath) ? ` --userconfig "${npmrcPath}"` : "";
+            const userconfigFlag = existsSync(npmrcPath) ? ` --userconfig "${npmrcPath}"` : " --userconfig=/dev/null";
             log.info({ name }, "PluginManager: running npm install after clone");
-            execSync(`npm install --registry https://registry.npmjs.org${npmrcFlag}`, { cwd: ps.path, timeout: 60000 });
+            execSync(`npm install --registry=https://registry.npmjs.org/${userconfigFlag}`, { cwd: ps.path, timeout: 60000 });
           } catch (err) {
             log.warn({ name, err: String(err) }, "PluginManager: npm install failed (non-fatal, plugin may still work)");
           }
@@ -576,13 +579,15 @@ export class PluginManager implements Piece {
       const dir = plugin.settings.path;
       execSync(`git -C "${dir}" pull`, { timeout: 30000 });
 
-      // Rebuild: run npm install if package.json exists (picks up new/changed deps)
+      // Rebuild: run npm install if package.json exists (picks up new/changed deps).
+      // Force public registry and bypass the user's ~/.npmrc unless the plugin
+      // ships its own .npmrc (mirrors the auto-clone path above).
       const pkgPath = join(dir, "package.json");
       if (existsSync(pkgPath)) {
         const npmrcPath = join(dir, ".npmrc");
-        const npmrcFlag = existsSync(npmrcPath) ? ` --userconfig "${npmrcPath}"` : "";
+        const userconfigFlag = existsSync(npmrcPath) ? ` --userconfig "${npmrcPath}"` : " --userconfig=/dev/null";
         log.info({ name }, "PluginManager: running npm install after update");
-        execSync(`npm install${npmrcFlag}`, { cwd: dir, timeout: 60000 });
+        execSync(`npm install --registry=https://registry.npmjs.org/${userconfigFlag}`, { cwd: dir, timeout: 60000 });
       }
 
       // Reload
