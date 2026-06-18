@@ -157,7 +157,7 @@ export function archivePreCompactBackup(sessionLabel: string, messages: unknown[
     if (!existsSync(archiveDir)) {
       mkdirSync(archiveDir, { recursive: true });
     }
-    const safe = sessionLabel.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const safe = (sessionLabel ?? "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const path = join(archiveDir, `${safe}_precompact_${stamp}.json`);
     writeFileSync(
