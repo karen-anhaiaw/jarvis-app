@@ -90,6 +90,9 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
         case "tool_done":
           this.broadcast(msg.target, { type: "tool_done", name: msg.toolName, id: msg.toolId, ms: msg.toolMs, output: msg.toolOutput, source, session: msg.target });
           break;
+        case "tool_progress" as any:
+          this.broadcast(msg.target, { type: "tool_progress", id: (msg as any).toolId, chunk: (msg as any).chunk, source, session: msg.target });
+          break;
         case "tool_cancelled":
           this.broadcast(msg.target, { type: "tool_cancelled", name: msg.toolName, id: msg.toolId, source, session: msg.target });
           break;

@@ -850,12 +850,16 @@ export const ChatTimeline = React.memo(function ChatTimeline({
                 {entry.status === 'done' && entry.ms != null && <span style={{ marginLeft: '4px' }}>{entry.ms}ms</span>}
                 {entry.status === 'cancelled' && <span style={{ fontStyle: 'italic' }}> interrupted</span>}
                 {hasMore && <span style={{ marginLeft: '4px', opacity: 0.5 }}>{entry.expanded ? '▾' : '▸'}</span>}
-                {/* ⤢ open delegate worker chat panel — available after task done.
-                    Reads worker.label from output JSON, calls POST /hud/show.
-                    No jarvis-app changes — uses existing endpoint. */}
-                {entry.name === 'delegate_read_task' && entry.status === 'done' && (() => {
+                {/* ⤢ open delegate worker chat panel.
+                    During running: workerLabel from __delegate_worker: progress chunk.
+                    After done: workerLabel from worker.label in output JSON. */}
+                {entry.name === 'delegate_read_task' && (() => {
                   let workerLabel: string | undefined
-                  try { workerLabel = JSON.parse(entry.output ?? '{}')?.worker?.label } catch {}
+                  // 1. progress chunk (running or done)
+                  const m = (entry.output ?? '').match(/__delegate_worker:([a-z0-9-]+)/)
+                  if (m) workerLabel = m[1]
+                  // 2. output JSON (done)
+                  if (!workerLabel) try { workerLabel = JSON.parse(entry.output ?? '{}')?.worker?.label } catch {}
                   if (!workerLabel) return null
                   const pieceId = `delegate-chat-${workerLabel}`
                   return (
@@ -865,7 +869,7 @@ export const ChatTimeline = React.memo(function ChatTimeline({
                         e.stopPropagation()
                         fetch('/hud/show', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pieceId }) })
                       }}
-                      style={{ marginLeft: '8px', cursor: 'pointer', opacity: 0.7, fontSize: '12px' }}
+                      style={{ marginLeft: '8px', cursor: 'pointer', opacity: entry.status === 'running' ? 1 : 0.7, fontSize: '12px' }}
                     >⤢</span>
                   )
                 })()}

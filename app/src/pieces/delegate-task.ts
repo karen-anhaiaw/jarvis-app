@@ -219,9 +219,21 @@ export class DelegateTaskPiece implements Piece {
       "DelegateTask: spawning worker",
     );
 
-    // Register the HUD panel (hidden). The user opens it via ⤢ in the
-    // chat capability block once the task is done (worker.label in output JSON).
-    // Pattern: same as actor.openActorChat() but triggered by user click, not auto-open.
+    // Emit tool_progress immediately with the workerLabel so ChatTimeline
+    // can render ⤢ while the task is still running.
+    // __toolUseId + __sessionId are injected by CapabilityExecutor.
+    const toolUseId = input.__toolUseId ? String(input.__toolUseId) : workerLabel;
+    const callerSession = input.__sessionId ? String(input.__sessionId) : "main";
+    this.bus.publish({
+      channel: "ai.stream",
+      source: this.id,
+      target: callerSession,
+      event: "tool_progress",
+      toolId: toolUseId,
+      chunk: `__delegate_worker:${workerLabel}`,
+    } as any);
+
+    // Register the HUD panel (hidden). User opens via ⤢ in the chat block.
     this.bus.publish({
       channel: "hud.update",
       source: this.id,
