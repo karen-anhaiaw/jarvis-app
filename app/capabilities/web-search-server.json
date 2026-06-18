@@ -1,0 +1,7 @@
+{
+  "name": "web_search",
+  "category": "web",
+  "description": "Search the web for current information. Executed server-side by Anthropic — no round-trip needed, result appears in the same turn. Use for recent news, current events, prices, or anything beyond the knowledge cutoff.",
+  "type": "server",
+  "serverToolType": "web_search_20260209"
+}

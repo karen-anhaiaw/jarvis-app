@@ -1,0 +1,7 @@
+{
+  "name": "code_execution",
+  "category": "execution",
+  "description": "Run Python and bash code in a secure sandboxed container on Anthropic's infrastructure. Can analyze data, create visualizations, perform calculations, create and edit files. Executed server-side — no round-trip needed. Free when used alongside web_search or web_fetch.",
+  "type": "server",
+  "serverToolType": "code_execution_20260120"
+}

@@ -1,7 +1,7 @@
 {
-  "name": "web_fetch",
+  "name": "web_fetch_local",
   "category": "web",
-  "description": "Fetch a web page and return its content as readable text (HTML converted to markdown). Use to read documentation, articles, or any public URL.",
+  "description": "[LOCAL — FALLBACK] Web page fetch running on this machine. Returns the page content as readable text (HTML converted to markdown, no citations). PREFER the server-side `web_fetch` tool for normal use — only use this one when the user explicitly asks for a local fetch, or when `web_fetch` is unavailable or failing.",
   "type": "script",
   "command": "bash",
   "args": [

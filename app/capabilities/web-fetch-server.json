@@ -1,0 +1,7 @@
+{
+  "name": "web_fetch",
+  "category": "web",
+  "description": "Fetch and read content from a specific URL (web page or PDF). Executed server-side by Anthropic — no round-trip needed, result appears in the same turn. Only URLs that have appeared in the conversation can be fetched.",
+  "type": "server",
+  "serverToolType": "web_fetch_20260209"
+}

@@ -16,14 +16,19 @@ const execFileAsync = promisify(execFile);
 interface CapabilityConfig {
   name: string;
   description: string;
-  type: "script" | "executable";
-  command: string;
+  /** "script"/"executable" → local handler. "server" → Anthropic-executed. */
+  type: "script" | "executable" | "server";
+  command?: string;
   args?: string[];
   stdin?: string;
-  input_schema: Record<string, unknown>;
+  input_schema?: Record<string, unknown>;
   /** Slash-menu category, declared in the tool's JSON definition (F3.15).
    *  Lives WITH the tool definition so the registry stays name-agnostic. */
   category?: string;
+  /** Anthropic server-tool type id (e.g. "web_search_20260209"). Required
+   *  when type === "server". The capability name must match what Anthropic
+   *  expects for that type (e.g. "web_search" for web_search_*). */
+  serverToolType?: string;
 }
 
 const CAPABILITIES_DIR = join(process.cwd(), "capabilities");
@@ -236,10 +241,28 @@ The user's home directory is ${process.env.HOME}. Current working directory is $
   }
 
   private registerCapability(config: CapabilityConfig): void {
+    // Server-side tool: executed by the Anthropic API. No local handler — we
+    // just declare type + name; Anthropic owns the schema and execution.
+    if (config.type === "server") {
+      if (!config.serverToolType) {
+        log.error({ name: config.name }, "CapabilityLoader: server capability missing serverToolType — skipping");
+        return;
+      }
+      this.registry.register({
+        name: config.name,
+        description: config.description,
+        input_schema: config.input_schema ?? {},
+        category: config.category,
+        execution: "server",
+        serverToolType: config.serverToolType,
+      });
+      return;
+    }
+
     this.registry.register({
       name: config.name,
       description: config.description,
-      input_schema: config.input_schema,
+      input_schema: config.input_schema ?? {},
       category: config.category,
       supportsProgress: true,
       handler: async (input, onProgress) => {
@@ -268,8 +291,9 @@ The user's home directory is ${process.env.HOME}. Current working directory is $
         try {
           // Always use spawn so we can stream stdout via onProgress.
           // For stdin-based configs (execWithStdin path) the logic is the same.
+          // command is guaranteed present for local (script/executable) tools.
           const { stdout, stderr } = await this.execWithProgress(
-            config.command, args, stdinData, signal, onProgress,
+            config.command!, args, stdinData, signal, onProgress,
           );
           return this.parseOutput(stdout, stderr);
         } catch (err: any) {

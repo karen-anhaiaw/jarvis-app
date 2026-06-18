@@ -11,7 +11,9 @@ export interface CapabilityDefinition {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
-  handler: CapabilityHandler;
+  /** Local-tool executor. Omitted for `execution: "server"` tools — those run
+   *  inside the Anthropic API and never round-trip back to a local handler. */
+  handler?: CapabilityHandler;
   /** If true, the handler accepts a progress callback and will stream partial output. */
   supportsProgress?: boolean;
   /** Slash-menu grouping, declared by the tool's OWNER at registration time
@@ -106,6 +108,12 @@ export class CapabilityRegistry {
         const def = this.tools.get(tc.name);
         if (!def) {
           return { tool_use_id: tc.id, content: JSON.stringify({ error: `Unknown capability: ${tc.name}` }), is_error: true };
+        }
+        // Server tools are executed by Anthropic; they should never reach the
+        // local executor (the session drops server_tool_use blocks). Guard
+        // defensively in case a server tool is somehow dispatched here.
+        if (!def.handler) {
+          return { tool_use_id: tc.id, content: JSON.stringify({ error: `Capability ${tc.name} has no local handler (server-side tool)` }), is_error: true };
         }
         const t0 = Date.now();
         try {

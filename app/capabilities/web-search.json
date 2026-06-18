@@ -1,7 +1,7 @@
 {
-  "name": "web_search",
+  "name": "web_search_local",
   "category": "web",
-  "description": "Search the web using DuckDuckGo and return results with titles, URLs, and snippets. Use for current events, documentation lookups, or any information beyond your training data.",
+  "description": "[LOCAL — FALLBACK] Web search via DuckDuckGo running on this machine. Returns titles, URLs, and snippets (results may be sparser, no citations). PREFER the server-side `web_search` tool for normal use — only use this one when the user explicitly asks for a local/offline/private search, or when `web_search` is unavailable or failing.",
   "type": "script",
   "command": "bash",
   "args": [
