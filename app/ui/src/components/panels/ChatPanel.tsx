@@ -355,7 +355,7 @@ export function ChatPanel({
             }
             // Fallback for delegate_read_task timing issue: find last running delegate entry
             if (chunk.startsWith('__delegate_worker:')) {
-              const lastIdx = [...prev].reverse().findIndex(e => e.kind === 'capability' && e.status === 'running' && (e as any).name === 'delegate_read_task')
+              const lastIdx = [...prev].reverse().findIndex(e => e.kind === 'capability' && e.status === 'running' && (e as any).name === 'delegate read task')
               if (lastIdx >= 0) {
                 const realIdx = prev.length - 1 - lastIdx
                 return prev.map((e, i) => i !== realIdx ? e : { ...e, output: (((e as any).output ?? '') + chunk), expanded: true })
