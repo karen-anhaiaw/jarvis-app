@@ -189,7 +189,17 @@ export class SessionDispatcher {
 
     this.broadcastPromptDispatched(sessionId, item);
     this.dispatchToSession(sessionId, item)
-      .finally(() => this.drainQueue(sessionId));
+      .finally(() => {
+        // Only drain if the turn fully completed (not waiting for tool results).
+        // When stop_reason=tool_use, consumeStream returns early and the session
+        // state is "waiting_tools" — draining here would start a new turn before
+        // the capability executor finishes. The drain in consumeStream's else-branch
+        // (and in handleToolResult's final consumeStream) handles the post-tool drain.
+        const state = this.sessions.getState(sessionId);
+        if (state !== "waiting_tools") {
+          void this.drainQueue(sessionId);
+        }
+      });
   }
 
   private async dispatchToSession(sessionId: string, item: QueuedMessage): Promise<void> {
@@ -692,7 +702,12 @@ export class SessionDispatcher {
     };
 
     await this.dispatchToSession(sessionId, combined)
-      .finally(() => this.drainQueue(sessionId));
+      .finally(() => {
+        const state = this.sessions.getState(sessionId);
+        if (state !== "waiting_tools") {
+          void this.drainQueue(sessionId);
+        }
+      });
   }
 
   // ─── Private: broadcasts ──────────────────────────────────────────────
