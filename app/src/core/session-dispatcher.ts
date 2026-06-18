@@ -119,21 +119,20 @@ export class SessionDispatcher {
     const text = msg.text ?? "";
     const traceId = msg.traceId ?? newTraceId();
 
-    const currentState = this.sessions.getState(sessionId);
+    const d = this.getDispatch(sessionId);
 
     log.info({
       traceId,
       sessionId,
       source: msg.source,
-      managedState: currentState,
+      running: d.running,
       promptLength: text.length,
       promptPreview: preview(text, 120),
       images: msg.images?.length ?? 0,
       replyTo: msg.replyTo,
     }, "SessionDispatcher: handleRequest");
 
-    if (currentState !== "idle") {
-      const d = this.getDispatch(sessionId);
+    if (d.running) {
       d.queue.push({
         text,
         source: msg.source ?? "unknown",
@@ -145,14 +144,12 @@ export class SessionDispatcher {
       log.info({
         traceId,
         sessionId,
-        state: currentState,
         queueSize: d.queue.length,
       }, "SessionDispatcher: queued prompt (session busy)");
       this.broadcastPendingQueue(sessionId);
       return;
     }
 
-    const d = this.getDispatch(sessionId);
     d.running = true;
     d.currentTraceId = traceId;
 
@@ -246,6 +243,12 @@ export class SessionDispatcher {
         err: err?.message ?? String(err),
         stack: err?.stack,
       }, "SessionDispatcher: dispatchToSession failed");
+      // Reset running on error so the queue can drain on next turn
+      const dErr = this.getDispatch(sessionId);
+      dErr.running = false;
+      dErr.currentTraceId = undefined;
+      void this.drainQueue(sessionId);
+      return;
     }
 
     const d = this.getDispatch(sessionId);
