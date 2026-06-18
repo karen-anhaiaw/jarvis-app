@@ -584,18 +584,66 @@ export class SessionDispatcher {
     const d = this.getDispatch(sessionId);
     if (d.queue.length === 0) {
       d.running = false;
-      this.broadcastPendingQueue(sessionId); // empty array → clears UI
+      this.broadcastPendingQueue(sessionId);
       return;
     }
 
-    const next = d.queue.shift()!;
-    d.running = true;
-    d.currentTraceId = next.traceId;
-    (d as any).pendingReplyTo = next.replyTo;
+    // Segment: a message needs solo dispatch if it has replyTo or comes from
+    // a live session (inter-session attribution). Otherwise combine into one call.
+    const needsSolo = (m: QueuedMessage): boolean => {
+      const internal = m.source === "chat-input" || m.source === "session-dispatcher" || m.source === "cron";
+      return !!m.replyTo || (!internal && this.sessions.has(m.source));
+    };
 
-    this.broadcastPromptDispatched(sessionId, next);
+    let items: QueuedMessage[];
+    let combinedText: string;
+    let replyTo: string | undefined;
+
+    if (needsSolo(d.queue[0])) {
+      // Solo: dispatch exactly one message, leave the rest for next drain
+      const solo = d.queue.shift()!;
+      items = [solo];
+      combinedText = solo.text;
+      replyTo = solo.replyTo;
+    } else {
+      // Combine: take all leading "plain" messages into one API call
+      items = [];
+      while (d.queue.length > 0 && !needsSolo(d.queue[0])) {
+        items.push(d.queue.shift()!);
+      }
+      combinedText = items.map(i => i.text).join("\n\n");
+      replyTo = undefined;
+    }
+
+    d.running = true;
+    d.currentTraceId = items[0].traceId;
+    (d as any).pendingReplyTo = replyTo;
+
+    // Emit one prompt_dispatched per original message (timeline shows each)
+    for (const item of items) {
+      this.broadcastPromptDispatched(sessionId, item);
+    }
     this.broadcastPendingQueue(sessionId);
-    await this.dispatchToSession(sessionId, next)
+
+    // Build a synthetic QueuedMessage where each queued item becomes a
+    // separate PromptBlock — the LLM sees them as distinct messages.
+    // For a single item, use its text directly (no wrapper needed).
+    const multiText = items.length === 1
+      ? items[0].text
+      : items.map((item, i) => `[message ${i + 1}]\n${item.text}`).join("\n\n");
+
+    const combined: QueuedMessage = {
+      text: multiText,
+      source: items[0].source,
+      replyTo,
+      images: items.flatMap(i => i.images ?? []).length > 0
+        ? items.flatMap(i => i.images ?? [])
+        : undefined,
+      traceId: items[0].traceId,
+      systems: items.flatMap(i => i.systems ?? []),
+    };
+
+    await this.dispatchToSession(sessionId, combined)
       .finally(() => this.drainQueue(sessionId));
   }
 

@@ -73,7 +73,7 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
     // Route ai.stream events to the SSE pool of their target sessionId
     this.bus.subscribe<AIStreamMessage>("ai.stream", (msg) => {
       if (!msg.target) return;
-      const source = msg.source === "jarvis-core" ? "jarvis" : msg.source;
+      const source = (msg.source === "jarvis-core" || msg.source === "session-dispatcher") ? "jarvis" : msg.source;
       switch (msg.event) {
         case "delta":
           this.broadcast(msg.target, { type: "delta", text: msg.text, source, session: msg.target });
