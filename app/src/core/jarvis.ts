@@ -270,7 +270,10 @@ export class JarvisCore implements Piece {
   getReactorState(): { status: string; coreLabel: string; coreSubLabel: string } {
     return {
       status: this.globalState,
-      coreLabel: this.globalState.toUpperCase().replace("_", " "),
+      coreLabel: this.globalState === "processing"    ? "THINKING..."
+               : this.globalState === "waiting_tools" ? "WORKING..."
+               : this.globalState === "online"        ? "ONLINE"
+               : this.globalState.toUpperCase().replace("_", " "),
       coreSubLabel: "",
     };
   }
