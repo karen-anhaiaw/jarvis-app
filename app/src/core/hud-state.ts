@@ -94,10 +94,19 @@ export class HudState {
         case "update": {
           const existing = this.pieces.get(msg.pieceId);
           if (!existing) {
-            // Previously a SILENT drop (failure mode 3, hud-truth.md).
-            // The warn makes the loss observable; a registered producer
-            // heals it on the next reconciliation tick.
-            log.warn({ pieceId: msg.pieceId, source: msg.source }, "HudState: update for unknown pieceId — dropped (lost add?)");
+            if (msg.piece) {
+              // Plugin sent "update" but we have no record (e.g. addedToHud flag
+              // was not reset on stop(), so it published "update" instead of "add"
+              // after a disable→enable cycle). Treat as "add" when msg.piece is
+              // present — self-healing without requiring a restart.
+              log.warn({ pieceId: msg.pieceId, source: msg.source }, "HudState: update for unknown pieceId with piece payload — treating as add");
+              this.applyAdd(msg.piece);
+            } else {
+              // Previously a SILENT drop (failure mode 3, hud-truth.md).
+              // The warn makes the loss observable; a registered producer
+              // heals it on the next reconciliation tick.
+              log.warn({ pieceId: msg.pieceId, source: msg.source }, "HudState: update for unknown pieceId — dropped (lost add?)");
+            }
             break;
           }
           existing.data = { ...existing.data, ...msg.data };
