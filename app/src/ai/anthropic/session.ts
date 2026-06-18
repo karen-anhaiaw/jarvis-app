@@ -1047,7 +1047,11 @@ export class AnthropicSession implements AISession {
     } else {
       out.push({ role: "user", content: AnthropicSession.SUMMARIZE_INSTRUCTION });
     }
-    out.push({ role: "assistant", content: AnthropicSession.SUMMARY_PREFILL });
+    // NOTE: assistant prefill is NOT added here. Some Claude models (e.g.
+    // claude-sonnet-4-6 and later) reject assistant message prefill with a
+    // 400 error ("This model does not support assistant message prefill").
+    // The summarizer instruction already ends with "Wrap in <summary></summary>"
+    // so extractSummary handles both prefilled and non-prefilled responses.
     return out;
   }
 
