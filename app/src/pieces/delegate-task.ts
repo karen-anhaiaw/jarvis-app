@@ -15,8 +15,11 @@
 //
 // Design choices:
 //   - Uses the existing AnthropicSessionFactory.createWithPrompt() — same
-//     code path as plugin-owned sessions, but we don't register the worker with the
-//     SessionManager (it's truly ephemeral, lifecycle scoped to one call).
+//     code path as plugin-owned sessions. The worker IS registered in SessionManager
+//     so its history survives for inspection via the HUD panel (click ⤢ on the
+//     delegate block). Session is marked ephemeral=true so it is NOT persisted
+//     to disk. Cleanup: removed from SessionManager when the HUD panel is closed
+//     OR when the session has been idle for DELEGATE_IDLE_CLEANUP_MS.
 //   - Tools available to the worker = same tool registry as the main session.
 //     The role's system prompt should constrain the worker to read-only ops
 //     (default role comes from settings delegate.defaultRole; fallback "generic").
@@ -38,10 +41,14 @@ import type { Piece } from "../core/piece.js";
 import type { EventBus } from "../core/bus.js";
 import type { CapabilityRegistry } from "../capabilities/registry.js";
 import type { AISessionFactory, AIStreamEvent, CapabilityCall, CapabilityResult } from "../ai/types.js";
+import type { SessionManager } from "../core/session-manager.js";
 import { AnthropicSessionFactory } from "../ai/anthropic/factory.js";
 import { getProviderForModel } from "../config/index.js";
 import { load as loadSettings } from "../core/settings.js";
 import { log } from "../logger/index.js";
+
+/** Worker sessions idle longer than this are auto-evicted from SessionManager. */
+const DELEGATE_IDLE_CLEANUP_MS = 10 * 60 * 1000; // 10 minutes
 
 export interface DelegateTaskOptions {
   /** Provides the AI factory — re-resolved on each call so model swaps stick. */
@@ -52,6 +59,9 @@ export interface DelegateTaskOptions {
   registry: CapabilityRegistry;
   /** Roles directory — defaults to ~/.jarvis/roles */
   rolesDir?: string;
+  /** SessionManager — used to register workers so HUD can open their chat.
+   *  Optional: if not provided, workers remain unregistered (old behavior). */
+  sessions?: SessionManager;
 }
 
 /** Hard cap on iterations to prevent runaway worker. */
@@ -111,6 +121,8 @@ export class DelegateTaskPiece implements Piece {
   private opts: DelegateTaskOptions;
   private rolesDir: string;
   private bus!: EventBus;
+  /** workerLabel → cleanup timer handle. */
+  private cleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(opts: DelegateTaskOptions) {
     this.opts = opts;
@@ -158,7 +170,9 @@ export class DelegateTaskPiece implements Piece {
   }
 
   async stop(): Promise<void> {
-    // No persistent state.
+    // Cancel all pending cleanup timers.
+    for (const timer of this.cleanupTimers.values()) clearTimeout(timer);
+    this.cleanupTimers.clear();
   }
 
   /** Public API — callable by other pieces (e.g. CronPiece in delegate mode). */
@@ -205,6 +219,29 @@ export class DelegateTaskPiece implements Piece {
       "DelegateTask: spawning worker",
     );
 
+    // Announce worker to HUD immediately so the UI can show a spinner/link.
+    this.bus.publish({
+      channel: "hud.update",
+      source: this.id,
+      action: "add",
+      pieceId: `delegate-chat-${workerLabel}`,
+      piece: {
+        pieceId: `delegate-chat-${workerLabel}`,
+        type: "panel",
+        name: `⚡ ${workerLabel}`,
+        status: "running",
+        data: {
+          sessionId: workerLabel,
+          assistantLabel: workerLabel.toUpperCase(),
+        },
+        position: { x: 120, y: 120 },
+        size: { width: 480, height: 400 },
+        ephemeral: true,
+        visible: false,   // hidden until user clicks ⤢ — just registers it
+        renderer: { plugin: null as unknown as string, file: "ChatPanel" },
+      },
+    });
+
     // Resolve factory: use model-specific factory if available (cross-provider)
     const factory = this.opts.getFactoryForModel
       ? this.opts.getFactoryForModel(effectiveModel)
@@ -219,6 +256,16 @@ export class DelegateTaskPiece implements Piece {
     // Pin the worker to its specific model — this beats the global config.
     if ((session as any).setStickyModelOverride) {
       (session as any).setStickyModelOverride(effectiveModel);
+    }
+
+    // Register in SessionManager so HUD ChatPanel can stream from it.
+    const sm = this.opts.sessions;
+    if (sm) {
+      // Inject directly — worker already has the right factory/prompt.
+      // We use the internal map directly to avoid triggering factory.create().
+      (sm as any).sessions.set(workerLabel, { session, stateStack: [], createdAt: Date.now() });
+      sm.setEphemeral(workerLabel, true);
+      log.debug({ workerLabel }, "DelegateTask: registered in SessionManager");
     }
 
     const t0 = Date.now();
@@ -286,8 +333,27 @@ export class DelegateTaskPiece implements Piece {
         partialOutput: collectedText.slice(0, 2000),
       };
     } finally {
-      // CRITICAL: kill the worker. Its context dies HERE.
-      try { session.close(); } catch {}
+      // Session is kept alive for HUD inspection — closed after idle timeout.
+      // session.close() is deferred; the try-block already broke out of the loop.
+      if (sm) {
+        const timer = setTimeout(() => {
+          try { session.close(); } catch {}
+          (sm as any).sessions.delete(workerLabel);
+          this.cleanupTimers.delete(workerLabel);
+          // Remove the HUD panel too.
+          this.bus.publish({
+            channel: "hud.update",
+            source: this.id,
+            action: "remove",
+            pieceId: `delegate-chat-${workerLabel}`,
+          });
+          log.debug({ workerLabel }, "DelegateTask: worker evicted after idle timeout");
+        }, DELEGATE_IDLE_CLEANUP_MS);
+        this.cleanupTimers.set(workerLabel, timer);
+      } else {
+        // No SessionManager wired — close immediately (original behavior).
+        try { session.close(); } catch {}
+      }
     }
 
     const ms = Date.now() - t0;

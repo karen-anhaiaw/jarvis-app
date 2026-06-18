@@ -387,6 +387,7 @@ async function main() {
     getFactory: () => providerRouter.getFactory(),
     getFactoryForModel: (model) => providerRouter.getFactoryForModel(model),
     registry: capabilityRegistry,
+    sessions,
   });
   pieces.push(delegateTaskPiece);
 
