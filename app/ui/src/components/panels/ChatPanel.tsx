@@ -338,14 +338,33 @@ export function ChatPanel({
           })
           break
         }
-        case 'tool_progress':
+        case 'tool_progress': {
           // Live stdout chunk from a running capability — append to its output
           // so the user can watch progress in real time (e.g. npm install, build).
-          setEntries(prev => prev.map(e => {
-            if (e.kind !== 'capability' || e.id !== data.id) return e
-            return { ...e, output: ((e.output ?? '') + (data.chunk ?? '')), expanded: true }
-          }))
+          // For delegate_read_task: the __delegate_worker: chunk may arrive before
+          // tool_start creates the entry (SSE ordering not guaranteed across ticks).
+          // Fallback: if no entry matches by id, append to the last running delegate entry.
+          const chunk = data.chunk ?? ''
+          setEntries(prev => {
+            const byId = prev.some(e => e.kind === 'capability' && e.id === data.id)
+            if (byId) {
+              return prev.map(e => {
+                if (e.kind !== 'capability' || e.id !== data.id) return e
+                return { ...e, output: ((e.output ?? '') + chunk), expanded: true }
+              })
+            }
+            // Fallback for delegate_read_task timing issue: find last running delegate entry
+            if (chunk.startsWith('__delegate_worker:')) {
+              const lastIdx = [...prev].reverse().findIndex(e => e.kind === 'capability' && e.status === 'running' && (e as any).name === 'delegate_read_task')
+              if (lastIdx >= 0) {
+                const realIdx = prev.length - 1 - lastIdx
+                return prev.map((e, i) => i !== realIdx ? e : { ...e, output: (((e as any).output ?? '') + chunk), expanded: true })
+              }
+            }
+            return prev
+          })
           break
+        }
         case 'tool_cancelled':
           if (data.name === 'jarvis_ask_choice') break
           toolStartTimes.current.delete(data.id)
