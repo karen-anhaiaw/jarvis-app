@@ -459,14 +459,14 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
           res.end("[]");
           return;
         }
-        const entries = parseMessagesToHistory(saved.messages as any[]);
+        const entries = parseMessagesToHistory(saved.messages as any[], sid);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(entries));
         return;
       }
       const managed = this.sessions.get(sid);
       const rawMessages = managed.session.getMessages() as any[];
-      const entries = parseMessagesToHistory(rawMessages);
+      const entries = parseMessagesToHistory(rawMessages, sid);
       // Append startup greeting if one is pending (set by consumeStartupPrompt on boot).
       // Consumed once so subsequent history requests don't repeat it.
       const greeting = sid === DEFAULT_SESSION ? consumePendingGreeting() : null;
@@ -511,7 +511,23 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
  *       Single-question response:  "[choice] <q> → <labels>"
  *       Multi-question response:   "[choice]\n<q1> → <a1>\n<q2> → <a2>\n..."
  */
-export function parseMessagesToHistory(rawMessages: any[]): any[] {
+export function parseMessagesToHistory(rawMessages: any[], sessionId?: string): any[] {
+  // Infer a stable source label for user messages based on the session.
+  // The Anthropic message format has no sender metadata — we derive it from
+  // the session ID so actor chats show the correct sender (e.g. "main") instead
+  // of the generic "chat" / "YOU" label.
+  //
+  // Rules:
+  //   main / undefined → "chat"  (renders as YOU — the human user)
+  //   actor-<name>     → "main"  (messages to actors come from orchestrator)
+  //   grpc-*           → "grpc"
+  //   anything else    → "chat"  (safe fallback)
+  const inferredUserSource = (() => {
+    if (!sessionId || sessionId === "main") return "chat";
+    if (sessionId.startsWith("actor-")) return "main";
+    if (sessionId.startsWith("grpc-")) return "grpc";
+    return "chat";
+  })();
   const entries: any[] = [];
 
   interface PendingChoiceQuestion {
@@ -659,7 +675,7 @@ export function parseMessagesToHistory(rawMessages: any[]): any[] {
       if (!text.trim()) continue;
       // If this user message is a choice answer, consume it silently.
       if (consumeChoiceAnswer(text.trim())) continue;
-      entries.push({ kind: "message", role: "user", text, source: "chat" });
+      entries.push({ kind: "message", role: "user", text, source: inferredUserSource });
     } else if (msg.role === "assistant") {
       let text = "";
       const toolUses: any[] = [];
