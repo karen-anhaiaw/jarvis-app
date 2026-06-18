@@ -586,6 +586,25 @@ export class SessionDispatcher {
         traceId,
       } as any);
 
+      // Publish turn.summary on system.event so BackgroundReviewPiece
+      // (and any other subscriber) can track completed turns per session.
+      // Mirrors what TurnTracker did in jarvis.ts before SessionDispatcher
+      // became the single ai.request consumer.
+      this.bus.publish({
+        channel: "system.event",
+        source: "session-dispatcher",
+        event: "turn.summary",
+        data: {
+          sessionId,
+          traceId,
+          outcome: "completed",
+          source: "session-dispatcher",
+          usage: usage ?? { input_tokens: 0, output_tokens: 0 },
+          tools: toolCalls,
+          ms: Date.now() - tStream0,
+        },
+      } as any);
+
       // Route response back to calling session if replyTo set
       const replyTo = d.queue.length === 0 ? undefined : undefined; // replyTo tracked in QueuedMessage
       // Actually: replyTo is stored on the item that was dispatched. We need to track it.
