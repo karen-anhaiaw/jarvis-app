@@ -664,14 +664,19 @@ export function parseMessagesToHistory(rawMessages: any[], sessionId?: string): 
   for (const msg of rawMessages) {
     if (msg.role === "user") {
       if (Array.isArray(msg.content) && msg.content.every((b: any) => b.type === "tool_result")) continue;
+
+      // Join multiple text blocks with \n\n so each PromptBlock appears as a
+      // distinct paragraph instead of being concatenated on one line.
       let text = "";
       if (typeof msg.content === "string") {
         text = msg.content;
       } else if (Array.isArray(msg.content)) {
-        for (const block of msg.content) {
-          if (block.type === "text") text += block.text;
-        }
+        text = msg.content
+          .filter((b: any) => b.type === "text")
+          .map((b: any) => b.text)
+          .join("\n\n");
       }
+
       if (!text.trim()) continue;
       // If this user message is a choice answer, consume it silently.
       if (consumeChoiceAnswer(text.trim())) continue;
