@@ -350,7 +350,10 @@ export class HudState {
   private stableHash(piece: HudPieceData): string {
     const stableData: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(piece.data)) {
-      if (k === "streamingElapsedMs") continue;
+      // Exclude volatile/monotonic fields that plugins may add to force pushes.
+      // They must not affect the stable hash — a change here causes a SSE push
+      // that re-renders the frontend and flickers the working/thinking indicator.
+      if (k === "streamingElapsedMs" || k === "_tick" || k === "_ts" || k === "_seq") continue;
       stableData[k] = v;
     }
     return JSON.stringify({
