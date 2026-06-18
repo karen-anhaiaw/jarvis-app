@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { writeFileSync, existsSync } from "node:fs";
+import { writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../../logger/index.js";
 
@@ -68,6 +68,9 @@ function createBrowserWindow(id, url, partition) {
   browserWindows.set(id, { win: bwin, partition: partition || 'persist:jarvis-browser' });
   return bwin;
 }
+
+// Set app name before ready so macOS Dock shows "JARVIS" instead of "Electron"
+app.setName('JARVIS');
 
 // Grant microphone permission for Web Speech API
 app.commandLine.appendSwitch('ignore-certificate-errors');
@@ -556,10 +559,29 @@ app.on('activate', () => {
 });
 `);
 
-  // With npm workspaces, electron may be hoisted to monorepo root
-  const localElectron = join(process.cwd(), "node_modules", ".bin", "electron");
-  const rootElectron = join(process.cwd(), "..", "node_modules", ".bin", "electron");
-  const electronPath = existsSync(localElectron) ? localElectron : rootElectron;
+  // Resolve the real Electron binary via path.txt (avoids spawning the node wrapper
+  // script at node_modules/.bin/electron, which would create a second Dock icon).
+  // The electron npm package always ships a path.txt with the relative path to the
+  // actual binary inside Electron.app (e.g. "Electron.app/Contents/MacOS/Electron").
+  const resolveElectronBinary = (): string => {
+    const candidates = [
+      join(process.cwd(), "node_modules", "electron"),
+      join(process.cwd(), "..", "node_modules", "electron"),
+    ];
+    for (const dir of candidates) {
+      const pathTxt = join(dir, "path.txt");
+      const distDir = join(dir, "dist");
+      if (existsSync(pathTxt) && existsSync(distDir)) {
+        const relativeBin = readFileSync(pathTxt, "utf8").trim();
+        return join(distDir, relativeBin);
+      }
+    }
+    // Fallback: node wrapper (will show two Dock icons but still works)
+    const localWrapper = join(process.cwd(), "node_modules", ".bin", "electron");
+    const rootWrapper = join(process.cwd(), "..", "node_modules", ".bin", "electron");
+    return existsSync(localWrapper) ? localWrapper : rootWrapper;
+  };
+  const electronPath = resolveElectronBinary();
 
   const child = spawn(electronPath, [electronMain], {
     // Pipe stdout/stderr so we can forward renderer logs to pino (log file).
