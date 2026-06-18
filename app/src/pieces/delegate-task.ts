@@ -40,7 +40,7 @@ import { homedir } from "node:os";
 import type { Piece } from "../core/piece.js";
 import type { EventBus } from "../core/bus.js";
 import type { CapabilityRegistry } from "../capabilities/registry.js";
-import type { AISessionFactory, AIStreamEvent, CapabilityCall, CapabilityResult } from "../ai/types.js";
+import type { AISessionFactory } from "../ai/types.js";
 import type { SessionManager } from "../core/session-manager.js";
 import { AnthropicSessionFactory } from "../ai/anthropic/factory.js";
 import { getProviderForModel } from "../config/index.js";
@@ -252,6 +252,12 @@ export class DelegateTaskPiece implements Piece {
         data: {
           sessionId: workerLabel,
           assistantLabel: workerLabel.toUpperCase(),
+          features: {
+            slashMenu: false,
+            images: false,
+            compaction: false,
+            modelPicker: false,
+          },
         },
         position: { x: 120, y: 120 },
         size: { width: 480, height: 400 },
@@ -288,63 +294,57 @@ export class DelegateTaskPiece implements Piece {
     }
 
     const t0 = Date.now();
-    const deadline = t0 + timeoutMs;
-    let iterations = 0;
     let collectedText = "";
     let totalIn = 0, totalOut = 0, totalCacheR = 0, totalCacheW = 0;
     let aborted = false;
+    let workerError: string | undefined;
 
     try {
-      // Initial prompt
-      let stream: AsyncGenerator<AIStreamEvent, void> = session.sendAndStream(task);
-
-      while (true) {
-        if (Date.now() > deadline) {
+      // Route the task through session-dispatcher by publishing ai.request with
+      // target=workerLabel. The dispatcher handles the full tool-call loop,
+      // emits all ai.stream events (delta, tool_start, tool_done, complete, etc.)
+      // so the HUD ChatPanel for this worker session updates live — identical to
+      // any other session. We collect the final text by listening on ai.stream.
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
           aborted = true;
-          log.warn({ workerLabel, ms: Date.now() - t0 }, "DelegateTask: timeout");
-          break;
-        }
-        if (++iterations > MAX_ITERATIONS) {
-          aborted = true;
-          log.warn({ workerLabel, iterations }, "DelegateTask: max iterations");
-          break;
-        }
+          log.warn({ workerLabel, timeoutMs }, "DelegateTask: timeout");
+          unsub();
+          resolve();
+        }, timeoutMs);
 
-        const pendingTools: CapabilityCall[] = [];
-        let stopReason: string | undefined;
-
-        for await (const evt of stream) {
-          if (evt.type === "text_delta" && evt.text) {
-            collectedText += evt.text;
-          } else if (evt.type === "tool_use" && evt.toolUse) {
-            pendingTools.push(evt.toolUse);
-          } else if (evt.type === "message_complete") {
-            stopReason = evt.stopReason;
-            const u = evt.usage;
-            if (u) {
-              totalIn += u.input_tokens ?? 0;
-              totalOut += u.output_tokens ?? 0;
-              totalCacheR += u.cache_read_input_tokens ?? 0;
-              totalCacheW += u.cache_creation_input_tokens ?? 0;
+        const unsub = this.bus.subscribe("ai.stream", (msg: any) => {
+          if (msg.target !== workerLabel) return;
+          if (msg.event === "delta" && msg.text) {
+            collectedText += msg.text;
+          } else if (msg.event === "complete") {
+            // complete carries the full turn text; prefer accumulated deltas
+            if (!collectedText && msg.text) collectedText = msg.text;
+            // collect usage if embedded
+            if (msg.usage) {
+              totalIn += msg.usage.input_tokens ?? 0;
+              totalOut += msg.usage.output_tokens ?? 0;
+              totalCacheR += msg.usage.cache_read_input_tokens ?? 0;
+              totalCacheW += msg.usage.cache_creation_input_tokens ?? 0;
             }
-          } else if (evt.type === "error") {
-            log.warn({ workerLabel, error: evt.error }, "DelegateTask: stream error");
-            aborted = true;
-            stopReason = "error";
+            clearTimeout(timer);
+            unsub();
+            resolve();
+          } else if (msg.event === "error") {
+            workerError = msg.error;
+            clearTimeout(timer);
+            unsub();
+            resolve();
           }
-        }
+        });
 
-        if (stopReason !== "tool_use" || pendingTools.length === 0) {
-          // Terminal: model finished without further tool calls.
-          break;
-        }
-
-        // Execute tools and feed results back.
-        const results: CapabilityResult[] = await this.opts.registry.execute(pendingTools);
-        session.addToolResults(pendingTools, results);
-        // continueAndStream re-enters the API with the tool_results appended
-        stream = session.continueAndStream();
-      }
+        this.bus.publish({
+          channel: "ai.request",
+          source: "delegate-task",
+          target: workerLabel,
+          text: task,
+        });
+      });
     } catch (err: any) {
       log.error({ workerLabel, err: err?.message ?? err }, "DelegateTask: worker crashed");
       return {
@@ -378,11 +378,14 @@ export class DelegateTaskPiece implements Piece {
     const ms = Date.now() - t0;
     const summary = collectedText.trim();
 
+    if (workerError) {
+      return { error: workerError, partialOutput: summary };
+    }
+
     log.info(
       {
         workerLabel,
         ms,
-        iterations,
         chars: summary.length,
         usage: { in: totalIn, out: totalOut, cache_r: totalCacheR, cache_w: totalCacheW },
         aborted,
@@ -396,7 +399,6 @@ export class DelegateTaskPiece implements Piece {
         label: workerLabel,
         role: roleId,
         model: effectiveModel,
-        iterations,
         durationMs: ms,
         aborted,
       },
