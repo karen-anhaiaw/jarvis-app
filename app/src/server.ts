@@ -234,6 +234,27 @@ export class HttpServer {
       return;
     }
 
+    // POST /hud/window-bounds — save main Electron window position/size.
+    // Called by the Electron main process on 'moved'/'resized' (debounced).
+    // Persisted under settings.window so it survives restarts.
+    if (req.url === "/hud/window-bounds" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        try {
+          const { x, y, width, height } = JSON.parse(body);
+          const settings = loadSettings();
+          (settings as any).window = { x, y, width, height };
+          saveSettings(settings);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch {
+          res.writeHead(400); res.end();
+        }
+      });
+      return;
+    }
+
     if (req.url === "/hud/hide" && req.method === "POST") {
       let body = "";
       req.on("data", (chunk) => { body += chunk; });
