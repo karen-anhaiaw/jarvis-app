@@ -56,6 +56,11 @@ export class SessionDispatcher {
       // Internal pre-fetch signal — must never be routed to the LLM
       if ((msg as any).data?._preFetch) return;
       if (!msg.target) return; // targetless — JarvisCore already logs a warning for these
+      // Actor dispatch messages carry data.role — they are lifecycle signals
+      // handled by actor-runner (which creates the session and re-publishes
+      // without data.role). We must not process the original here or the
+      // SessionDispatcher would run sendAndStream twice per dispatch.
+      if ((msg as any).data?.role) return;
       this.handleRequest(msg);
     });
 
