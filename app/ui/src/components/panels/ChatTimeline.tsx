@@ -850,20 +850,20 @@ export const ChatTimeline = React.memo(function ChatTimeline({
                 {entry.status === 'done' && entry.ms != null && <span style={{ marginLeft: '4px' }}>{entry.ms}ms</span>}
                 {entry.status === 'cancelled' && <span style={{ fontStyle: 'italic' }}> interrupted</span>}
                 {hasMore && <span style={{ marginLeft: '4px', opacity: 0.5 }}>{entry.expanded ? '▾' : '▸'}</span>}
-                {/* ⤢ open delegate chat panel — only for delegate_read_task with a worker label */}
-                {entry.name === 'delegate_read_task' && (() => {
+                {/* ⤢ re-open delegate chat panel after it was closed — only when done */}
+                {entry.name === 'delegate_read_task' && entry.status === 'done' && (() => {
                   let workerLabel: string | undefined
                   try { workerLabel = JSON.parse(entry.output ?? '{}')?.worker?.label } catch {}
                   if (!workerLabel) return null
                   const pieceId = `delegate-chat-${workerLabel}`
                   return (
                     <span
-                      title={`Open delegate chat: ${workerLabel}`}
+                      title={`Re-open worker chat: ${workerLabel}`}
                       onClick={(e) => {
                         e.stopPropagation()
                         fetch('/hud/show', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pieceId }) })
                       }}
-                      style={{ marginLeft: '8px', cursor: 'pointer', opacity: 0.7, fontSize: '11px' }}
+                      style={{ marginLeft: '8px', cursor: 'pointer', opacity: 0.6, fontSize: '11px' }}
                     >⤢</span>
                   )
                 })()}
