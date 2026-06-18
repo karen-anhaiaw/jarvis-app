@@ -248,11 +248,33 @@ export class PluginManager implements Piece {
   notifyLoadFailures(): void {
     if (this.pluginLoadFailures.length === 0) return;
     for (const { name, err } of this.pluginLoadFailures) {
+      // Build an actionable message so the LLM can diagnose and fix without human help.
+      // The self-healing path already tried npm install; if we reach here, it failed
+      // or the error was not a missing-dep issue. Give the LLM clear next steps.
+      const pluginDir = join(PLUGINS_DIR, name);
+      const hasPkgJson = existsSync(join(pluginDir, "package.json"));
+      const isMissingDep = /Cannot find (package|module)/i.test(err);
+      const isSelfHealFailed = err.includes("Self-heal failed");
+
+      let actionBlock = "";
+      if (isMissingDep || isSelfHealFailed) {
+        actionBlock = [
+          "",
+          "**Automated self-heal attempted npm install but the plugin still failed to load.**",
+          "You MUST now investigate and resolve this. Follow these steps:",
+          `1. Run \`bash: cd ${pluginDir} && npm install --userconfig=/dev/null --registry=https://registry.npmjs.org/ 2>&1\``,
+          "2. If the error mentions a native module (e.g. better-sqlite3, canvas, sharp), check if the module compiled correctly: look for a .node file in its build/Release/ directory.",
+          "3. If the .node file is missing, run \`npm rebuild\` in the plugin directory.",
+          "4. After fixing, restart JARVIS for the plugin to reload.",
+          "5. If the error is unresolvable, inform the user and suggest disabling the plugin with plugin_disable.",
+        ].join("\n");
+      }
+
       this.bus.publish({
         channel: "ai.request",
         source: "system",
         target: DEFAULT_SESSION,
-        text: `[SYSTEM] Plugin **${name}** failed to load: ${err}\n\nThe plugin has been skipped. JARVIS continues normally without it.`,
+        text: `[SYSTEM] Plugin **${name}** failed to load: ${err}\n\nThe plugin has been skipped. JARVIS continues normally without it.${actionBlock}`,
       } as any);
     }
     this.pluginLoadFailures = [];
@@ -419,7 +441,48 @@ export class PluginManager implements Piece {
           // without requiring a full process kill+relaunch each time.
           const { statSync: _pStat } = await import("fs");
           const _pMtime = _pStat(entryPath).mtimeMs;
-          const mod = await import(`${entryPath}?t=${_pMtime}`);
+
+          // ── Self-healing import ───────────────────────────────────────────
+          // If the import fails with a missing-package error, try npm install
+          // in the plugin dir and retry once. Covers fresh clones, corrupted
+          // node_modules, or plugins added outside the normal install path.
+          let mod: any;
+          try {
+            mod = await import(`${entryPath}?t=${_pMtime}`);
+          } catch (importErr: any) {
+            const errStr = String(importErr?.message ?? importErr);
+            const isMissingDep = /Cannot find (package|module)/i.test(errStr);
+            const hasPkgJson = existsSync(join(pluginDir, "package.json"));
+
+            if (isMissingDep && hasPkgJson) {
+              log.warn({ name, err: errStr }, "PluginManager: missing deps — attempting npm install");
+              try {
+                const npmrcPath = join(pluginDir, ".npmrc");
+                const userconfigFlag = existsSync(npmrcPath)
+                  ? ` --userconfig "${npmrcPath}"`
+                  : " --userconfig=/dev/null";
+                execSync(
+                  `npm install --registry=https://registry.npmjs.org/${userconfigFlag}`,
+                  { cwd: pluginDir, timeout: 120000 },
+                );
+                log.info({ name }, "PluginManager: npm install succeeded — retrying import");
+                // New timestamp to bypass Node's module cache
+                mod = await import(`${entryPath}?t=${Date.now()}`);
+              } catch (healErr: any) {
+                const healErrStr = String(healErr?.message ?? healErr);
+                log.error({ name, healErr: healErrStr }, "PluginManager: self-heal failed");
+                // Re-throw with context so notifyLoadFailures can surface it
+                throw new Error(
+                  `Self-heal failed for plugin ${name}.\n` +
+                  `Import error: ${errStr}\n` +
+                  `npm install error: ${healErrStr}`,
+                );
+              }
+            } else {
+              throw importErr;
+            }
+          }
+
           if (typeof mod.createPieces === "function" && this.pieceManager) {
             const configKey = `plugin:${name}`;
             const ctx: PluginContext = {
