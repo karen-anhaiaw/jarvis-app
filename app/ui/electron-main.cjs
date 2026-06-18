@@ -91,11 +91,20 @@ app.whenReady().then(() => {
     ? displays[displayIndex]
     : displays.find(d => d.id !== primary.id) ?? primary;
 
-  // Size: 1920x1080 centered on target display
-  const winWidth = Math.min(1920, target.bounds.width);
-  const winHeight = Math.min(1080, target.bounds.height);
-  const winX = target.bounds.x + Math.floor((target.bounds.width - winWidth) / 2);
-  const winY = target.bounds.y + Math.floor((target.bounds.height - winHeight) / 2);
+  // Restore saved window bounds if available; otherwise center on target display.
+  let savedBounds = null;
+  try {
+    const savedResp = require('fs').readFileSync(require('path').join(require('os').homedir(), '.jarvis', 'settings.user.json'), 'utf-8');
+    const savedSettings = JSON.parse(savedResp);
+    if (savedSettings.window && typeof savedSettings.window.x === 'number') {
+      savedBounds = savedSettings.window;
+    }
+  } catch (e) { /* no saved bounds */ }
+
+  const winWidth  = savedBounds ? savedBounds.width  : Math.min(1920, target.bounds.width);
+  const winHeight = savedBounds ? savedBounds.height : Math.min(1080, target.bounds.height);
+  const winX = savedBounds ? savedBounds.x : target.bounds.x + Math.floor((target.bounds.width  - winWidth)  / 2);
+  const winY = savedBounds ? savedBounds.y : target.bounds.y + Math.floor((target.bounds.height - winHeight) / 2);
 
   win = new BrowserWindow({
     x: winX,
@@ -116,6 +125,24 @@ app.whenReady().then(() => {
   win.once('ready-to-show', () => {
     win.show();
   });
+
+  // Persist main window position/size on move or resize (debounced 500ms).
+  let saveWinBoundsTimer = null;
+  const saveMainWindowBounds = () => {
+    clearTimeout(saveWinBoundsTimer);
+    saveWinBoundsTimer = setTimeout(() => {
+      if (!win || win.isDestroyed()) return;
+      const b = win.getBounds();
+      const postData = JSON.stringify({ x: b.x, y: b.y, width: b.width, height: b.height });
+      const req2 = nuRequest({ hostname: 'localhost', port: 50052, path: '/hud/window-bounds', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) } });
+      req2.write(postData);
+      req2.end();
+      req2.on('error', () => {});
+    }, 500);
+  };
+  win.on('moved', saveMainWindowBounds);
+  win.on('resized', saveMainWindowBounds);
 
   // Hide instead of close — keeps the backend alive on macOS.
   // Cmd+Q still quits fully via the app menu.
