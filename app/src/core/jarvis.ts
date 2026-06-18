@@ -32,6 +32,7 @@ import { config } from "../config/index.js";
 import { graphRegistry } from "./graph-registry.js";
 import { DEFAULT_SESSION } from "./constants.js";
 import { TurnTracker } from "./turn-tracker.js";
+import type { SessionDispatcher } from "./session-dispatcher.js";
 
 // ─── Inter-session dispatch text (attribution + reply routing) ────────────
 // WHY: when session A publishes ai.request into session B, B's LLM must know
@@ -246,6 +247,13 @@ export class JarvisCore implements Piece {
    * turn-inspector initial snapshot).
    */
   private turns!: TurnTracker;
+  /** Injected after construction — used by abortSession to drain queued messages */
+  private dispatcher?: SessionDispatcher;
+
+  /** Set by main.ts after both JarvisCore and SessionDispatcher are created */
+  setDispatcher(dispatcher: SessionDispatcher): void {
+    this.dispatcher = dispatcher;
+  }
 
   /** Turn tracker — exposed for introspection (jarvis_eval) and the
    *  turn-inspector piece's initial snapshot. Available after start(). */
@@ -287,6 +295,7 @@ export class JarvisCore implements Piece {
   private getTrace(sessionId: string): string | undefined {
     return this.currentTrace.get(sessionId);
   }
+
   private jarvisMdPath = join(homedir(), ".jarvis", "jarvis.md");
 
   /**
@@ -397,13 +406,10 @@ export class JarvisCore implements Piece {
       if ((msg as any).event !== "session.closed") return;
       const sessionId = (msg as any).data?.sessionId as string | undefined;
       if (!sessionId) return;
-      const hadQueue = this.pendingPrompts.delete(sessionId);
-      this.pendingReplyTo.delete(sessionId);
-      this.currentTrace.delete(sessionId);
-      this.sessionStates.delete(sessionId);
-      this.deriveGlobalState();
+      // SessionDispatcher manages per-session state eviction.
+      // JarvisCore only needs to update HUD on session close.
       this.updateHud();
-      log.debug({ sessionId, hadQueue }, "JarvisCore: per-session state evicted on session.closed");
+      log.debug({ sessionId }, "JarvisCore: session closed, HUD updated");
     });
 
     // Register HUD piece
@@ -559,7 +565,7 @@ export class JarvisCore implements Piece {
     const wasWaitingTools = currentState === "waiting_tools";
     const pendingTools = managed?.pendingToolCalls;
 
-    log.info({ sessionId, state: currentState, queueSize: (this.pendingPrompts.get(sessionId) ?? []).length }, "JarvisCore: *** USER ABORT REQUESTED ***");
+    log.info({ sessionId, state: currentState }, "JarvisCore: *** USER ABORT REQUESTED ***");
 
     // Clean up message history BEFORE aborting the session
     if (wasWaitingTools && pendingTools && managed?.session.cleanupAbortedTools) {
@@ -576,9 +582,8 @@ export class JarvisCore implements Piece {
     this.setSessionState(sessionId, nextState);
     this.updateHud();
     this.broadcastSessionState(sessionId, nextState);
-    this.broadcastPendingQueue(sessionId);
 
-    const traceId = this.getTrace(sessionId);
+    const traceId = undefined;
 
     if (wasWaitingTools && pendingTools) {
       for (const tc of pendingTools) {
@@ -606,14 +611,10 @@ export class JarvisCore implements Piece {
     // is open for this session; idempotent if already closed).
     this.turns.abort(sessionId);
 
-    // Trace ends — clear so the next turn starts with a fresh id.
-    this.currentTrace.delete(sessionId);
-
-    // Drain any queued prompts AFTER publishing aborted — ensures the frontend
-    // has processed the abort event before the new turn's prompt_dispatched
-    // arrives. Prevents the aborted event from racing with (and clobbering)
-    // the new turn's stream state on the frontend.
-    this.drainQueue(sessionId);
+    // Drain any queued prompts via the SessionDispatcher AFTER publishing
+    // aborted — ensures the frontend has processed the abort event before
+    // the new turn's prompt_dispatched arrives.
+    this.dispatcher?.abort(sessionId);
   }
 
   /**

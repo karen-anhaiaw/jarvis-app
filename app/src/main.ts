@@ -129,6 +129,7 @@ async function main() {
   // for ALL sessions. JarvisCore and actor-runner become lifecycle-only.
   const dispatcher = new SessionDispatcher(sessions);
   dispatcher.start(bus);
+  jarvisCore.setDispatcher(dispatcher);
 
   // Tell ChatPiece which sessions JarvisCore owns. For owned sessions
   // (main, grpc-*, etc.), JarvisCore emits prompt_dispatched and ChatPiece
