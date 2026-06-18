@@ -697,13 +697,15 @@ if $IS_MAC; then
       bash scripts/install-macos-app.sh > "$APP_INSTALL_LOG" 2>&1
       APP_EXIT=$?
       if [ $APP_EXIT -eq 0 ] && [ -d "$APP_DIR" ]; then
-        # Validate the launcher points to this repo
-        LAUNCHER_REPO=$(grep "JARVIS_DIR=" "$APP_DIR/Contents/MacOS/jarvis" 2>/dev/null | head -1 | sed 's/.*JARVIS_DIR="\(.*\)"/\1/')
-        if [ "$LAUNCHER_REPO" = "$REPO_DIR/app" ]; then
+        # Validate the launcher points to this repo. The launcher stores the
+        # install-time path in `REPO_DIR="..."` (JARVIS_DIR is derived from it
+        # at runtime as "$REPO_DIR/app"), so we compare against REPO_DIR.
+        LAUNCHER_REPO=$(grep "^REPO_DIR=" "$APP_DIR/Contents/MacOS/jarvis" 2>/dev/null | head -1 | sed 's/.*REPO_DIR="\(.*\)"/\1/')
+        if [ "$LAUNCHER_REPO" = "$REPO_DIR" ]; then
           success "JARVIS.app installed — launch via Spotlight (⌘+Space → JARVIS)"
         else
           warn "JARVIS.app installed but launcher points to: ${LAUNCHER_REPO:-unknown}"
-          dim "Expected: $REPO_DIR/app — run setup again to fix"
+          dim "Expected: $REPO_DIR — run setup again to fix"
         fi
       else
         warn "macOS app installation failed (exit $APP_EXIT)"
@@ -813,10 +815,16 @@ for c in d.get('components',[]):
         print(c.get('status','unknown'))
         break
 " 2>/dev/null || true)
-      if [ "$STATUS" != "running" ] && [ "$STATUS" != "waiting_tools" ] && [ "$STATUS" != "processing" ]; then
-        ALL_RUNNING=false
-        FAILED_PIECES="$FAILED_PIECES $piece($STATUS)"
-      fi
+      # Healthy states vary by piece: generic pieces report "running"; the
+      # jarvis-core reactor reports "online" when idle (or processing/
+      # waiting_tools when busy). All of these mean the piece is alive.
+      case "$STATUS" in
+        running|waiting_tools|processing|online|idle) ;;
+        *)
+          ALL_RUNNING=false
+          FAILED_PIECES="$FAILED_PIECES $piece($STATUS)"
+          ;;
+      esac
     done
     if $ALL_RUNNING; then
       check_pass "All core pieces running"
@@ -882,8 +890,8 @@ for c in d.get('components',[]):
     if $IS_MAC; then
       APP_DIR="$HOME/Applications/JARVIS.app"
       if [ -d "$APP_DIR" ] && [ -x "$APP_DIR/Contents/MacOS/jarvis" ]; then
-        LAUNCHER_REPO=$(grep "JARVIS_DIR=" "$APP_DIR/Contents/MacOS/jarvis" 2>/dev/null | head -1 | sed 's/.*JARVIS_DIR="\(.*\)"/\1/')
-        if [ "$LAUNCHER_REPO" = "$REPO_DIR/app" ]; then
+        LAUNCHER_REPO=$(grep "^REPO_DIR=" "$APP_DIR/Contents/MacOS/jarvis" 2>/dev/null | head -1 | sed 's/.*REPO_DIR="\(.*\)"/\1/')
+        if [ "$LAUNCHER_REPO" = "$REPO_DIR" ]; then
           check_pass "JARVIS.app installed and points to this repo"
         else
           check_warn "JARVIS.app points to different repo: $LAUNCHER_REPO"
