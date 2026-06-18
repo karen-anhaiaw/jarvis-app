@@ -219,8 +219,9 @@ export class DelegateTaskPiece implements Piece {
       "DelegateTask: spawning worker",
     );
 
-    // Open the worker chat panel immediately — same pattern as actor.openActorChat().
-    // The panel appears as a floating ChatPanel showing the worker's live session.
+    // Register the HUD panel (hidden). The user opens it via ⤢ in the
+    // chat capability block once the task is done (worker.label in output JSON).
+    // Pattern: same as actor.openActorChat() but triggered by user click, not auto-open.
     this.bus.publish({
       channel: "hud.update",
       source: this.id,
@@ -238,7 +239,7 @@ export class DelegateTaskPiece implements Piece {
         position: { x: 120, y: 120 },
         size: { width: 480, height: 400 },
         ephemeral: true,
-        visible: true,
+        visible: false,   // hidden — user clicks ⤢ in chat block to open
         renderer: { plugin: null as unknown as string, file: "ChatPanel" },
       },
     });
