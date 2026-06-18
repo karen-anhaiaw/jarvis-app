@@ -398,6 +398,22 @@ export class JarvisCore implements Piece {
     // subscribes to these channels — doing so caused duplicate sendAndStream
     // calls when actor-runner also processed the same messages.
 
+    // Sync globalState from SessionDispatcher's session_state events.
+    // SessionDispatcher publishes ai.stream/session_state on every
+    // push/pop — JarvisCore mirrors the main session state for HUD/reactor.
+    this.bus.subscribe<any>("ai.stream", (msg) => {
+      if (msg.event !== "session_state") return;
+      if (msg.target !== DEFAULT_SESSION) return; // only main drives the core reactor
+      const state = msg.state as "idle" | "processing" | "waiting_tools";
+      if (state === "idle") {
+        this.sessionStates.delete(DEFAULT_SESSION);
+      } else {
+        this.sessionStates.set(DEFAULT_SESSION, state);
+      }
+      this.deriveGlobalState();
+      this.updateHud();
+    });
+
     // Session lifecycle eviction (F3.14): when SessionManager closes a
     // session, drop every per-session entry this piece holds. Without this,
     // pendingPrompts / pendingReplyTo / currentTrace / sessionStates kept
