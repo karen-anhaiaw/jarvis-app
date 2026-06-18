@@ -329,7 +329,7 @@ export function ChatPanel({
           const ms = startTime ? Date.now() - startTime : undefined
           toolStartTimes.current.delete(data.id)
           setEntries(prev => prev.map(e =>
-            e.kind === 'capability' && e.id === data.id ? { ...e, status: 'done' as const, ms, output: data.output } : e
+            e.kind === 'capability' && e.id === data.id ? { ...e, status: 'done' as const, ms, output: data.output, expanded: false } : e
           ))
           setEntries(prev => {
             const hasRunning = prev.some(e => e.kind === 'capability' && e.status === 'running')
