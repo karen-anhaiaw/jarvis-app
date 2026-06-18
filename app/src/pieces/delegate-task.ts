@@ -220,11 +220,14 @@ export class DelegateTaskPiece implements Piece {
     );
 
     // Emit tool_progress with the workerLabel so ChatTimeline shows ⤢ while running.
-    // Deferred via setImmediate so tool_start (emitted by CapabilityExecutor before
-    // calling the handler) reaches the frontend first and creates the capability block.
+    // Delayed 150ms: tool_start is emitted synchronously by jarvis.ts before the
+    // capability.request is published. The handler is invoked asynchronously by the
+    // executor after capability.request. But the SSE flush to the browser can still
+    // race. 150ms gives the browser enough time to receive tool_start and create the
+    // capability entry before the progress chunk arrives.
     const toolUseId = input.__toolUseId ? String(input.__toolUseId) : workerLabel;
     const callerSession = input.__sessionId ? String(input.__sessionId) : "main";
-    setImmediate(() => {
+    const progressTimer = setTimeout(() => {
       this.bus.publish({
         channel: "ai.stream",
         source: this.id,
@@ -233,7 +236,7 @@ export class DelegateTaskPiece implements Piece {
         toolId: toolUseId,
         chunk: `__delegate_worker:${workerLabel}`,
       } as any);
-    });
+    }, 150);
 
     // Register the HUD panel (hidden). User opens via ⤢ in the chat block.
     this.bus.publish({
