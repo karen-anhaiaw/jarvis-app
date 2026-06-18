@@ -569,6 +569,11 @@ export class SessionDispatcher {
       }
 
       d.running = false;
+      // Drain any queued messages now that the turn is complete.
+      // Must be called here (not only in handleRequest's .finally) because
+      // tool-loop continuations go through handleToolResult → consumeStream
+      // directly, bypassing the .finally chain in handleRequest.
+      void this.drainQueue(sessionId);
     }
   }
 
