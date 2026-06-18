@@ -6,6 +6,7 @@
 import { EventBus } from "./core/bus.js";
 import { SessionManager } from "./core/session-manager.js";
 import { JarvisCore } from "./core/jarvis.js";
+import { SessionDispatcher } from "./core/session-dispatcher.js";
 import { HudState } from "./core/hud-state.js";
 import { CapabilityRegistry } from "./capabilities/registry.js";
 import { CapabilityExecutor } from "./capabilities/executor.js";
@@ -123,6 +124,11 @@ async function main() {
   const sessions = sessionsForRouter;
   jarvisCore.setSessions(sessions);
   chatPiece.setSessions(sessions);
+
+  // SessionDispatcher — single consumer of ai.request and capability.result
+  // for ALL sessions. JarvisCore and actor-runner become lifecycle-only.
+  const dispatcher = new SessionDispatcher(sessions);
+  dispatcher.start(bus);
 
   // Tell ChatPiece which sessions JarvisCore owns. For owned sessions
   // (main, grpc-*, etc.), JarvisCore emits prompt_dispatched and ChatPiece

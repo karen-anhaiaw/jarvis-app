@@ -384,35 +384,10 @@ export class JarvisCore implements Piece {
       publish: (m) => this.bus.publish(m as Parameters<EventBus["publish"]>[0]),
     });
 
-    this.bus.subscribe<AIRequestMessage>("ai.request", (msg) => {
-      // _preFetch: internal signal from actor-runner to kick off context
-      // injectors before sendAndStream. It must never be routed to the LLM.
-      if ((msg as any).data?._preFetch) return;
-      // Actor sessions (actor-*) are fully managed by actor-runner.
-      // JarvisCore must not process their ai.request messages — doing so
-      // causes duplicate sendAndStream calls on the same session in parallel.
-      if (msg.target?.startsWith("actor-")) return;
-      if (msg.target) {
-        return this.handlePrompt(msg);
-      }
-      // Targetless ai.request → DROP, but never silently. There is NO
-      // default target by design: routing a stray/buggy publisher's message
-      // into the user's main chat would be ghost behavior (decided 2026-06-10,
-      // mission jarvis-fix). target is mandatory for ai.request — the
-      // bus_publish tool enforces it at schema level; internal publishers
-      // must set it explicitly. This warn is the observability net.
-      log.warn({
-        source: msg.source,
-        replyTo: msg.replyTo,
-        traceId: msg.traceId,
-        preview: preview(msg.text ?? "", 80),
-      }, "JarvisCore: ai.request WITHOUT target — dropped (no default; fix the publisher)");
-    });
-
-    this.bus.subscribe<CapabilityResultMessage>("capability.result", (msg) => {
-      // Handle capability results for any session we manage
-      if (msg.target) return this.handleToolResult(msg);
-    });
+    // ai.request and capability.result are now handled exclusively by
+    // SessionDispatcher (session-dispatcher.ts). JarvisCore no longer
+    // subscribes to these channels — doing so caused duplicate sendAndStream
+    // calls when actor-runner also processed the same messages.
 
     // Session lifecycle eviction (F3.14): when SessionManager closes a
     // session, drop every per-session entry this piece holds. Without this,
