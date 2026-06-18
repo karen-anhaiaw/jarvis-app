@@ -125,10 +125,11 @@ async function main() {
   jarvisCore.setSessions(sessions);
   chatPiece.setSessions(sessions);
 
-  // SessionDispatcher — single consumer of ai.request and capability.result
-  // for ALL sessions. JarvisCore and actor-runner become lifecycle-only.
+  // SessionDispatcher — instantiated here but started AFTER pieceManager.startAll()
+  // so that plugins (e.g. actor-runner) subscribe to ai.request BEFORE the dispatcher.
+  // Bus delivers to subscribers in registration order — actor-runner must run first
+  // to create the session before the dispatcher calls sendAndStream.
   const dispatcher = new SessionDispatcher(sessions);
-  dispatcher.start(bus);
   jarvisCore.setDispatcher(dispatcher);
 
   // Tell ChatPiece which sessions JarvisCore owns. For owned sessions
@@ -520,6 +521,11 @@ async function main() {
   });
 
   await pieceManager.startAll();
+
+  // Start dispatcher AFTER all pieces/plugins have subscribed — ensures actor-runner
+  // (and any other session-provisioning plugin) registers its ai.request subscriber
+  // first, so sessions are created before the dispatcher processes the same message.
+  dispatcher.start(bus);
 
   console.log("JARVIS starting...");
   console.log(`HUD  ${server.url}\n`);
