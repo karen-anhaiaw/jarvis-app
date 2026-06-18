@@ -102,7 +102,11 @@ export class SessionDispatcher {
     const d = this.state.get(sessionId);
     if (!d) return;
     this.sessions.abort(sessionId);
-    d.running = false;
+    // Do NOT set d.running = false here — the stream is still iterating in
+    // consumeStream. Setting running=false prematurely would allow the next
+    // queued item to be dispatched before the current stream finishes, causing
+    // parallel execution. consumeStream is responsible for resetting running
+    // and calling drainQueue once the stream has fully terminated (complete or aborted).
     d.currentTraceId = undefined;
     d.pendingToolCalls = undefined;
     // Preserve queue — user aborted THIS turn, not future queued ones
