@@ -385,6 +385,13 @@ export class JarvisCore implements Piece {
     });
 
     this.bus.subscribe<AIRequestMessage>("ai.request", (msg) => {
+      // _preFetch: internal signal from actor-runner to kick off context
+      // injectors before sendAndStream. It must never be routed to the LLM.
+      if ((msg as any).data?._preFetch) return;
+      // Actor sessions (actor-*) are fully managed by actor-runner.
+      // JarvisCore must not process their ai.request messages — doing so
+      // causes duplicate sendAndStream calls on the same session in parallel.
+      if (msg.target?.startsWith("actor-")) return;
       if (msg.target) {
         return this.handlePrompt(msg);
       }
