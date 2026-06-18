@@ -1,6 +1,6 @@
 // src/pieces/delegate-task.ts
 //
-// `delegate_read_task` capability — spawn a short-lived AISession in a cheap
+// `delegate_task` capability — spawn a short-lived AISession in a cheap
 // model, run an exploratory/read task, capture the answer, kill the session.
 //
 // The KEY behavior: the main caller's session never loads raw tool_results
@@ -64,10 +64,7 @@ export interface DelegateTaskOptions {
   sessions?: SessionManager;
 }
 
-/** Hard cap on iterations to prevent runaway worker. */
-const MAX_ITERATIONS = 30;
-/** Hard cap on wall-clock seconds. */
-const DEFAULT_TIMEOUT_S = 120;
+
 
 interface RoleDefinition {
   id: string;
@@ -111,7 +108,7 @@ export interface DelegateRunOptions {
   task: string;
   role?: string;
   model?: string;
-  timeout_seconds?: number;
+  fire_and_forget?: boolean;
 }
 
 export class DelegateTaskPiece implements Piece {
@@ -132,16 +129,18 @@ export class DelegateTaskPiece implements Piece {
   async start(bus: EventBus): Promise<void> {
     this.bus = bus;
     this.opts.registry.register({
-      name: "delegate_read_task",
+      name: "delegate_task",
       description:
-        "Delegate a READ-ONLY exploration task to an ephemeral worker running in a CHEAPER model. " +
-        "Use when you need to read large files, run extensive grep, or explore code WITHOUT loading the raw content into your own context. " +
-        "The worker reads/searches/explores in ITS OWN context, then returns ONLY a summary (typically 100-1000 tokens). " +
+        "Delegate a task to an ephemeral worker running in a CHEAPER model. " +
+        "Use when you need to run tools, read large files, explore code, or execute multi-step work WITHOUT loading the raw content into your own context. " +
+        "The worker runs autonomously in ITS OWN context, then returns a summary. " +
         "Your main session never pays cache for the raw bytes. " +
+        "Set fire_and_forget=true to return immediately without waiting for the result (use for background tasks). " +
         "Examples: " +
         "(1) summarize a 5000-line file's responsibility. " +
         "(2) find all callers of a function across a codebase. " +
-        "(3) explore an unfamiliar service before designing changes.",
+        "(3) review a PR and post results to Slack. " +
+        "(4) run a long investigation in the background.",
       input_schema: {
         type: "object",
         properties: {
@@ -157,16 +156,16 @@ export class DelegateTaskPiece implements Piece {
             type: "string",
             description: "Optional role to use as the worker's system prompt (file in ~/.jarvis/roles/). Defaults to settings delegate.defaultRole (fallback 'generic').",
           },
-          timeout_seconds: {
-            type: "number",
-            description: `Wall-clock timeout. Default ${DEFAULT_TIMEOUT_S}s.`,
+          fire_and_forget: {
+            type: "boolean",
+            description: "If true, return immediately without waiting for the worker to finish. Use for background tasks where you don't need the result inline.",
           },
         },
         required: ["task"],
       },
       handler: async (input) => this.handleDelegate(input),
     });
-    log.info("DelegateTask: registered delegate_read_task capability");
+    log.info("DelegateTask: registered delegate_task capability");
   }
 
   async stop(): Promise<void> {
@@ -181,7 +180,7 @@ export class DelegateTaskPiece implements Piece {
       task: opts.task,
       role: opts.role,
       model: opts.model,
-      timeout_seconds: opts.timeout_seconds,
+      fire_and_forget: opts.fire_and_forget,
     }) as any;
     return {
       summary: result.summary ?? result.partialOutput ?? "",
@@ -198,7 +197,7 @@ export class DelegateTaskPiece implements Piece {
     // hardcoded in core (F3.13).
     const roleId = String(input.role ?? loadSettings().delegate?.defaultRole ?? "generic");
     const modelArg = input.model ? String(input.model) : undefined;
-    const timeoutMs = Math.min(600, Math.max(10, Number(input.timeout_seconds ?? DEFAULT_TIMEOUT_S))) * 1000;
+    const fireAndForget = Boolean(input.fire_and_forget);
 
     const role = loadRole(roleId, this.rolesDir);
     if (!role) {
@@ -305,14 +304,21 @@ export class DelegateTaskPiece implements Piece {
       // emits all ai.stream events (delta, tool_start, tool_done, complete, etc.)
       // so the HUD ChatPanel for this worker session updates live — identical to
       // any other session. We collect the final text by listening on ai.stream.
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          aborted = true;
-          log.warn({ workerLabel, timeoutMs }, "DelegateTask: timeout");
-          unsub();
-          resolve();
-        }, timeoutMs);
+      //
+      // fire_and_forget: publish and return immediately — worker keeps running
+      // in the background. The HUD panel stays open for inspection.
+      if (fireAndForget) {
+        this.bus.publish({
+          channel: "ai.request",
+          source: "delegate-task",
+          target: workerLabel,
+          text: task,
+        });
+        clearTimeout(progressTimer);
+        return { fired: true, worker: workerLabel };
+      }
 
+      await new Promise<void>((resolve) => {
         const unsub = this.bus.subscribe("ai.stream", (msg: any) => {
           if (msg.target !== workerLabel) return;
           if (msg.event === "delta" && msg.text) {
@@ -327,12 +333,10 @@ export class DelegateTaskPiece implements Piece {
               totalCacheR += msg.usage.cache_read_input_tokens ?? 0;
               totalCacheW += msg.usage.cache_creation_input_tokens ?? 0;
             }
-            clearTimeout(timer);
             unsub();
             resolve();
           } else if (msg.event === "error") {
             workerError = msg.error;
-            clearTimeout(timer);
             unsub();
             resolve();
           }
