@@ -17,6 +17,8 @@ import { buildDispatchText } from "./jarvis.js";
 /** Per-session queue entry */
 interface QueuedMessage {
   text: string;
+  /** Optional pre-built PromptBlocks — when set, used instead of text in dispatchToSession */
+  blocks?: import("../ai/types.js").PromptBlock[];
   source: string;
   replyTo?: string;
   images?: AIRequestMessage["images"];
@@ -184,13 +186,22 @@ export class SessionDispatcher {
         ? systems.map(s => `<system-reminder>\n${s}\n</system-reminder>`).join("\n\n") + "\n\n"
         : "";
 
-      const dispatchText = buildDispatchText({
-        text: item.text,
-        source: item.source,
-        replyTo: item.replyTo,
-        reminderBlock,
-        sourceIsLiveSession: this.sessions.has(item.source),
-      });
+      // If item.blocks is set (combined drain), use them directly as separate
+      // PromptBlocks. Otherwise fall through buildDispatchText for attribution.
+      const rawUserBlocks: import("../ai/types.js").PromptBlock[] = item.blocks
+        ? item.blocks
+        : (() => {
+            const dispatchText = buildDispatchText({
+              text: item.text,
+              source: item.source,
+              replyTo: item.replyTo,
+              reminderBlock,
+              sourceIsLiveSession: this.sessions.has(item.source),
+            });
+            return Array.isArray(dispatchText)
+              ? dispatchText
+              : [{ type: "text" as const, text: dispatchText }];
+          })();
 
       // Timestamp + restart sentinel injections
       const now = new Date();
@@ -202,9 +213,7 @@ export class SessionDispatcher {
         ? "[SYSTEM: JARVIS started or restarted — this is the first message of this session]"
         : null;
 
-      const userBlocks: import("../ai/types.js").PromptBlock[] = Array.isArray(dispatchText)
-        ? dispatchText
-        : [{ type: "text" as const, text: dispatchText }];
+      const userBlocks = rawUserBlocks;
       const injections: import("../ai/types.js").PromptBlock[] = [
         { type: "text" as const, text: timestampBlock },
         ...(restartBlock ? [{ type: "text" as const, text: restartBlock }] : []),
@@ -625,20 +634,17 @@ export class SessionDispatcher {
     }
     this.broadcastPendingQueue(sessionId);
 
-    // Build a synthetic QueuedMessage where each queued item becomes a
-    // separate PromptBlock — the LLM sees them as distinct messages.
-    // For a single item, use its text directly (no wrapper needed).
-    const multiText = items.length === 1
-      ? items[0].text
-      : items.map((item, i) => `[message ${i + 1}]\n${item.text}`).join("\n\n");
-
+    // Build combined item. Multiple queued messages each become a separate
+    // PromptBlock — the LLM sees them as distinct inputs in one API call.
+    const combinedImages = items.flatMap(i => i.images ?? []);
     const combined: QueuedMessage = {
-      text: multiText,
+      text: items[0].text,
+      blocks: items.length === 1
+        ? undefined
+        : items.map(item => ({ type: "text" as const, text: item.text })),
       source: items[0].source,
       replyTo,
-      images: items.flatMap(i => i.images ?? []).length > 0
-        ? items.flatMap(i => i.images ?? [])
-        : undefined,
+      images: combinedImages.length > 0 ? combinedImages : undefined,
       traceId: items[0].traceId,
       systems: items.flatMap(i => i.systems ?? []),
     };
