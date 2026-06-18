@@ -609,6 +609,18 @@ export class PluginManager implements Piece {
       log.info({ repo: repoUrl, dir: pluginDir }, "PluginManager: cloning");
       execSync(`git clone ${repoUrl} ${pluginDir}`, { timeout: 60000 });
 
+      // Run npm install if package.json exists — required for renderer deps (e.g. mermaid, perfect-freehand).
+      // Without this, esbuild fails to bundle the renderer on first request.
+      const pkgJsonPath = join(pluginDir, "package.json");
+      if (existsSync(pkgJsonPath)) {
+        try {
+          log.info({ name }, "PluginManager: running npm install after clone");
+          execSync(`npm install --registry=https://registry.npmjs.org/`, { cwd: pluginDir, timeout: 120_000 });
+        } catch (err) {
+          log.warn({ name, err: String(err) }, "PluginManager: npm install failed after clone (non-fatal)");
+        }
+      }
+
       // Update settings
       const settings = loadSettings();
       if (!settings.plugins) settings.plugins = {};
