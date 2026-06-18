@@ -102,16 +102,35 @@ export class SessionDispatcher {
     const d = this.state.get(sessionId);
     if (!d) return;
     this.sessions.abort(sessionId);
-    // Do NOT set d.running = false here — the stream is still iterating in
-    // consumeStream. Setting running=false prematurely would allow the next
-    // queued item to be dispatched before the current stream finishes, causing
-    // parallel execution. consumeStream is responsible for resetting running
-    // and calling drainQueue once the stream has fully terminated (complete or aborted).
-    d.currentTraceId = undefined;
-    d.pendingToolCalls = undefined;
-    // Preserve queue — user aborted THIS turn, not future queued ones
-    this.broadcastPendingQueue(sessionId);
-    log.info({ sessionId }, "SessionDispatcher: aborted");
+
+    const sessionState = this.sessions.getState(sessionId);
+
+    // Two cases:
+    //
+    // A) State is "waiting_tools" — stream already finished; we're only waiting
+    //    for tool results that will never come (abort cancels them). It is safe
+    //    to reset running immediately and drain the queue.
+    //
+    // B) State is "processing" — stream is still iterating inside consumeStream.
+    //    Do NOT reset running here; consumeStream will do it once the stream
+    //    terminates (the abort signal causes it to receive an "aborted" event or
+    //    throw, then fall through to the drain path).
+    if (sessionState === "waiting_tools") {
+      this.sessions.popState(sessionId);
+      this.broadcastSessionState(sessionId, "idle");
+      d.running = false;
+      d.currentTraceId = undefined;
+      d.pendingToolCalls = undefined;
+      this.broadcastPendingQueue(sessionId);
+      void this.drainQueue(sessionId);
+    } else {
+      // processing — let consumeStream own the drain
+      d.currentTraceId = undefined;
+      d.pendingToolCalls = undefined;
+      this.broadcastPendingQueue(sessionId);
+    }
+
+    log.info({ sessionId, sessionState }, "SessionDispatcher: aborted");
   }
 
   get size(): number {
