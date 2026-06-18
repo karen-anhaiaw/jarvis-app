@@ -13,6 +13,7 @@ import { log } from "../logger/index.js";
 import { newTraceId, preview } from "../logger/trace.js";
 import { config } from "../config/index.js";
 import { buildDispatchText } from "./jarvis.js";
+import { abortRegistry } from "../capabilities/abort-registry.js";
 
 /** Per-session queue entry */
 interface QueuedMessage {
@@ -116,6 +117,9 @@ export class SessionDispatcher {
     //    terminates (the abort signal causes it to receive an "aborted" event or
     //    throw, then fall through to the drain path).
     if (sessionState === "waiting_tools") {
+      // Kill any in-flight tool processes (e.g. bash sleep) so the child
+      // process doesn't keep running after the user aborts.
+      abortRegistry.abortSession(sessionId);
       this.sessions.popState(sessionId);
       this.broadcastSessionState(sessionId, "idle");
       d.running = false;
