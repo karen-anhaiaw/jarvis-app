@@ -144,7 +144,10 @@ export interface CreateWithPromptOptions {
 export interface AISessionFactory {
   create(options?: { label?: string; restoreMessages?: unknown[]; restoredSessionId?: string }): AISession;
   createWithPrompt(options: CreateWithPromptOptions & { restoredSessionId?: string }): AISession;
-  getToolDefinitions(): Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
+  getToolDefinitions(): Array<
+    | { name: string; description: string; input_schema: Record<string, unknown> }
+    | { type: string; name: string }
+  >;
   /**
    * Optional: attach the EventBus so sessions created by the factory can publish
    * provider-specific telemetry (e.g. per-session usage). Providers that do not

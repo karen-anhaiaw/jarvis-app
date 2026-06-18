@@ -184,8 +184,8 @@ export function registerSessionInspectorTools(
         total: tools.length,
         tools: tools.map((t) => ({
           name: t.name,
-          description: t.description,
-          ...(includeSchema ? { input_schema: t.input_schema } : {}),
+          ...("description" in t ? { description: t.description } : { description: "(server-side)" }),
+          ...("input_schema" in t && includeSchema ? { input_schema: t.input_schema } : {}),
         })),
       };
     },

@@ -11,7 +11,10 @@ export interface Provider {
   readonly metricsPiece: Piece;
 }
 
-type CapabilityDefProvider = () => Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
+type CapabilityDefProvider = () => Array<
+  | { name: string; description: string; input_schema: Record<string, unknown> }
+  | { type: string; name: string }
+>;
 type ContextProvider = (sessionId?: string) => string[];
 type InstructionsProvider = () => string;
 

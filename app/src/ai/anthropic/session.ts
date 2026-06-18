@@ -13,7 +13,12 @@ import { load as loadSettings, getCompactionSettings } from "../../core/settings
 import { archivePreCompactBackup } from "../../core/conversation-store.js";
 import { getMaxContext, getMaxOutput, supportsLongContext } from "../../config/index.js";
 
-type CapabilityDef = { name: string; description: string; input_schema: Record<string, unknown> };
+/** Local (client) tool wire shape. */
+type LocalCapabilityDef = { name: string; description: string; input_schema: Record<string, unknown> };
+/** Server tool wire shape — type + name only; Anthropic owns the schema. */
+type ServerCapabilityDef = { type: string; name: string };
+/** Union of both tool wire shapes as returned by CapabilityRegistry.getDefinitions(). */
+type CapabilityDef = LocalCapabilityDef | ServerCapabilityDef;
 type SystemPrompt = string | TextBlockParam[];
 
 /**
@@ -1427,12 +1432,15 @@ export class AnthropicSession implements AISession {
     log.info({ label: this.label, model: modelForCall }, "AnthropicSession: model resolved for this turn");
 
     try {
-      // Add cache_control (BP1) to the last tool definition
-      const tools: Anthropic.Tool[] | undefined = rawTools.length > 0
+      // Build the tools array for the API call.
+      // - Local tools: full Anthropic.Tool shape (name, description, input_schema).
+      // - Server tools: { type, name } only — Anthropic resolves schema internally.
+      // Cache breakpoint (BP1) goes on the LAST entry regardless of kind.
+      const tools: any[] | undefined = rawTools.length > 0
         ? rawTools.map((t, i) => ({
             ...t,
             ...(i === rawTools.length - 1 ? { cache_control: { type: "ephemeral" as const } } : {}),
-          })) as Anthropic.Tool[]
+          }))
         : undefined;
 
       this.abortController = new AbortController();
@@ -1540,6 +1548,14 @@ export class AnthropicSession implements AISession {
           );
           const tc: CapabilityCall = { id: block.id, name: block.name, input: cleanInput };
           toolCalls.push(tc);
+        } else if (block.type === "server_tool_use") {
+          // Server tool executed by Anthropic internally — no tool_result needed.
+          // The matching server_tool_result block follows in the same turn.
+          // We do NOT add to toolCalls — no round-trip back to the API required.
+          log.info(
+            { label: this.label, tool: (block as any).name, id: (block as any).id },
+            "AnthropicSession: server_tool_use (executed server-side, no round-trip)",
+          );
         } else if (block.type === "compaction") {
           compactionSummary = (block as any).content;
         }
@@ -1625,6 +1641,18 @@ export class AnthropicSession implements AISession {
       // Pass `modelForCall` so the log records the actual billed model, not
       // whatever the dynamic config has drifted to since the request started.
       if (usage) this.emitAnthropicUsage(modelForCall, usage);
+
+      // pause_turn: Anthropic paused a long-running server-tool turn.
+      // Continue by re-calling streamFromAPI with the current history
+      // (the assistant message was already pushed above). This is transparent
+      // to the caller — the turn resumes without a new user message.
+      if (message.stop_reason === "pause_turn") {
+        log.info({ label: this.label }, "AnthropicSession: pause_turn — continuing server-tool turn");
+        if (usage) this.emitAnthropicUsage(modelForCall, usage);
+        yield { type: "message_complete", stopReason: "pause_turn" as AIStreamEvent["stopReason"], usage };
+        yield* this.streamFromAPI();
+        return;
+      }
 
       yield {
         type: "message_complete",

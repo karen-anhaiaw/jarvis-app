@@ -20,6 +20,26 @@ export interface CapabilityDefinition {
    *  structural fallbacks apply: names with the `mcp__` prefix → "mcp",
    *  everything else → "general". */
   category?: string;
+  /**
+   * Where the tool is executed. Defaults to `"local"` when omitted.
+   *
+   * - `"local"`: handler runs in the JARVIS Node process. Standard
+   *   client tool_use / tool_result round-trip — each call costs one
+   *   extra API request.
+   *
+   * - `"server"`: executed by the Anthropic API internally (web_search,
+   *   web_fetch, code_execution, etc.). No handler is invoked; the result
+   *   appears in the same assistant turn as `server_tool_use` + result blocks.
+   *   One fewer round-trip per call.
+   */
+  execution?: "local" | "server";
+  /**
+   * Anthropic server tool type identifier (e.g. `"web_search_20250305"`).
+   * Required when `execution === "server"`. Sent verbatim as `type` in the
+   * tools array — Anthropic uses it to route to the correct executor.
+   * Ignored for local tools.
+   */
+  serverToolType?: string;
 }
 
 export type CapabilityExecutionListener = (toolName: string, isError: boolean, timeMs: number) => void;
@@ -63,10 +83,18 @@ export class CapabilityRegistry {
     log.info({ name: def.name }, "CapabilityRegistry: registered");
   }
 
-  getDefinitions(): Array<{ name: string; description: string; input_schema: Record<string, unknown> }> {
-    return [...this.tools.values()].map(({ name, description, input_schema }) => ({
-      name, description, input_schema,
-    }));
+  getDefinitions(): Array<
+    | { name: string; description: string; input_schema: Record<string, unknown> }
+    | { type: string; name: string }
+  > {
+    return [...this.tools.values()].map((def) => {
+      if (def.execution === "server") {
+        // Server tools: type + name only — Anthropic owns description/schema.
+        return { type: def.serverToolType!, name: def.name };
+      }
+      // Local tools: full client tool shape.
+      return { name: def.name, description: def.description, input_schema: def.input_schema };
+    });
   }
 
   async execute(

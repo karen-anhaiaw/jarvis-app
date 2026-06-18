@@ -8,7 +8,9 @@ import { config } from "../../config/index.js";
 import { DEFAULT_SESSION } from "../../core/constants.js";
 import { log } from "../../logger/index.js";
 
-type CapabilityDef = { name: string; description: string; input_schema: Record<string, unknown> };
+type CapabilityDef =
+  | { name: string; description: string; input_schema: Record<string, unknown> }
+  | { type: string; name: string };
 type CapabilityProvider = () => CapabilityDef[];
 
 export class AnthropicSessionFactory implements AISessionFactory {

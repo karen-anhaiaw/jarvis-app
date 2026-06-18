@@ -5,7 +5,9 @@ import type { EventBus } from "../../core/bus.js";
 import { cleanupAbortedToolMessages } from "./cleanup-aborted-tools.js";
 import { log } from "../../logger/index.js";
 
-type CapabilityDef = { name: string; description: string; input_schema: Record<string, unknown> };
+type CapabilityDef =
+  | { name: string; description: string; input_schema: Record<string, unknown> }
+  | { type: string; name: string };
 type Message = OpenAI.Chat.ChatCompletionMessageParam;
 
 const STREAMING_VERBS = [
@@ -213,14 +215,17 @@ export class OpenAISession implements AISession {
   private toOpenAITools(): OpenAI.Chat.ChatCompletionTool[] {
     const tools = this.getTools();
     const filtered = this.toolFilter ? tools.filter(t => this.toolFilter!(t.name)) : tools;
-    return filtered.map(t => ({
-      type: "function" as const,
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: t.input_schema,
-      },
-    }));
+    // OpenAI does not support Anthropic server tools — skip them (no `description` field).
+    return filtered
+      .filter((t): t is { name: string; description: string; input_schema: Record<string, unknown> } => "description" in t)
+      .map(t => ({
+        type: "function" as const,
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.input_schema,
+        },
+      }));
   }
 
   private async *streamFromAPI(): AsyncGenerator<AIStreamEvent, void> {
