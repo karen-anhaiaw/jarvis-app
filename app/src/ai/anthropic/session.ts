@@ -991,13 +991,13 @@ export class AnthropicSession implements AISession {
     // Skip on first turn after session start or post-compaction (no valid baseline).
     if (this.previousRealInputTokens === 0) return;
 
-    const growthRatio = lastInputTokens / this.previousRealInputTokens;
-    const GROWTH_THRESHOLD = 1.15; // 15% growth in a single turn
-
-    if (growthRatio < GROWTH_THRESHOLD) return;
+    // Growth compaction temporarily disabled — threshold of 15% was too aggressive,
+    // firing on normal turns with large tool results. Re-enable once a better
+    // absolute-growth threshold is designed.
+    return;
 
     log.info(
-      { label: this.label, previousTokens: this.previousRealInputTokens, currentTokens: lastInputTokens, growthRatio: growthRatio.toFixed(2) },
+      { label: this.label, previousTokens: this.previousRealInputTokens, currentTokens: lastInputTokens },
       "AnthropicSession: Engine B abrupt-growth compaction triggered"
     );
 
