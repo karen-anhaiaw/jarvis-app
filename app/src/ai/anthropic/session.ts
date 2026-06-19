@@ -304,8 +304,21 @@ export class AnthropicSession implements AISession {
    */
   private getTools(): CapabilityDef[] {
     const raw = this.getRawTools();
-    if (!this.toolFilter) return raw;
-    return raw.filter((t) => this.toolFilter!(t.name));
+    const model = this.getBaseModel();
+
+    // Server tools (web_fetch, web_search) require models that support programmatic
+    // tool calling. Haiku models reject them with a 400 error when allowed_callers
+    // is set. Filter them out for Haiku variants to prevent unnecessary failures.
+    const isHaiku = model.includes("haiku");
+    // ServerCapabilityDef has a `type` field (e.g. "web_search_20260209") while
+    // LocalCapabilityDef has `input_schema`. Haiku rejects server tools with
+    // allowed_callers, so filter them out entirely for Haiku models.
+    const tools = isHaiku
+      ? raw.filter((t) => !("type" in t))
+      : raw;
+
+    if (!this.toolFilter) return tools;
+    return tools.filter((t) => this.toolFilter!(t.name));
   }
 
   async *sendAndStream(prompt: string | import("../types.js").PromptBlock[], images?: ImageBlock[]): AsyncGenerator<AIStreamEvent, void> {
