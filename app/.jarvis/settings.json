@@ -157,5 +157,12 @@
         "lightThresholdChars": 80
       }
     }
+  },
+  "routing": {
+    "auto": {
+      "degradeOnLargeContext": {
+        "enabled": false
+      }
+    }
   }
 }

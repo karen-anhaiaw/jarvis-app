@@ -1,6 +1,6 @@
 // src/pieces/model-router.ts
 //
-// ModelRouter v2 — sticky per session + utility isolation + auto-degrade.
+// ModelRouter v2 — sticky per session + utility isolation.
 //
 // Design (derived from observing Claude Code's traffic):
 //   - Each model has its OWN cache pool. Switching invalidates 100% of the
@@ -62,14 +62,7 @@ interface RoutingConfig {
   light: string;
   utility: string;
   aliases: Record<string, string>;
-  auto: {
-    degradeOnLargeContext: {
-      enabled: boolean;
-      threshold: number;
-      from: string;
-      to: string;
-    };
-  };
+
 }
 
 // Tier structure (2026-06, post Fable 5 launch):
@@ -89,14 +82,7 @@ const DEFAULTS: RoutingConfig = {
     sonnet: "claude-sonnet-4-6",
     haiku:  "claude-haiku-4-5",
   },
-  auto: {
-    degradeOnLargeContext: {
-      enabled: true,
-      threshold: 150_000,
-      from: "claude-opus-4-8",
-      to:   "claude-sonnet-4-6",
-    },
-  },
+
 };
 
 function loadRoutingConfig(): RoutingConfig {
@@ -112,14 +98,7 @@ function loadRoutingConfig(): RoutingConfig {
     light:   r.light   ?? DEFAULTS.light,
     utility: r.utility ?? DEFAULTS.utility,
     aliases: { ...DEFAULTS.aliases, ...(r.aliases ?? {}) },
-    auto: {
-      degradeOnLargeContext: {
-        enabled:   r.auto?.degradeOnLargeContext?.enabled !== false,
-        threshold: r.auto?.degradeOnLargeContext?.threshold ?? DEFAULTS.auto.degradeOnLargeContext.threshold,
-        from:      r.auto?.degradeOnLargeContext?.from ?? DEFAULTS.auto.degradeOnLargeContext.from,
-        to:        r.auto?.degradeOnLargeContext?.to ?? DEFAULTS.auto.degradeOnLargeContext.to,
-      },
-    },
+
   };
 }
 
@@ -226,7 +205,7 @@ export class ModelRouterPiece implements Piece {
       });
     }
 
-    log.info("ModelRouter v2: started (sticky + utility + auto-degrade)");
+    log.info("ModelRouter v2: started (sticky + utility)");
   }
 
   async stop(): Promise<void> {
@@ -321,7 +300,7 @@ export class ModelRouterPiece implements Piece {
 
   /**
    * Main entry. For every ai.request:
-   *   - decide model (utility / prefix / auto-degrade / sticky)
+   *   - decide model (utility / prefix / sticky)
    *   - apply override on session
    *   - clean message text if prefix was stripped
    *   - emit decision/switch events + banner if applicable
@@ -451,35 +430,7 @@ export class ModelRouterPiece implements Piece {
       log.debug({ tag, sessionId }, "ModelRouter: unknown prefix, ignored");
     }
 
-    // ── 3. Auto-degrade on large context ────────────────────────────────
-    // Skip if the user explicitly forced a model — respect their choice.
-    if (cfg.auto.degradeOnLargeContext.enabled && route.sticky === cfg.auto.degradeOnLargeContext.from && !route.userForced) {
-      const ctxTokens = this.estimateCtxTokens(sessionId);
-      if (ctxTokens > cfg.auto.degradeOnLargeContext.threshold) {
-        const newModel = cfg.auto.degradeOnLargeContext.to;
-        const cost = ctxTokens * priceOf(newModel).cacheWrite / 1_000_000;
-        const prev = route.sticky;
-        route.sticky = newModel;
-        route.switchCount++;
-        route.lastSwitchAt = Date.now();
-        route.lastReason = "auto-degrade:large-ctx";
-        saveRouteState(sessionId, route);
-
-        this.emitSwitch(sessionId, prev, newModel, ctxTokens, cost, "auto-degrade:large-ctx");
-        this.emitBanner(sessionId, prev, newModel, ctxTokens, cost, "auto-degrade:large-ctx");
-
-        return {
-          model: newModel,
-          cleanText: text,
-          reason: "auto-degrade:large-ctx",
-          stickyChanged: true,
-          switchCostUsd: cost,
-          ctxTokens,
-        };
-      }
-    }
-
-    // ── 4. Sticky (default path, ~95% of calls) ─────────────────────────
+    // ── 3. Sticky (default path, ~95% of calls) ─────────────────────────
     return {
       model: route.sticky,
       cleanText: text,
@@ -516,11 +467,9 @@ export class ModelRouterPiece implements Piece {
     costUsd: number,
     reason: string,
   ): void {
-    const reasonLabel = reason.startsWith("auto-degrade")
-      ? "Auto-degrade (large context)"
-      : reason.startsWith("prefix:")
-        ? `Explicit ${reason}`
-        : reason;
+    const reasonLabel = reason.startsWith("prefix:")
+      ? `Explicit ${reason}`
+      : reason;
 
     // Compose banner. Surfaced as a `system` timeline entry via ChatPiece —
     // it appears inline above the next assistant message and is non-blocking.
