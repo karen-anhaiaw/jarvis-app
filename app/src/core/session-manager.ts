@@ -218,6 +218,14 @@ export class SessionManager {
         );
       }
 
+      // Restore sticky model override from saved conversation.
+      // The model is not encoded in the factory call — it lives only in stickyModelOverride.
+      // Without this, every restart silently resets sessions to the global model.
+      if (saved?.model && (session as any).setStickyModelOverride) {
+        (session as any).setStickyModelOverride(saved.model);
+        log.info({ sessionId, model: saved.model }, "SessionManager: restored sticky model from saved conversation");
+      }
+
       managed = {
         session,
         stateStack: [],
@@ -348,6 +356,15 @@ export class SessionManager {
         { sessionId, restored: saved.messageCount, savedAt: saved.savedAt },
         "SessionManager: custom session conversation restored",
       );
+    }
+
+    // Restore sticky model override from saved conversation when no explicit model
+    // was provided by the caller. Callers like PersonaManager pass options.model
+    // explicitly and will apply their own setStickyModelOverride after this call —
+    // so we only restore here when options.model is absent (avoids double-setting).
+    if (!options.model && saved?.model && (session as any).setStickyModelOverride) {
+      (session as any).setStickyModelOverride(saved.model);
+      log.info({ sessionId, model: saved.model }, "SessionManager: restored sticky model from saved conversation (custom session)");
     }
 
     managed = {
