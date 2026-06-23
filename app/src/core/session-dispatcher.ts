@@ -390,6 +390,7 @@ export class SessionDispatcher {
     let fullText = "";
     const toolCalls: CapabilityCall[] = [];
     let usage: { input_tokens: number; output_tokens: number } | undefined;
+    let streamWasAborted = false;
     const d = this.getDispatch(sessionId);
     const traceId = d.currentTraceId;
     const tStream0 = Date.now();
@@ -502,6 +503,7 @@ export class SessionDispatcher {
               } as any);
             } else {
               log.info({ traceId, sessionId }, "SessionDispatcher: stream aborted (user)");
+              streamWasAborted = true;
             }
             break;
         }
@@ -540,6 +542,27 @@ export class SessionDispatcher {
         },
         traceId,
       } as any);
+    }
+
+    // If the stream was aborted, do not enter waiting_tools — any tool_use
+    // calls that arrived before the abort signal are stale and will never
+    // receive results. Reset to idle immediately to prevent zombie sessions.
+    if (streamWasAborted) {
+      log.info({ traceId, sessionId, staleToolCalls: toolCalls.length }, "SessionDispatcher: aborted stream — skipping tool dispatch, resetting to idle");
+      this.sessions.popState(sessionId);
+      this.broadcastSessionState(sessionId, "idle");
+      d.running = false;
+      d.currentTraceId = undefined;
+      d.pendingToolCalls = undefined;
+      this.bus.publish({
+        channel: "ai.stream",
+        source: "session-dispatcher",
+        target: sessionId,
+        event: "aborted",
+        traceId,
+      } as any);
+      void this.drainQueue(sessionId);
+      return;
     }
 
     if (toolCalls.length > 0) {
