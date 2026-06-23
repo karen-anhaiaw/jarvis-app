@@ -442,6 +442,56 @@ export class PluginManager implements Piece {
           const { statSync: _pStat } = await import("fs");
           const _pMtime = _pStat(entryPath).mtimeMs;
 
+          // ── Proactive native ABI check ────────────────────────────────────
+          // If the plugin has native addons (.node files), check whether they
+          // were compiled for the currently running Node ABI. If not, rebuild
+          // BEFORE importing — this prevents the error from surfacing inside
+          // piece.start() (which bypasses the reactive self-heal below).
+          //
+          // We read the NODE_MODULE_VERSION from the .node file's header byte
+          // at offset 12 (ELF/Mach-O NAPI version tag written by node-gyp).
+          // If that fails for any reason, we skip the check silently — the
+          // reactive self-heal in the import catch block handles it instead.
+          const hasPkgJson = existsSync(join(pluginDir, "package.json"));
+          if (hasPkgJson) {
+            try {
+              const { execSync: _exec, readdirSync: _rdir } = await import("child_process").then(m => m).catch(() => null) as any;
+              // Find all .node files under node_modules
+              const findResult = require("child_process").execSync(
+                `find "${join(pluginDir, "node_modules")}" -name "*.node" 2>/dev/null || true`,
+                { encoding: "utf-8", timeout: 5000 },
+              ).trim();
+              if (findResult) {
+                const currentAbi = process.versions.modules; // e.g. "141"
+                const nodeFiles = findResult.split("\n").filter(Boolean);
+                let needsRebuild = false;
+                for (const nf of nodeFiles) {
+                  try {
+                    // Read bytes 12-15 of the file to get the compiled NODE_MODULE_VERSION.
+                    // node-gyp embeds it in the file header for both ELF and Mach-O.
+                    const fd = require("fs").openSync(nf, "r");
+                    const buf = Buffer.alloc(4);
+                    require("fs").readSync(fd, buf, 0, 4, 12);
+                    require("fs").closeSync(fd);
+                    const fileAbi = buf.readUInt32LE(0);
+                    if (fileAbi > 0 && String(fileAbi) !== currentAbi) {
+                      log.warn({ name, nf, fileAbi, currentAbi }, "PluginManager: native ABI mismatch detected proactively");
+                      needsRebuild = true;
+                      break;
+                    }
+                  } catch { /* unreadable header — skip */ }
+                }
+                if (needsRebuild) {
+                  log.info({ name }, "PluginManager: proactive npm rebuild (ABI mismatch)");
+                  require("child_process").execSync(`npm rebuild`, { cwd: pluginDir, timeout: 120000 });
+                  log.info({ name }, "PluginManager: proactive npm rebuild succeeded");
+                }
+              }
+            } catch (probeErr) {
+              log.debug({ name, err: String(probeErr) }, "PluginManager: native ABI probe failed — skipping proactive rebuild");
+            }
+          }
+
           // ── Self-healing import ───────────────────────────────────────────
           // If the import fails with a missing-package error, try npm install
           // in the plugin dir and retry once. Covers fresh clones, corrupted
