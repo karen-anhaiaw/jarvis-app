@@ -454,6 +454,12 @@ export class PluginManager implements Piece {
             const isMissingDep = /Cannot find (package|module)/i.test(errStr);
             const hasPkgJson = existsSync(join(pluginDir, "package.json"));
 
+            // NODE_MODULE_VERSION mismatch — native addon was compiled against a
+            // different Node.js ABI than the one currently running (common when
+            // the Electron-bundled Node version changes between restarts or after
+            // a system Node upgrade). Fix: npm rebuild in the plugin dir.
+            const isNativeAbiMismatch = /NODE_MODULE_VERSION/i.test(errStr);
+
             if (isMissingDep && hasPkgJson) {
               log.warn({ name, err: errStr }, "PluginManager: missing deps — attempting npm install");
               try {
@@ -476,6 +482,21 @@ export class PluginManager implements Piece {
                   `Self-heal failed for plugin ${name}.\n` +
                   `Import error: ${errStr}\n` +
                   `npm install error: ${healErrStr}`,
+                );
+              }
+            } else if (isNativeAbiMismatch && hasPkgJson) {
+              log.warn({ name, err: errStr }, "PluginManager: native ABI mismatch — attempting npm rebuild");
+              try {
+                execSync(`npm rebuild`, { cwd: pluginDir, timeout: 120000 });
+                log.info({ name }, "PluginManager: npm rebuild succeeded — retrying import");
+                mod = await import(`${entryPath}?t=${Date.now()}`);
+              } catch (healErr: any) {
+                const healErrStr = String(healErr?.message ?? healErr);
+                log.error({ name, healErr: healErrStr }, "PluginManager: native rebuild self-heal failed");
+                throw new Error(
+                  `Native ABI self-heal failed for plugin ${name}.\n` +
+                  `Import error: ${errStr}\n` +
+                  `npm rebuild error: ${healErrStr}`,
                 );
               }
             } else {
