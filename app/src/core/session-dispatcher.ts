@@ -102,9 +102,14 @@ export class SessionDispatcher {
   abort(sessionId: string): void {
     const d = this.state.get(sessionId);
     if (!d) return;
-    this.sessions.abort(sessionId);
 
+    // IMPORTANT: read state BEFORE sessions.abort() — that call does an
+    // internal popState which would change the state we're branching on.
+    // If we read after, "waiting_tools" becomes "processing" and Case A
+    // never fires, leaving d.running=true and the session as a zombie.
     const sessionState = this.sessions.getState(sessionId);
+
+    this.sessions.abort(sessionId);
 
     // Two cases:
     //
@@ -120,6 +125,8 @@ export class SessionDispatcher {
       // Kill any in-flight tool processes (e.g. bash sleep) so the child
       // process doesn't keep running after the user aborts.
       abortRegistry.abortSession(sessionId);
+      // sessions.abort() already popped once (waiting_tools → processing).
+      // Pop again to return to idle.
       this.sessions.popState(sessionId);
       this.broadcastSessionState(sessionId, "idle");
       d.running = false;
