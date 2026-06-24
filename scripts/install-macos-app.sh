@@ -85,7 +85,15 @@ echo "--- bootstrap ---"
 "\$REPO_DIR/scripts/bootstrap.sh" || echo "(bootstrap failed, continuing)"
 echo "--- jarvis ---"
 cd "\$JARVIS_DIR"
-exec npx tsx src/main.ts
+# Run under caffeinate so macOS never idle-sleeps the process (Sir 2026-06-23).
+# Without this, App Nap / system sleep freezes the Node event loop: timers stop,
+# the Slack Socket Mode WebSocket goes zombie, and messages received while asleep
+# are lost (observed: ~15min gap, journey message dropped). Flags:
+#   -i prevent system idle sleep (the critical one — freezes the event loop)
+#   -s prevent system sleep   -m prevent disk idle sleep
+# (no -d: the display MAY sleep; JARVIS does not need the screen on)
+# caffeinate holds the assertion exactly as long as the child process lives.
+exec caffeinate -i -s -m npx tsx src/main.ts
 LAUNCHER
 
 chmod +x "$APP_DIR/Contents/MacOS/jarvis"
