@@ -16,7 +16,7 @@ type CapabilityDefProvider = () => Array<
   | { type: string; name: string }
 >;
 type ContextProvider = (sessionId?: string) => string[];
-type InstructionsProvider = () => string;
+type InstructionsProvider = () => { content: string; filename: string };
 
 export interface ProviderConfig {
   getTools: CapabilityDefProvider;

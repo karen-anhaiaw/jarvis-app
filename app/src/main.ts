@@ -114,7 +114,7 @@ async function main() {
       const pm = getPluginManager();
       return pm?.pluginPieceContext ? [pm.pluginPieceContext(sessionId)] : [];
     },
-    getInstructions: () => jarvisCore.getJarvisMd(),
+    getInstructions: () => jarvisCore.getJarvisMd(),  // returns { content, filename }
   });
   providerRouter.registerProviderFactory("anthropic", createAnthropicProvider);
   providerRouter.registerProviderFactory("openai", createOpenAIProvider);

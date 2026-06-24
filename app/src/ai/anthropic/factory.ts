@@ -19,7 +19,7 @@ export class AnthropicSessionFactory implements AISessionFactory {
   private getCoreContext: () => string[];
   private getPluginInstructions: () => string[];
   private getPluginContext: (sessionId?: string) => string[];
-  private getInstructions: () => string;
+  private getInstructions: () => { content: string; filename: string };
   private bus?: EventBus;
   private sessionCounter = 0;
 
@@ -28,14 +28,14 @@ export class AnthropicSessionFactory implements AISessionFactory {
     getCoreContext?: () => string[],
     getPluginInstructions?: () => string[],
     getPluginContext?: (sessionId?: string) => string[],
-    getInstructions?: () => string,
+    getInstructions?: () => { content: string; filename: string },
   ) {
     this.basePrompt = this.loadBasePrompt();
     this.getTools = getTools;
     this.getCoreContext = getCoreContext ?? (() => []);
     this.getPluginInstructions = getPluginInstructions ?? (() => []);
     this.getPluginContext = getPluginContext ?? (() => []);
-    this.getInstructions = getInstructions ?? (() => "");
+    this.getInstructions = getInstructions ?? (() => ({ content: "", filename: "" }));
     log.info({ model: config.model, basePromptLength: this.basePrompt.length }, "AnthropicSessionFactory: initialized");
   }
 
@@ -56,9 +56,11 @@ export class AnthropicSessionFactory implements AISessionFactory {
     // Block 0: jarvis.md (CLAUDE.md) + caller's basePromptOverride + role
     const parts: string[] = [];
 
-    const instructions = this.getInstructions();
+    const { content: instructions, filename: instrFile } = this.getInstructions();
     if (instructions) {
-      parts.push(`<system-reminder>\n${instructions}\n</system-reminder>`);
+      // data-source identifica o arquivo real (ex: CLAUDE.md) para diagnóstico.
+      // Não adicionamos heading — o conteúdo do arquivo já começa com # Title.
+      parts.push(`<system-reminder${instrFile ? ` data-source="${instrFile}"` : ""}>\n${instructions}\n</system-reminder>`);
     }
 
     if (basePromptOverride) {
@@ -134,9 +136,9 @@ export class AnthropicSessionFactory implements AISessionFactory {
       parts.push(coreContexts.join("\n\n---\n\n"));
     }
 
-    const instructions = this.getInstructions();
+    const { content: instructions, filename: instrFile } = this.getInstructions();
     if (instructions) {
-      parts.push(`<system-reminder>\n${instructions}\n</system-reminder>`);
+      parts.push(`<system-reminder${instrFile ? ` data-source="${instrFile}"` : ""}>\n${instructions}\n</system-reminder>`);
     }
 
     // Plugin instructions (registry + context.md) — static, changes only when plugins are added/removed

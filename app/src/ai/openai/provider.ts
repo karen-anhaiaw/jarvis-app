@@ -16,9 +16,9 @@ export function createOpenAIProvider(config: ProviderConfig): Provider {
       const core = config.getCoreContext().filter(Boolean);
       const pluginInstr = config.getPluginInstructions().filter(Boolean);
       const pluginCtx = config.getPluginContext().filter(Boolean);
-      const instructions = config.getInstructions();
+      const { content: instructions, filename: instrFile } = config.getInstructions();
       const parts = [core.join("\n\n---\n\n"), pluginInstr.join("\n\n"), pluginCtx.join("\n\n")];
-      if (instructions) parts.push(instructions);
+      if (instructions) parts.push(`# ${instrFile || "instructions"}\n\n${instructions}`);
       return parts.filter(Boolean).join("\n\n---\n\n");
     },
     { apiKey, baseURL },

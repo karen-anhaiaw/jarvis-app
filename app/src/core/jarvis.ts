@@ -10,8 +10,8 @@
  * Key channels: ai.request (in), capability.result (in), ai.stream/* (out), capability.request (out)
  */
 // src/core/jarvis.ts
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, existsSync, realpathSync } from "node:fs";
+import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import type { EventBus } from "./bus.js";
 import type { SessionManager } from "./session-manager.js";
@@ -355,11 +355,17 @@ export class JarvisCore implements Piece {
    *
    * @returns File contents as UTF-8 string, or empty string if not found.
    */
-  getJarvisMd(): string {
+  getJarvisMd(): { content: string; filename: string } {
     if (existsSync(this.jarvisMdPath)) {
-      try { return readFileSync(this.jarvisMdPath, "utf-8"); } catch { }
+      try {
+        const content = readFileSync(this.jarvisMdPath, "utf-8");
+        // Resolve symlink to get the real filename (e.g. CLAUDE.md → jarvis.md)
+        let filename = "jarvis.md";
+        try { filename = basename(realpathSync(this.jarvisMdPath)); } catch { filename = basename(this.jarvisMdPath); }
+        return { content, filename };
+      } catch { }
     }
-    return "";
+    return { content: "", filename: "" };
   }
 
   constructor(sessions?: SessionManager) {
