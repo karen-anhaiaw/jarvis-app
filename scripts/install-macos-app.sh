@@ -76,7 +76,8 @@ cat > "$APP_DIR/Contents/MacOS/jarvis" << LAUNCHER
 source "\$HOME/.zshrc" 2>/dev/null || source "\$HOME/.bash_profile" 2>/dev/null || true
 REPO_DIR="$REPO_DIR"
 JARVIS_DIR="\$REPO_DIR/app"
-export PATH="/opt/homebrew/bin:/usr/local/bin:\$PATH"
+# Pin node@25 so native addons always use ABI 141.
+export PATH="/opt/homebrew/opt/node@25/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH"
 # Redirect this whole shell to the log so bootstrap output is also captured.
 exec > /tmp/jarvis.log 2>&1
 # Sync ~/.jarvis scaffolding + committed defaults from the repo on every boot.
