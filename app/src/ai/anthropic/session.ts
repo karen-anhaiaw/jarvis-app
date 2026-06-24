@@ -676,7 +676,10 @@ export class AnthropicSession implements AISession {
     if (!Array.isArray(last.content)) {
       last.content = [{ type: "text", text: String(last.content) }];
     }
-    last.content.push({ type: "text", text: `[Human, mid-turn]: ${text}` });
+    last.content.push({
+      type: "text",
+      text: `[HUMAN INTERJECTION — acknowledge before continuing]\n${text}`,
+    });
     log.info({ label: this.label, textPreview: text.slice(0, 80) },
       "AnthropicSession: mid-turn context injected into last user message");
   }

@@ -450,8 +450,25 @@ export class SessionDispatcher {
 
     log.info({ traceId, sessionId }, "SessionDispatcher: consumeStream starting");
 
+    // Inactivity watchdog — if the stream emits no events for WATCHDOG_MS,
+    // abort the session to prevent zombie sessions caused by hung API streams.
+    // The Anthropic stream may silently stall (no error, no close) if the
+    // connection drops after the HTTP response headers are received.
+    const WATCHDOG_MS = 90_000; // 90 s — well above normal inter-chunk latency
+    let lastEventAt = Date.now();
+    const watchdog = setInterval(() => {
+      const idle = Date.now() - lastEventAt;
+      if (idle > WATCHDOG_MS) {
+        log.warn({ traceId, sessionId, idleMs: idle },
+          "SessionDispatcher: stream inactivity watchdog fired — aborting hung stream");
+        clearInterval(watchdog);
+        this.sessions.abort(sessionId);
+      }
+    }, 10_000);
+
     try {
       for await (const event of stream) {
+        lastEventAt = Date.now();
         switch (event.type) {
           case "text_delta":
             fullText += event.text ?? "";
@@ -560,6 +577,7 @@ export class SessionDispatcher {
         }
       }
     } catch (streamErr: any) {
+      clearInterval(watchdog);
       log.error({
         traceId,
         sessionId,
@@ -569,6 +587,7 @@ export class SessionDispatcher {
       throw streamErr;
     }
 
+    clearInterval(watchdog);
     log.info({
       traceId,
       sessionId,
