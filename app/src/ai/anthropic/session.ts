@@ -651,6 +651,36 @@ export class AnthropicSession implements AISession {
     yield* this.streamFromAPI();
   }
 
+  /**
+   * Append a human text block to the last user message in history.
+   *
+   * WHY: Called by SessionDispatcher between tool rounds when the human sends
+   * a message while the session is in waiting_tools. The last user message
+   * contains tool_result blocks; appending a text block to it is valid
+   * Anthropic API — a user message may contain mixed content types.
+   *
+   * This gives the AI the human's mid-turn context in the same turn without
+   * starting a new API call or corrupting the tool_use/tool_result chain.
+   *
+   * If the last message is not a user message (defensive), the injection is
+   * silently skipped — the tool_result pairing is never broken.
+   */
+  injectMidTurnContext(text: string): void {
+    if (this.messages.length === 0) return;
+    const last = this.messages[this.messages.length - 1] as any;
+    if (last?.role !== "user") {
+      log.warn({ label: this.label }, "AnthropicSession: injectMidTurnContext — last message is not user, skipping");
+      return;
+    }
+    // Ensure content is an array so we can append a text block
+    if (!Array.isArray(last.content)) {
+      last.content = [{ type: "text", text: String(last.content) }];
+    }
+    last.content.push({ type: "text", text: `[Human, mid-turn]: ${text}` });
+    log.info({ label: this.label, textPreview: text.slice(0, 80) },
+      "AnthropicSession: mid-turn context injected into last user message");
+  }
+
   abort(): void {
     if (this.abortController) {
       this.abortController.abort();

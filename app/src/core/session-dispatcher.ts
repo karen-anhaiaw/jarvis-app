@@ -33,6 +33,10 @@ interface SessionDispatch {
   running: boolean;
   currentTraceId?: string;
   pendingToolCalls?: CapabilityCall[];
+  /** Mid-turn human injection — text appended to the next tool_result user
+   * message before the AI continues. Set when the user sends a message while
+   * the session is in waiting_tools (between tool rounds). */
+  pendingMidTurnInjection?: string;
 }
 
 /** Shorten tool name for display (strips bash→bash, edit_file→edit_file, etc.) */
@@ -169,6 +173,33 @@ export class SessionDispatcher {
     }, "SessionDispatcher: handleRequest");
 
     if (d.running) {
+      // Mid-turn injection: if the session is between tool rounds (waiting_tools)
+      // AND the message comes from a human (chat-input), capture it as a
+      // pendingMidTurnInjection instead of queueing it. It will be appended to
+      // the tool_result user message before the AI's next stream, giving the AI
+      // the human's context in the same turn without starting a new one.
+      //
+      // Only the LAST injection wins (newest human context). If the session is
+      // not in waiting_tools (still processing/streaming), fall through to normal
+      // queue so messages are never lost.
+      const sessionState = this.sessions.getState(sessionId);
+      const isHuman = (msg.source ?? "") === "chat-input";
+      if (isHuman && sessionState === "waiting_tools") {
+        d.pendingMidTurnInjection = text;
+        log.info({ traceId, sessionId, textPreview: preview(text, 80) },
+          "SessionDispatcher: mid-turn injection captured (waiting_tools)");
+        // Acknowledge to the HUD so the user sees their message was received
+        this.bus.publish({
+          channel: "ai.stream",
+          source: "session-dispatcher",
+          target: sessionId,
+          event: "prompt_dispatched",
+          traceId,
+          items: [{ text, source: msg.source ?? "chat-input" }],
+        } as any);
+        return;
+      }
+
       d.queue.push({
         text,
         source: msg.source ?? "unknown",
@@ -362,6 +393,19 @@ export class SessionDispatcher {
       sessionId,
       tools: pendingCalls.map(tc => tc.name),
     }, "SessionDispatcher: *** TOOL RESULTS RECEIVED ***");
+
+    // Mid-turn injection — append human context to the tool_result user message
+    // that was just pushed by addToolResults. The Anthropic API accepts a user
+    // message with mixed content: [...tool_result blocks, text block]. This lets
+    // the human collaborate with additional context between tool rounds without
+    // interrupting or aborting the ongoing turn.
+    const injection = d.pendingMidTurnInjection;
+    if (injection) {
+      d.pendingMidTurnInjection = undefined;
+      (managed.session as any).injectMidTurnContext?.(injection);
+      log.info({ traceId, sessionId, textPreview: preview(injection, 80) },
+        "SessionDispatcher: mid-turn injection applied to tool_result message");
+    }
 
     this.sessions.popState(sessionId);
     this.sessions.pushState(sessionId, "processing");
