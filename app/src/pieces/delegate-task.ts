@@ -339,6 +339,13 @@ export class DelegateTaskPiece implements Piece {
             workerError = msg.error;
             unsub();
             resolve();
+          } else if (msg.event === "aborted") {
+            // Worker was aborted (watchdog, user abort, etc.) — resolve so
+            // the caller's capability.result is still published and the
+            // parent session (actor-journey etc.) is not left zombie.
+            workerError = "worker aborted";
+            unsub();
+            resolve();
           }
         });
 
