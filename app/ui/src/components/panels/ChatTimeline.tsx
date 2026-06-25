@@ -853,7 +853,7 @@ export const ChatTimeline = React.memo(function ChatTimeline({
                 {/* ⤢ open delegate worker chat panel.
                     During running: workerLabel from __delegate_worker: progress chunk.
                     After done: workerLabel from worker.label in output JSON. */}
-                {entry.name === 'delegate read task' && (() => {
+                {(entry.name === 'delegate task' || entry.name === 'delegate read task') && (() => {
                   let workerLabel: string | undefined
                   // 1. progress chunk (running or done)
                   const m = (entry.output ?? '').match(/__delegate_worker:([a-z0-9-]+)/)
