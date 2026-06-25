@@ -173,33 +173,11 @@ export class SessionDispatcher {
     }, "SessionDispatcher: handleRequest");
 
     if (d.running) {
-      // Mid-turn injection: if the session is between tool rounds (waiting_tools)
-      // AND the message comes from a human (chat-input), capture it as a
-      // pendingMidTurnInjection instead of queueing it. It will be appended to
-      // the tool_result user message before the AI's next stream, giving the AI
-      // the human's context in the same turn without starting a new one.
-      //
-      // Only the LAST injection wins (newest human context). If the session is
-      // not in waiting_tools (still processing/streaming), fall through to normal
-      // queue so messages are never lost.
-      const sessionState = this.sessions.getState(sessionId);
-      const isHuman = (msg.source ?? "") === "chat-input";
-      if (isHuman && sessionState === "waiting_tools") {
-        d.pendingMidTurnInjection = text;
-        log.info({ traceId, sessionId, textPreview: preview(text, 80) },
-          "SessionDispatcher: mid-turn injection captured (waiting_tools)");
-        // Acknowledge to the HUD so the user sees their message was received
-        this.bus.publish({
-          channel: "ai.stream",
-          source: "session-dispatcher",
-          target: sessionId,
-          event: "prompt_dispatched",
-          traceId,
-          items: [{ text, source: msg.source ?? "chat-input" }],
-        } as any);
-        return;
-      }
-
+      // Session is busy — queue the message. It will be drained into the next
+      // tool_result user message before continueAndStream (see handleToolResult),
+      // so the AI sees it at the earliest possible point without breaking the
+      // tool_use/tool_result chain. Messages with replyTo are still routed
+      // correctly because the drain loop broadcasts prompt_dispatched per item.
       d.queue.push({
         text,
         source: msg.source ?? "unknown",
@@ -212,6 +190,7 @@ export class SessionDispatcher {
         traceId,
         sessionId,
         queueSize: d.queue.length,
+        sessionState: this.sessions.getState(sessionId),
       }, "SessionDispatcher: queued prompt (session busy)");
       this.broadcastPendingQueue(sessionId);
       return;
@@ -394,17 +373,44 @@ export class SessionDispatcher {
       tools: pendingCalls.map(tc => tc.name),
     }, "SessionDispatcher: *** TOOL RESULTS RECEIVED ***");
 
-    // Mid-turn injection — append human context to the tool_result user message
-    // that was just pushed by addToolResults. The Anthropic API accepts a user
-    // message with mixed content: [...tool_result blocks, text block]. This lets
-    // the human collaborate with additional context between tool rounds without
-    // interrupting or aborting the ongoing turn.
-    const injection = d.pendingMidTurnInjection;
-    if (injection) {
+    // Mid-turn injection — drain ALL queued messages into the tool_result user
+    // message before continueAndStream. This means every message that arrived
+    // while the session was executing tools is appended as a text block to the
+    // next user message (which already contains tool_result blocks). The
+    // Anthropic API accepts mixed content in a user message, so the AI sees
+    // the human's queued context in the same turn before its next response.
+    //
+    // WHY drain the queue here instead of waiting for the turn to complete:
+    // the user wants "append queued messages before each new request" — this is
+    // exactly the right place: after tool_results are committed, before the AI
+    // streams again. The tool_use/tool_result chain is already closed and clean.
+    //
+    // pendingMidTurnInjection (single string, set when waiting_tools) is merged
+    // in first, then the queue is drained in FIFO order.
+    const injections: string[] = [];
+    if (d.pendingMidTurnInjection) {
+      injections.push(d.pendingMidTurnInjection);
       d.pendingMidTurnInjection = undefined;
-      (managed.session as any).injectMidTurnContext?.(injection);
-      log.info({ traceId, sessionId, textPreview: preview(injection, 80) },
-        "SessionDispatcher: mid-turn injection applied to tool_result message");
+    }
+    while (d.queue.length > 0) {
+      const queued = d.queue.shift()!;
+      injections.push(queued.text);
+      // Acknowledge each dequeued message to the HUD
+      this.bus.publish({
+        channel: "ai.stream",
+        source: "session-dispatcher",
+        target: sessionId,
+        event: "prompt_dispatched",
+        traceId: queued.traceId,
+        items: [{ text: queued.text, source: queued.source }],
+      } as any);
+    }
+    if (injections.length > 0) {
+      const combined = injections.join("\n\n");
+      (managed.session as any).injectMidTurnContext?.(combined);
+      log.info({ traceId, sessionId, count: injections.length, textPreview: preview(combined, 80) },
+        "SessionDispatcher: mid-turn queue drain — injected into tool_result message");
+      this.broadcastPendingQueue(sessionId);
     }
 
     this.sessions.popState(sessionId);
@@ -431,6 +437,17 @@ export class SessionDispatcher {
         sessionId,
         err: err?.message ?? String(err),
       }, "SessionDispatcher: tool continuation failed");
+    } finally {
+      // Drain the queue whenever this tool-continuation path exits — whether
+      // normally (consumeStream completed without tools → else-branch already
+      // called drainQueue, so this is a no-op because d.running is false) or
+      // via catch (state reset to idle above but d.running was never cleared).
+      // The state guard prevents draining while a new tool round is in flight.
+      const stateAfter = this.sessions.getState(sessionId);
+      if (stateAfter !== "waiting_tools" && stateAfter !== "processing") {
+        d.running = false;
+        void this.drainQueue(sessionId);
+      }
     }
   }
 
