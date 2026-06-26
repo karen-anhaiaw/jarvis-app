@@ -455,6 +455,11 @@ export class SessionDispatcher {
     sessionId: string,
     stream: AsyncGenerator<AIStreamEvent, void>,
   ): Promise<void> {
+    // Wire the AnthropicSession heartbeat callback so raw SSE frames
+    // (thinking_delta, ping) keep lastEventAt alive during silent thinking
+    // turns. Must be set before the for-await loop starts and cleared after.
+    const managed = this.sessions.peek(sessionId);
+    const sessionObj = (managed as any)?.session;
     let fullText = "";
     const toolCalls: CapabilityCall[] = [];
     let usage: { input_tokens: number; output_tokens: number } | undefined;
@@ -473,6 +478,15 @@ export class SessionDispatcher {
     // connection drops after the HTTP response headers are received.
     const WATCHDOG_MS = 30_000; // 30 s — aggressive recovery for hung API streams
     let lastEventAt = Date.now();
+
+    // Hook into the session's SSE heartbeat so raw API frames (thinking_delta,
+    // ping) reset the watchdog timer — not just yielded text/tool events.
+    // This prevents the watchdog from firing during extended-thinking turns
+    // where the API is busy but emitting no text chunks for 30-120s.
+    if (sessionObj?.onStreamHeartbeat !== undefined) {
+      sessionObj.onStreamHeartbeat = () => { lastEventAt = Date.now(); };
+    }
+
     const watchdog = setInterval(() => {
       const idle = Date.now() - lastEventAt;
       if (idle > WATCHDOG_MS) {
@@ -605,6 +619,9 @@ export class SessionDispatcher {
     }
 
     clearInterval(watchdog);
+    if (sessionObj?.onStreamHeartbeat !== undefined) {
+      sessionObj.onStreamHeartbeat = undefined;
+    }
     log.info({
       traceId,
       sessionId,

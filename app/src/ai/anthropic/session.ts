@@ -84,6 +84,10 @@ export class AnthropicSession implements AISession {
    *  Immutable: effort policy is session-creation policy, never per-turn. */
   private readonly highEffort: boolean;
   private abortController?: AbortController;
+  /** Called on every raw SSE event during a beta/standard stream. Lets the
+   *  session-dispatcher watchdog observe that the API connection is alive even
+   *  during silent extended-thinking turns that emit no text chunks. */
+  onStreamHeartbeat?: (evt: unknown) => void;
   private contextInjector?: (sessionId: string) => string[] | Promise<string[]>;
   private bus?: EventBus;
   private betaDisabledUntil = 0;
@@ -1540,6 +1544,14 @@ export class AnthropicSession implements AISession {
 
           }, { signal: this.abortController.signal });
 
+          // Tee raw SSE events to onStreamHeartbeat so the session-dispatcher
+          // watchdog stays alive during extended thinking turns (effort beta).
+          // Thinking blocks emit SSE frames (thinking_delta, ping) with zero
+          // yielded text — without this, the watchdog fires after WATCHDOG_MS
+          // and aborts the request before the response arrives.
+          betaStream.on("streamEvent", (evt: any) => {
+            this.onStreamHeartbeat?.(evt);
+          });
           betaStream.on("text", () => {});
           message = await betaStream.finalMessage();
         } catch (betaErr: any) {
@@ -1570,6 +1582,9 @@ export class AnthropicSession implements AISession {
           ...(effort !== undefined ? { output_config: { effort } } : {}),
         } as any, { signal: this.abortController.signal });
 
+        stream.on("streamEvent", (evt: any) => {
+          this.onStreamHeartbeat?.(evt);
+        });
         stream.on("text", () => {});
         message = await stream.finalMessage();
       }
