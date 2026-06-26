@@ -125,7 +125,33 @@ export class CapabilityExecutor implements Piece {
       } as any);
     };
 
-    const results = await this.registry.execute(enrichedCalls, onProgress);
+    let results: Awaited<ReturnType<typeof this.registry.execute>>;
+    try {
+      results = await this.registry.execute(enrichedCalls, onProgress);
+    } catch (execErr: any) {
+      // If registry.execute throws (e.g. MCP timeout, handler crash), publish
+      // error results for every pending call so the session is never left
+      // zombie in waiting_tools with no capability.result arriving.
+      log.error({
+        sessionId, traceId,
+        err: execErr?.message ?? String(execErr),
+        calls: enrichedCalls.map(c => c.name),
+      }, "CapabilityExecutor: registry.execute threw — publishing error results");
+      this.totalErrors += enrichedCalls.length;
+      const errorResults = enrichedCalls.map(c => ({
+        tool_use_id: c.id,
+        content: `Tool execution failed: ${execErr?.message ?? String(execErr)}`,
+        is_error: true,
+      }));
+      this.bus.publish({
+        channel: "capability.result",
+        source: "capability-executor",
+        target: sessionId,
+        results: errorResults,
+        ...(traceId ? { traceId } : {}),
+      } as any);
+      return;
+    }
 
     // Metrics tracked via registry.onExecution listener
 
