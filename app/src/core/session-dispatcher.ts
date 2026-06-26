@@ -483,7 +483,7 @@ export class SessionDispatcher {
     // ping) reset the watchdog timer — not just yielded text/tool events.
     // This prevents the watchdog from firing during extended-thinking turns
     // where the API is busy but emitting no text chunks for 30-120s.
-    if (sessionObj?.onStreamHeartbeat !== undefined) {
+    if (sessionObj && "onStreamHeartbeat" in sessionObj) {
       sessionObj.onStreamHeartbeat = () => { lastEventAt = Date.now(); };
     }
 
@@ -619,7 +619,7 @@ export class SessionDispatcher {
     }
 
     clearInterval(watchdog);
-    if (sessionObj?.onStreamHeartbeat !== undefined) {
+    if (sessionObj && "onStreamHeartbeat" in sessionObj) {
       sessionObj.onStreamHeartbeat = undefined;
     }
     log.info({
