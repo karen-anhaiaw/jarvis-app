@@ -476,12 +476,12 @@ export class SessionDispatcher {
     // abort the session to prevent zombie sessions caused by hung API streams.
     // The Anthropic stream may silently stall (no error, no close) if the
     // connection drops after the HTTP response headers are received.
-    // Opus models with effort beta process silently (no SSE frames during
-    // thinking) — use a much longer watchdog for them. For all other models,
-    // 30s is sufficient to detect a genuinely hung stream.
-    const model: string = (sessionObj as any)?.model ?? "";
-    const isOpus = model.includes("opus");
-    const WATCHDOG_MS = isOpus ? 180_000 : 30_000;
+    // 120s: gives enough headroom for effort-beta thinking (30-120s silent
+    // processing before first chunk) while still catching genuinely dead
+    // HTTP connections. Zombie sessions from hung tools are now prevented
+    // by the try/catch in CapabilityRegistry.execute — the watchdog is
+    // only a last-resort fallback for truly dead TCP connections.
+    const WATCHDOG_MS = 120_000;
     let lastEventAt = Date.now();
 
     // Hook into the session's SSE heartbeat so raw API frames (thinking_delta,
