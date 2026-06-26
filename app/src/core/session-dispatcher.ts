@@ -455,11 +455,6 @@ export class SessionDispatcher {
     sessionId: string,
     stream: AsyncGenerator<AIStreamEvent, void>,
   ): Promise<void> {
-    // Wire the AnthropicSession heartbeat callback so raw SSE frames
-    // (thinking_delta, ping) keep lastEventAt alive during silent thinking
-    // turns. Must be set before the for-await loop starts and cleared after.
-    const managed = this.sessions.peek(sessionId);
-    const sessionObj = (managed as any)?.session;
     let fullText = "";
     const toolCalls: CapabilityCall[] = [];
     let usage: { input_tokens: number; output_tokens: number } | undefined;
@@ -472,39 +467,9 @@ export class SessionDispatcher {
 
     log.info({ traceId, sessionId }, "SessionDispatcher: consumeStream starting");
 
-    // Inactivity watchdog — if the stream emits no events for WATCHDOG_MS,
-    // abort the session to prevent zombie sessions caused by hung API streams.
-    // The Anthropic stream may silently stall (no error, no close) if the
-    // connection drops after the HTTP response headers are received.
-    // 120s: gives enough headroom for effort-beta thinking (30-120s silent
-    // processing before first chunk) while still catching genuinely dead
-    // HTTP connections. Zombie sessions from hung tools are now prevented
-    // by the try/catch in CapabilityRegistry.execute — the watchdog is
-    // only a last-resort fallback for truly dead TCP connections.
-    const WATCHDOG_MS = 120_000;
-    let lastEventAt = Date.now();
-
-    // Hook into the session's SSE heartbeat so raw API frames (thinking_delta,
-    // ping) reset the watchdog timer — not just yielded text/tool events.
-    // This prevents the watchdog from firing during extended-thinking turns
-    // where the API is busy but emitting no text chunks for 30-120s.
-    if (sessionObj && "onStreamHeartbeat" in sessionObj) {
-      sessionObj.onStreamHeartbeat = () => { lastEventAt = Date.now(); };
-    }
-
-    const watchdog = setInterval(() => {
-      const idle = Date.now() - lastEventAt;
-      if (idle > WATCHDOG_MS) {
-        log.warn({ traceId, sessionId, idleMs: idle },
-          "SessionDispatcher: stream inactivity watchdog fired — aborting hung stream");
-        clearInterval(watchdog);
-        this.sessions.abort(sessionId);
-      }
-    }, 10_000);
 
     try {
       for await (const event of stream) {
-        lastEventAt = Date.now();
         switch (event.type) {
           case "text_delta":
             fullText += event.text ?? "";
@@ -613,7 +578,6 @@ export class SessionDispatcher {
         }
       }
     } catch (streamErr: any) {
-      clearInterval(watchdog);
       log.error({
         traceId,
         sessionId,
@@ -623,10 +587,6 @@ export class SessionDispatcher {
       throw streamErr;
     }
 
-    clearInterval(watchdog);
-    if (sessionObj && "onStreamHeartbeat" in sessionObj) {
-      sessionObj.onStreamHeartbeat = undefined;
-    }
     log.info({
       traceId,
       sessionId,
