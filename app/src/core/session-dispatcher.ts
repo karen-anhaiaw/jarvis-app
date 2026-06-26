@@ -471,7 +471,7 @@ export class SessionDispatcher {
     // abort the session to prevent zombie sessions caused by hung API streams.
     // The Anthropic stream may silently stall (no error, no close) if the
     // connection drops after the HTTP response headers are received.
-    const WATCHDOG_MS = 90_000; // 90 s — well above normal inter-chunk latency
+    const WATCHDOG_MS = 30_000; // 30 s — aggressive recovery for hung API streams
     let lastEventAt = Date.now();
     const watchdog = setInterval(() => {
       const idle = Date.now() - lastEventAt;
