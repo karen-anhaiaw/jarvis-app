@@ -133,6 +133,12 @@
     "jarvis-plugin-actors": {
       "repo": "github.com/giovanibarili/jarvis-plugin-actors",
       "enabled": true
+    },
+    "jarvis-plugin-manned-journey": {
+      "repo": "local",
+      "path": "/Users/giovani.barili/.jarvis/plugins/jarvis-plugin-manned-journey",
+      "enabled": true,
+      "branch": "main"
     }
   },
   "compaction": {

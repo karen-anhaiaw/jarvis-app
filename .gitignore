@@ -20,3 +20,8 @@ tmp/
 .DS_Store
 **/.DS_Store
 app/ui/electron-main.cjs
+# Clojure editor tooling (local, never commit)
+.clj-kondo/
+.lsp/
+# stray empty placeholder file
+app/model
