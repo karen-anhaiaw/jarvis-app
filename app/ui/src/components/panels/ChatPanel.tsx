@@ -33,8 +33,6 @@ interface ChatPanelProps {
   features?: ChatPanelFeatures
   userLabel?: (source?: string) => string
   userLabelColor?: (source?: string) => string
-  /** Optional base URL for all chat API calls. Defaults to "" (same origin). */
-  baseUrl?: string
 }
 
 let imageCounter = 0
@@ -72,21 +70,18 @@ export function ChatPanel({
   features: featuresProp,
   userLabel: userLabelProp,
   userLabelColor: userLabelColorProp,
-  baseUrl: baseUrlProp = '',
 }: ChatPanelProps) {
-  const base = baseUrlProp.replace(/\/$/, '')
   if (!sessionId) {
     throw new Error('ChatPanel requires a non-empty sessionId prop')
   }
 
   // All endpoints are derived from sessionId — a single source of identity.
-  // baseUrl allows redirecting to a remote jarvis-core instance (e.g. manned-journey).
-  const streamUrl = `${base}/chat-stream?sessionId=${encodeURIComponent(sessionId)}`
-  const historyUrl = `${base}/chat/history?sessionId=${encodeURIComponent(sessionId)}`
-  const sendUrl = `${base}/chat/send`
-  const abortUrl = `${base}/chat/abort`
-  const clearUrl = `${base}/chat/clear-session`
-  const compactUrl = `${base}/chat/compact`
+  const streamUrl = `/chat-stream?sessionId=${encodeURIComponent(sessionId)}`
+  const historyUrl = `/chat/history?sessionId=${encodeURIComponent(sessionId)}`
+  const sendUrl = `/chat/send`
+  const abortUrl = `/chat/abort`
+  const clearUrl = `/chat/clear-session`
+  const compactUrl = `/chat/compact`
 
   const features = useMemo(() => ({ ...defaultFeatures, ...featuresProp }), [featuresProp])
   const getUserLabel = useMemo(() => userLabelProp ?? defaultUserLabel, [userLabelProp])
