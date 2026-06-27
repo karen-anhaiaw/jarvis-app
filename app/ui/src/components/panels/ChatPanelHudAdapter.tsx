@@ -11,6 +11,7 @@ import { ChatPanel } from './ChatPanel'
  *   {
  *     sessionId: string              // REQUIRED
  *     assistantLabel?: string        // defaults to sessionId.toUpperCase()
+ *     baseUrl?: string               // optional — redirects all API calls to remote jarvis-core
  *     features?: ChatPanelFeatures
  *     userLabel?: (s?: string) => string
  *     userLabelColor?: (s?: string) => string
@@ -37,6 +38,7 @@ export function ChatPanelHudAdapter({ state }: { state: any }) {
     <ChatPanel
       sessionId={sessionId}
       assistantLabel={assistantLabel}
+      baseUrl={data.baseUrl}
       features={data.features}
       userLabel={data.userLabel}
       userLabelColor={data.userLabelColor}
