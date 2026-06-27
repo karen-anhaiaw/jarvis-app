@@ -554,7 +554,13 @@ export class PluginManager implements Piece {
             }
           }
 
-          if (typeof mod.createPieces === "function" && this.pieceManager) {
+          // CJS/ESM interop: tsx may wrap named exports under mod.default
+          const createPiecesFn: ((ctx: PluginContext) => Piece[]) | undefined =
+            typeof mod.createPieces === "function" ? mod.createPieces
+            : typeof mod.default?.createPieces === "function" ? mod.default.createPieces
+            : undefined;
+
+          if (typeof createPiecesFn === "function" && this.pieceManager) {
             const configKey = `plugin:${name}`;
             const ctx: PluginContext = {
               bus: this.bus as unknown as PluginContext["bus"],
@@ -604,7 +610,7 @@ export class PluginManager implements Piece {
                 });
               },
             };
-            const pieces = mod.createPieces(ctx);
+            const pieces = createPiecesFn!(ctx);
             for (const piece of pieces) {
               await this.pieceManager.registerDynamic(piece, `plugin:${name}`);
               loaded.pieces.push(piece.id);
