@@ -518,7 +518,11 @@ app.whenReady().then(() => {
     // Used by plugin renderers that can't call shell.openExternal directly
     // (contextIsolation:true blocks Electron APIs from the renderer process).
     if (parsed.pathname === '/open-url' && req.method === 'GET') {
-      const target = parsed.searchParams?.get('url') ?? '';
+      // url.parse(req.url, true) exposes query params under .query (legacy API),
+      // NOT .searchParams (WHATWG URL API). Using searchParams here always
+      // yielded undefined -> empty target -> spurious 400 "invalid url".
+      const rawUrl = parsed.query?.url;
+      const target = Array.isArray(rawUrl) ? (rawUrl[0] ?? '') : (rawUrl ?? '');
       if (target.startsWith('http://') || target.startsWith('https://')) {
         const { shell } = require('electron');
         shell.openExternal(target).catch(() => {});
