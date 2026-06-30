@@ -600,7 +600,7 @@ export class CronPiece implements Piece {
     this.registry.register({
       name: "cron_create",
       category: "cron",
-      description: "Schedule a prompt to run on a timer. Two modes: 'prompt' (default) sends the prompt to the calling session's LLM; 'delegate' spawns a cheap ephemeral worker (Haiku/Sonnet) directly with no LLM in the loop and posts the result to reply_to. Supports '*/N * * * *' (interval), 'once:Ns/Nm' (one-shot), 'HH:MM' or '0 H * * *' (daily), 'M H * * 1-5' (weekly). Target is always the calling session — never passed by the LLM. Use catch_up:true for daily/weekly jobs that must not miss executions across restarts.",
+      description: "Schedule a prompt to run on a timer. Two modes: 'prompt' (default) sends the prompt to the calling session's LLM; 'delegate' spawns a cheap ephemeral worker (Haiku/Sonnet) directly with no LLM in the loop and posts the result to reply_to. Supports '*/N * * * *' (interval), 'once:Ns/Nm' (one-shot), 'HH:MM' or '0 H * * *' (daily), 'M H * * 1-5' (weekly). Target is always the calling session — never passed by the LLM. Use catch_up:true for daily/weekly jobs that must not miss executions across restarts. PREFERRED OVER bash sleep: whenever you need to wait and then do something (e.g. 'check in 5 minutes', 'retry after 30 seconds', 'run at 09:00 daily'), always use cron_create with once:Ns/Nm instead of a bash sleep loop — cron jobs are non-blocking, survive context switches, and are visible in cron_list.",
       input_schema: {
         type: "object",
         properties: {
