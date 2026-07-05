@@ -33,6 +33,12 @@ export interface CompactionSettings {
   thresholdPercent: number;
   instructions: string;
   pauseAfterCompaction: boolean;
+  /** Max tokens for the summarizer output, expressed as a percentage of the
+   *  context being compacted (tokensBefore). Applied as:
+   *    Math.min(tokensBefore * summaryBudgetPercent / 100, getMaxOutput(model))
+   *  Default: 10 (10% of context). Increase if summaries are too thin.
+   *  The old hardcoded value was 8192 — for a 200K session that was ~4%. */
+  summaryBudgetPercent: number;
 }
 
 export interface PersistedCronJob {
@@ -119,8 +125,22 @@ function loadFile(path: string): Settings {
 const DEFAULT_COMPACTION: CompactionSettings = {
   enabled: true,
   thresholdPercent: 83.5,
-  instructions: "Preserve capability names, tool call results, code snippets, and design decisions. Summarize verbose tool outputs and intermediate reasoning. Keep track of what the user asked for and current progress.",
+  instructions: [
+    "Produce a structured summary with the following sections:",
+    "## Current State",
+    "What is being worked on RIGHT NOW and where it stands (branch, PR, last action taken).",
+    "## Key Decisions",
+    "Architecture choices, approach decisions, and rationale made during this session.",
+    "## Code & Outputs",
+    "Exact file paths modified, function/variable names, key code snippets, and relevant tool outputs (command results, API responses, error messages). Preserve these verbatim — do NOT paraphrase code.",
+    "## Open Issues",
+    "Bugs, blockers, warnings, or unresolved questions that came up.",
+    "## Next Steps",
+    "What the user asked to do next or what logically follows from the current state.",
+    "Be as specific and dense as possible. Prefer concrete details over narrative prose. Omit pleasantries and meta-commentary.",
+  ].join("\n"),
   pauseAfterCompaction: true,
+  summaryBudgetPercent: 10,
 };
 
 function mergeSections<T>(

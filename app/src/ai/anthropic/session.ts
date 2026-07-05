@@ -1190,9 +1190,19 @@ export class AnthropicSession implements AISession {
       const compactionModel = this.stickyModelOverride ?? this.getBaseModel();
       log.info({ label: this.label, compactionModel }, "AnthropicSession: compaction summary using session model");
 
-      // Summary is short prose — doesn't need the full output budget. The
-      // retry path quadruples this when thinking exhausts it (see below).
-      const BASE_MAX_TOKENS = 8192;
+      // Budget = summaryBudgetPercent% of the tokens being compacted, clamped
+      // to the model's max output ceiling. This replaces the old hardcoded 8192
+      // which was ~4% of a 200K session — far too little, causing the summarizer
+      // to discard most context. Default is 10% (e.g. 20K tokens for a 200K session).
+      // User-configurable via settings.compaction.summaryBudgetPercent.
+      const budgetPercent = settings.summaryBudgetPercent ?? 10;
+      const BASE_MAX_TOKENS = Math.max(
+        8192, // never go below the old floor
+        Math.min(
+          Math.round(tokensBefore * budgetPercent / 100),
+          getMaxOutput(compactionModel),
+        ),
+      );
 
       /**
        * One summarizer round-trip + full diagnostics. The 2026-06-10 incident
