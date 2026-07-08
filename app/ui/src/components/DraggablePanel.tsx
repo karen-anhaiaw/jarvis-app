@@ -181,11 +181,20 @@ export function DraggablePanel({
       enableUserSelectHack={false}
       cancel=".panelContent"
       enableResizing={{
-        top: false, right: true, bottom: true, left: false,
-        topRight: false, bottomRight: true, bottomLeft: false, topLeft: false,
+        top: true, right: true, bottom: true, left: true,
+        topRight: true, bottomRight: true, bottomLeft: true, topLeft: true,
       }}
       resizeHandleStyles={{
-        bottomRight: { width: '10px', height: '10px', bottom: '2px', right: '2px', cursor: 'se-resize' },
+        // Edges: 6px-wide invisible grab strips along each border.
+        top: { height: '6px', top: '-3px', left: 0, right: 0, cursor: 'ns-resize' },
+        bottom: { height: '6px', bottom: '-3px', left: 0, right: 0, cursor: 'ns-resize' },
+        left: { width: '6px', left: '-3px', top: 0, bottom: 0, cursor: 'ew-resize' },
+        right: { width: '6px', right: '-3px', top: 0, bottom: 0, cursor: 'ew-resize' },
+        // Corners: 12px squares layered above the edges (higher hit priority).
+        topLeft: { width: '12px', height: '12px', top: '-4px', left: '-4px', cursor: 'nwse-resize' },
+        topRight: { width: '12px', height: '12px', top: '-4px', right: '-4px', cursor: 'nesw-resize' },
+        bottomLeft: { width: '12px', height: '12px', bottom: '-4px', left: '-4px', cursor: 'nesw-resize' },
+        bottomRight: { width: '12px', height: '12px', bottom: '-4px', right: '-4px', cursor: 'nwse-resize' },
       }}
       onDragStop={(_e, d) => {
         if (!persistLayout) return
