@@ -934,14 +934,19 @@ export class AnthropicSession implements AISession {
 
       log.info({ label: this.label, compactionModel, compactingMessages: toCompact.length }, 'AnthropicSession: sliding-window summary call');
 
-      const summaryResponse = await this.client.messages.create({
+      // Use streaming to avoid the Anthropic "Streaming is required for
+      // operations that may take longer than 10 minutes" rejection that
+      // fires on large contexts. finalMessage() awaits the full stream
+      // and returns the assembled Message — same shape as messages.create.
+      const slidingStream = this.client.messages.stream({
         model: compactionModel,
         max_tokens: 4096, // sliding summaries are partial — less content than full compaction
         system: SLIDING_SYSTEM_PROMPT,
         messages: msgs,
         // Prefill requires thinking disabled — see buildSummarizerTail/doCompact.
         thinking: { type: 'disabled' },
-      });
+      } as any);
+      const summaryResponse = await slidingStream.finalMessage();
 
       const summaryText = summaryResponse.content
         .filter((b: any) => b.type === 'text')
@@ -1211,7 +1216,11 @@ export class AnthropicSession implements AISession {
        * logged — `summaryLength: 0` was the only trace.
        */
       const callSummarizer = async (maxTokens: number) => {
-        const response = await this.client.messages.create({
+        // Use streaming — the Anthropic API rejects non-streaming requests
+        // that may take longer than 10 minutes (triggered on large contexts,
+        // e.g. ~816K tokens). finalMessage() awaits the complete stream and
+        // returns the assembled Message, same shape as messages.create.
+        const stream = this.client.messages.stream({
           model: compactionModel,
           max_tokens: maxTokens,
           system: `You are a conversation summarizer. ${instructions}\nWrap your summary in <summary></summary> tags.`,
@@ -1221,7 +1230,8 @@ export class AnthropicSession implements AISession {
           // max_tokens retry below exists for exactly that, kept as defense
           // in depth for providers that ignore this flag).
           thinking: { type: "disabled" },
-        });
+        } as any);
+        const response = await stream.finalMessage();
 
         const text = response.content
           .filter((b: any) => b.type === "text")
