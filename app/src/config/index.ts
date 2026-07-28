@@ -21,6 +21,7 @@ export const config: JarvisConfig = {
 
 const MODEL_PROVIDERS: Record<string, string> = {
   "claude-fable-5":   "anthropic",
+  "claude-opus-5":    "anthropic",
   "claude-opus-4-8":  "anthropic",
   "claude-opus-4-7":  "anthropic",
   "claude-opus-4-6":  "anthropic",
@@ -77,6 +78,7 @@ export interface ModelMeta {
 export function getModelCatalog(): ModelMeta[] {
   return [
     { id: 'claude-fable-5',   label: 'Fable 5',      note: '1M · Frontier', provider: 'anthropic' },
+    { id: 'claude-opus-5',    label: 'Opus 5',        note: '1M · Flagship', provider: 'anthropic' },
     { id: 'claude-opus-4-8',  label: 'Opus 4.8',     note: '1M · Max',      provider: 'anthropic' },
     { id: 'claude-opus-4-7',  label: 'Opus 4.7',     note: '1M · Max',      provider: 'anthropic' },
     { id: 'claude-opus-4-6',  label: 'Opus 4.6',     note: '1M · Max',      provider: 'anthropic' },
@@ -99,13 +101,13 @@ export function getCurrentProvider(): string {
  * Without the header, all Claude 4.x models cap at 200k.
  *
  * Source: https://docs.anthropic.com/en/docs/build-with-claude/context-windows
- * Confirmed members (2026-06): fable-5, mythos-5, opus-4-8, opus-4-7, opus-4-6, sonnet-4-6.
+ * Confirmed members (2026-07): fable-5, mythos-5, opus-5, opus-4-8, opus-4-7, opus-4-6, sonnet-4-6.
  * Sonnet 4.5, Sonnet 4, Haiku 4.5, all 3.x models → 200k only.
  */
 export function supportsLongContext(model?: string): boolean {
   const m = model ?? config.model;
   // Match exact model IDs (and dated variants like "claude-opus-4-7-20260101").
-  return /(?:^|-)(fable-5|mythos-5|opus-4-8|opus-4-7|opus-4-6|sonnet-4-6)(?:-|$)/.test(m);
+  return /(?:^|-)(fable-5|mythos-5|opus-5|opus-4-8|opus-4-7|opus-4-6|sonnet-4-6)(?:-|$)/.test(m);
 }
 
 export function getMaxContext(model?: string): number {
