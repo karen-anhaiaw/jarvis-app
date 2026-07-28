@@ -35,13 +35,16 @@ interface SessionBucket {
 
 const MAX_REQUEST_HISTORY = 25;
 
-// OpenAI context windows per model
+// Context windows per model, for every OpenAI-compatible provider that reuses
+// this HUD (OpenAI itself, DeepSeek via api.deepseek.com, etc).
 const MAX_CONTEXT: Record<string, number> = {
   "gpt-4o":      128000,
   "gpt-4o-mini": 128000,
   "gpt-4.1":     1047576,
   "o3":          200000,
   "o4-mini":     200000,
+  "deepseek-v4-pro":   1000000,
+  "deepseek-v4-flash": 1000000,
 };
 
 function getMaxContext(model: string): number {

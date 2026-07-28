@@ -32,13 +32,16 @@ const MODEL_PROVIDERS: Record<string, string> = {
   "gpt-4.1": "openai",
   "o3": "openai",
   "o4-mini": "openai",
+  "deepseek-v4-pro": "deepseek",
+  "deepseek-v4-flash": "deepseek",
 };
 
 export function getProviderForModel(model: string): string {
   // Exact match first
   if (MODEL_PROVIDERS[model]) return MODEL_PROVIDERS[model];
-  // Prefix match: claude-* → anthropic, gpt-*/o* → openai
+  // Prefix match: claude-* → anthropic, deepseek-* → deepseek, gpt-*/o* → openai
   if (model.startsWith("claude-")) return "anthropic";
+  if (model.startsWith("deepseek-")) return "deepseek";
   if (model.startsWith("gpt-") || model.startsWith("o3") || model.startsWith("o4")) return "openai";
   // Default to openai-compatible (works with Ollama, Groq, etc.)
   return "openai";
@@ -89,6 +92,8 @@ export function getModelCatalog(): ModelMeta[] {
     { id: 'gpt-4.1',          label: 'GPT-4.1',      note: 'OpenAI',        provider: 'openai'    },
     { id: 'o3',               label: 'o3',            note: 'OpenAI · Reason', provider: 'openai' },
     { id: 'o4-mini',          label: 'o4-mini',       note: 'OpenAI · Fast', provider: 'openai'   },
+    { id: 'deepseek-v4-pro',  label: 'DeepSeek V4 Pro',   note: '1M · Frontier · Cheap', provider: 'deepseek' },
+    { id: 'deepseek-v4-flash',label: 'DeepSeek V4 Flash', note: '1M · Fast · Cheap',     provider: 'deepseek' },
   ];
 }
 
@@ -135,5 +140,6 @@ export function getMaxOutput(model?: string): number {
   if (m.includes("opus")) return 128_000;
   if (m.includes("haiku")) return 64_000;
   if (m.includes("sonnet")) return 64_000;
+  if (m.startsWith("deepseek-")) return 384_000; // V4-Pro and V4-Flash both cap at 384k
   return 16_000; // safe default for unknown models (OpenAI etc)
 }

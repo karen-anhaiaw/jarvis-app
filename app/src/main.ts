@@ -26,6 +26,7 @@ import { config, setModel, getValidModels, getCurrentProvider, getProviderForMod
 import { ProviderRouter } from "./ai/provider.js";
 import { createAnthropicProvider } from "./ai/anthropic/provider.js";
 import { createOpenAIProvider } from "./ai/openai/provider.js";
+import { createDeepSeekProvider } from "./ai/deepseek/provider.js";
 import { AnthropicSessionFactory } from "./ai/anthropic/factory.js";
 import { abortRegistry } from "./capabilities/abort-registry.js";
 import { registerSessionInspectorTools } from "./ai/anthropic/session-inspector.js";
@@ -118,6 +119,7 @@ async function main() {
   });
   providerRouter.registerProviderFactory("anthropic", createAnthropicProvider);
   providerRouter.registerProviderFactory("openai", createOpenAIProvider);
+  providerRouter.registerProviderFactory("deepseek", createDeepSeekProvider);
 
   // SessionManager — factory set after provider activation.
   // We reuse `sessionsForRouter` created earlier (router holds a passive ref).
