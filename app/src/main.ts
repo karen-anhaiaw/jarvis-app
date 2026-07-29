@@ -29,6 +29,10 @@ import { createOpenAIProvider } from "./ai/openai/provider.js";
 import { createDeepSeekProvider } from "./ai/deepseek/provider.js";
 import { AnthropicSessionFactory } from "./ai/anthropic/factory.js";
 import { abortRegistry } from "./capabilities/abort-registry.js";
+import { bootstrap } from "./core/bootstrap.js";
+import { fileURLToPath } from "node:url";
+import { dirname, join as pathJoin } from "node:path";
+import { homedir } from "node:os";
 import { registerSessionInspectorTools } from "./ai/anthropic/session-inspector.js";
 import { HudCoreNodePiece } from "./core/hud-core-node.js";
 import { DiffViewerPiece } from "./pieces/diff-viewer.js";
@@ -61,6 +65,17 @@ function readJsonBody(req: IncomingMessage): Promise<any> {
 installDeathWatch();
 
 async function main() {
+  // ─── Bootstrap ~/.jarvis from shipped source ─────────────────────────────
+  // Runs on every boot (idempotent). Populates settings.json, jarvis-system.md,
+  // mcp.json template, settings.user.json template, and core directories.
+  // Uses node:fs only — no shell, no process.env.HOME, no process.cwd().
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  // sourceRoot is the app/ directory (two levels up from src/core/)
+  const sourceRoot = pathJoin(__dirname, "..", "..");
+  const jarvisHome = process.env.JARVIS_HOME ?? pathJoin(homedir(), ".jarvis");
+  await bootstrap({ jarvisHome, sourceRoot });
+
   // Verify UI build integrity before anything else — if assets are stale, rebuild
   ensureUiBuildIntegrity();
 

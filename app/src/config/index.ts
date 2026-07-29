@@ -1,5 +1,8 @@
 // src/config/index.ts
 import { load as loadSettings, save as saveSettings } from "../core/settings.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { jarvisPath } from "../core/paths.js";
 
 export interface JarvisConfig {
   model: string;
@@ -16,7 +19,7 @@ export const config: JarvisConfig = {
   grpcPort: Number(process.env.JARVIS_GRPC_PORT ?? "50051"),
   grpcEnabled: process.env.JARVIS_GRPC_ENABLED !== "false",
   logLevel: process.env.LOG_LEVEL ?? "info",
-  systemPromptPath: process.env.JARVIS_SYSTEM_PROMPT ?? "./jarvis-system.md",
+  systemPromptPath: process.env.JARVIS_SYSTEM_PROMPT ?? jarvisPath("jarvis-system.md"),
 };
 
 const MODEL_PROVIDERS: Record<string, string> = {

@@ -1,6 +1,7 @@
 // src/capabilities/loader.ts
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import type { EventBus } from "../core/bus.js";
@@ -10,6 +11,7 @@ import type { CapabilityRegistry } from "./registry.js";
 import { abortRegistry } from "./abort-registry.js";
 import { stripExecutorContext } from "./executor.js";
 import { log } from "../logger/index.js";
+import { jarvisPath } from "../core/paths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,7 +33,27 @@ interface CapabilityConfig {
   serverToolType?: string;
 }
 
-const CAPABILITIES_DIR = join(process.cwd(), "capabilities");
+// Resolved at call time (not module load) so JARVIS_HOME override is honoured.
+const getCapabilitiesDir = () => jarvisPath("capabilities");
+
+/**
+ * Returns spawn options appropriate for the current platform.
+ *
+ * Windows (win32): shell:true is required so .cmd shims (npx, npm) are found
+ * by spawn(). Without it, spawn() throws ENOENT for any command that lives
+ * in PATH only as a .cmd file — which is the case for Node tooling on Windows.
+ *
+ * Unix (darwin, linux, …): shell:false is preferred — faster and avoids
+ * shell injection risk when args contain user-controlled values.
+ *
+ * Exported for unit tests.
+ */
+export function spawnOptions(platform: string = process.platform): { shell: boolean; timeout: number } {
+  return {
+    shell: platform === "win32",
+    timeout: 600000,
+  };
+}
 
 export class CapabilityLoaderPiece implements Piece {
   readonly id = "capability-loader";
@@ -42,10 +64,13 @@ export class CapabilityLoaderPiece implements Piece {
   private loaded: string[] = [];
 
   systemContext(): string {
+    // homedir() is portable (Windows, macOS, Linux). Never use process.env.HOME
+    // — on Windows native (cmd.exe / PowerShell) HOME is undefined, which would
+    // make the model believe the home directory is the string "undefined".
     return `## Capability Loader Piece
 You have ${this.loaded.length} file-system capabilities loaded: ${this.loaded.join(', ')}.
 These capabilities let you interact with the user's filesystem — read, write, edit files, search content, list directories, and run shell commands.
-The user's home directory is ${process.env.HOME}. Current working directory is ${process.cwd()}.`;
+The user's home directory is ${homedir()}. Current working directory is ${process.cwd()}.`;
   }
 
   constructor(registry: CapabilityRegistry) {
@@ -88,16 +113,17 @@ The user's home directory is ${process.env.HOME}. Current working directory is $
   }
 
   private loadCapabilities(): void {
-    if (!existsSync(CAPABILITIES_DIR)) {
-      log.info({ dir: CAPABILITIES_DIR }, "CapabilityLoader: capabilities directory not found, skipping");
+    const capsDir = getCapabilitiesDir();
+    if (!existsSync(capsDir)) {
+      log.info({ dir: capsDir }, "CapabilityLoader: capabilities directory not found, skipping");
       return;
     }
 
-    const files = readdirSync(CAPABILITIES_DIR).filter(f => f.endsWith(".json"));
+    const files = readdirSync(capsDir).filter(f => f.endsWith(".json"));
 
     for (const file of files) {
       try {
-        const content = readFileSync(join(CAPABILITIES_DIR, file), "utf-8");
+        const content = readFileSync(join(capsDir, file), "utf-8");
         const config: CapabilityConfig = JSON.parse(content);
         this.registerCapability(config);
         this.loaded.push(config.name);
@@ -124,7 +150,7 @@ The user's home directory is ${process.env.HOME}. Current working directory is $
   ): Promise<{ stdout: string; stderr: string }> {
     const PROGRESS_THROTTLE_MS = 100;
     return new Promise((resolve, reject) => {
-      const child = spawn(command, args, { timeout: 600000 });
+      const child = spawn(command, args, spawnOptions());
       let stdout = "";
       let stderr = "";
       let pendingChunk = "";
@@ -272,7 +298,8 @@ The user's home directory is ${process.env.HOME}. Current working directory is $
         // the same turn each get their own controller (ESC aborts ALL).
         const signal = sessionId ? abortRegistry.register(sessionId, toolUseId) : new AbortController().signal;
         // Expand ~ and substitute ${param} in args
-        const expand = (s: string) => s.replace(/^~/, process.env.HOME ?? "~");
+        // homedir() is portable — never process.env.HOME (undefined on Windows native)
+        const expand = (s: string) => s.replace(/^~/, homedir());
         const args = (config.args ?? []).map(arg =>
           expand(arg.replace(/\$\{(\w+)\}/g, (_, key) => expand(String(input[key] ?? ""))))
         );

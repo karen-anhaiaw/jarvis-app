@@ -114,7 +114,16 @@ function getMtime(path: string): number {
 
 function loadFile(path: string): Settings {
   try {
-    if (!existsSync(path)) return { pieces: {} };
+    if (!existsSync(path)) {
+      // Warn when the shipped defaults file is absent — this means bootstrap
+      // did not run (e.g. Windows without the macOS JARVIS.app launcher).
+      // Silent fallback produces zero configuration and is hard to diagnose.
+      if (path === DEFAULT_PATH) {
+        // console.warn here: pino logger depends on settings, avoiding circular init.
+        console.warn(`[JARVIS] settings.json not found at ${path} — did bootstrap run? Starting with empty configuration.`);
+      }
+      return { pieces: {} };
+    }
     const content = readFileSync(path, "utf-8");
     return JSON.parse(content) as Settings;
   } catch {

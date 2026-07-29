@@ -3,8 +3,9 @@
 // Registers capabilities: hud_show_diff, hud_show_file, hud_compare_files
 // Publishes to hud.update with structured data for the DiffViewerRenderer.
 
-import { readFileSync, existsSync, statSync } from "node:fs";
-import { extname, basename } from "node:path";
+import { readFileSync, existsSync, statSync, writeFileSync, unlinkSync } from "node:fs";
+import { extname, basename, join } from "node:path";
+import { tmpdir, homedir } from "node:os";
 import { execSync } from "node:child_process";
 import type { EventBus } from "../core/bus.js";
 import type { Piece } from "../core/piece.js";
@@ -35,7 +36,7 @@ function detectLanguage(filePath: string): string {
 
 function readFileSafe(path: string): { content: string; error?: string } {
   try {
-    const expandedPath = path.replace(/^~/, process.env.HOME ?? "~");
+    const expandedPath = path.replace(/^~/, homedir());
     if (!existsSync(expandedPath)) return { content: "", error: `File not found: ${path}` };
     const stats = statSync(expandedPath);
     if (stats.isDirectory()) return { content: "", error: `Path is a directory: ${path}` };
@@ -51,10 +52,12 @@ function generateDiff(oldContent: string, newContent: string, fileName: string):
   // Use diff command if available, fallback to simple comparison
   try {
     const { execFileSync } = require("node:child_process");
-    const tmpOld = `/tmp/jarvis-diff-old-${Date.now()}`;
-    const tmpNew = `/tmp/jarvis-diff-new-${Date.now()}`;
-    require("node:fs").writeFileSync(tmpOld, oldContent);
-    require("node:fs").writeFileSync(tmpNew, newContent);
+    // os.tmpdir() is portable (C:\Users\...\AppData\Local\Temp on Windows)
+    const ts = Date.now();
+    const tmpOld = join(tmpdir(), `jarvis-diff-old-${ts}`);
+    const tmpNew = join(tmpdir(), `jarvis-diff-new-${ts}`);
+    writeFileSync(tmpOld, oldContent);
+    writeFileSync(tmpNew, newContent);
     try {
       const result = execSync(
         `diff -u --label "a/${fileName}" --label "b/${fileName}" "${tmpOld}" "${tmpNew}"`,
@@ -66,8 +69,8 @@ function generateDiff(oldContent: string, newContent: string, fileName: string):
       if (err.stdout) return err.stdout;
       return "";
     } finally {
-      try { require("node:fs").unlinkSync(tmpOld); } catch {}
-      try { require("node:fs").unlinkSync(tmpNew); } catch {}
+      try { unlinkSync(tmpOld); } catch {}
+      try { unlinkSync(tmpNew); } catch {}
     }
   } catch {
     return ""; // fallback: no diff available
@@ -345,7 +348,7 @@ export class DiffViewerPiece implements Piece {
         required: ["path"],
       },
       handler: async (input) => {
-        const filePath = (input.path as string).replace(/^~/, process.env.HOME ?? "~");
+        const filePath = (input.path as string).replace(/^~/, homedir());
         const { content, error } = readFileSafe(filePath);
         if (error) return { success: false, error };
 
@@ -394,8 +397,8 @@ export class DiffViewerPiece implements Piece {
         required: ["path_a", "path_b"],
       },
       handler: async (input) => {
-        const pathA = (input.path_a as string).replace(/^~/, process.env.HOME ?? "~");
-        const pathB = (input.path_b as string).replace(/^~/, process.env.HOME ?? "~");
+        const pathA = (input.path_a as string).replace(/^~/, homedir());
+        const pathB = (input.path_b as string).replace(/^~/, homedir());
 
         const fileA = readFileSafe(pathA);
         if (fileA.error) return { success: false, error: `File A: ${fileA.error}` };

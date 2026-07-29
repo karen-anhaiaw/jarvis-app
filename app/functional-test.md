@@ -25,7 +25,10 @@ Then piece_list should show all core pieces:
   | diff-viewer        | true    | false     |
   | choice-prompt      | true    | false     |
   | plugin-manager     | true    | false     |
+  | turn-inspector     | true    | false     |
 And GET /hud should return a JSON with reactor.status "online"
+And token-counter should NOT appear in piece_list (it is a provider-scoped HUD
+  registered by ai/<provider>/metrics-hud.ts, not a Piece)
 And GET /hud should return components for all visible pieces
 And the HUD Electron window should render without errors
 ```
@@ -42,7 +45,7 @@ And the graph registry should show mcp-manager with status "disabled"
 ### Scenario: Startup prompt is delivered on boot
 
 ```gherkin
-Given a file exists at .jarvis/startup-prompt.txt with content "Testing startup"
+Given a file exists at ~/.jarvis/startup-prompt.txt with content "Testing startup"
 When JARVIS boots
 Then the startup prompt should be consumed (file deleted)
 And the main session should receive a [SYSTEM] message containing the prompt
@@ -56,6 +59,93 @@ Given JARVIS has processed at least 3 messages in the main session
 When JARVIS is restarted (jarvis_reset)
 Then the main session should restore previous message history
 And the AI should have memory of the previous conversation
+```
+
+## Feature: Bootstrap & Path Resolution
+
+> INVARIANT: `~/.jarvis/` holds all runtime state. `jarvis-app/` is source code only.
+> Nothing at runtime may resolve a path against the source tree or the cwd.
+>
+> STATUS (2026-07-29): GREEN. Bootstrap implemented in `app/src/core/bootstrap.ts`,
+> called from `main.ts` as the first step of every boot. 13/13 unit tests pass.
+> `config/index.ts` systemPromptPath now resolves via `jarvisPath()` instead of
+> `"./jarvis-system.md"` (cwd-relative). Remaining RED items: silent-failure on
+> missing config (no log warning yet), and cp/find/openssl still shell-out in
+> `plugin-manager.ts` (skills copy) and `diff-viewer.ts` (`/tmp` literal).
+
+### Scenario: First boot populates ~/.jarvis from the shipped source
+
+```gherkin
+Given ~/.jarvis does not exist
+When JARVIS boots
+Then ~/.jarvis should be created with sessions/, logs/, certs/, oauth/, plugins/
+And ~/.jarvis/settings.json should be copied from the shipped defaults
+And ~/.jarvis/jarvis-system.md should be copied from the shipped source
+And ~/.jarvis/mcp.json should be created as an empty template
+And ~/.jarvis/settings.user.json should be created as a template
+And the boot should not depend on any external shell script
+```
+
+### Scenario: Boot is idempotent and refreshes shipped defaults
+
+```gherkin
+Given ~/.jarvis is already populated from a previous version
+When JARVIS boots again
+Then shipped defaults (settings.json, jarvis-system.md) should be overwritten
+  so upgrades propagate
+And user-owned files (settings.user.json, mcp.json, secrets/) must NOT be touched
+And booting N times should leave the same state as booting once
+```
+
+### Scenario: Runtime never reads from the source tree
+
+```gherkin
+Given JARVIS is running
+When any runtime path is resolved (system prompt, capabilities, settings, sessions)
+Then it should resolve under jarvisHome()
+And no runtime path should be built from process.cwd()
+And moving or deleting the jarvis-app checkout after boot should not break
+  an already-bootstrapped instance
+```
+
+### Scenario: Missing configuration is reported, never silent
+
+```gherkin
+Given ~/.jarvis/settings.json does not exist
+When settings.load() is called
+Then a warning should be logged naming the missing file
+And JARVIS should not present itself as healthy with zero configuration
+```
+
+### Scenario: HOME is not set (Windows native)
+
+```gherkin
+Given the process was started without a HOME environment variable
+  (cmd.exe and PowerShell do not set it; only Git Bash does)
+When a path containing "~" is expanded
+Then it should expand via os.homedir(), never via process.env.HOME
+And no directory literally named "~" should ever be created
+And the tool-context preamble must not tell the model
+  "The user's home directory is undefined"
+```
+
+### Scenario: Bootstrap runs without a POSIX shell
+
+```gherkin
+Given JARVIS is started on Windows with no bash available
+When the boot bootstrap runs
+Then directory creation and file copies should use node:fs APIs
+And no step should shell out to cp, find, diff, or openssl
+And the resulting ~/.jarvis should be identical to the one produced on Unix
+```
+
+### Scenario: JARVIS_HOME override is honoured everywhere
+
+```gherkin
+Given JARVIS_HOME is set to a custom directory
+When JARVIS boots
+Then every runtime path should resolve under that directory
+And two instances with different JARVIS_HOME values should not share state
 ```
 
 ## Feature: AI Request/Response Cycle
@@ -260,12 +350,15 @@ And panels should appear with saved position/size/visibility
 ### Scenario: Two-layer settings merge correctly
 
 ```gherkin
-Given settings.json has default piece configurations
-And settings.user.json has user overrides
+Given ~/.jarvis/settings.json has default piece configurations (shipped defaults)
+And ~/.jarvis/settings.user.json has user overrides
 When settings.load() is called
 Then user values should override defaults
-And settings.save() should write ONLY to settings.user.json
-And settings.json should remain untouched
+And settings.save() should write ONLY to ~/.jarvis/settings.user.json
+And ~/.jarvis/settings.json should remain untouched
+And every top-level field of Settings must survive the merge
+  (deepMerge in settings.ts is FIELD-EXPLICIT — a field absent from it is
+   silently dropped; adding a field to Settings requires adding it there too)
 ```
 
 ## Feature: HUD & SSE Streaming
@@ -663,12 +756,19 @@ Then it should report total subscription count and total event count
 ```gherkin
 Given JARVIS starts with the capabilities/ directory containing JSON definitions
 When CapabilityLoaderPiece loads
-Then the following capabilities should be registered (loaded from capabilities/*.json):
+Then the following LOCAL capabilities should be registered (type "script", spawned via the loader):
   bash, edit_file, glob, grep, list_dir,
-  multi_edit_file, read_file, jarvis_reset, hud_screenshot,
-  web_fetch, web_search, write_file
-And clear_session should also be registered (registered inline by main.ts, not from the JSON dir)
-And each should be callable and return results
+  multi_edit_file, read_file, write_file,
+  jarvis_reset, hud_screenshot,
+  web_fetch_local, web_search_local
+And the following SERVER-SIDE capabilities should be registered (type "server", no local process):
+  web_fetch      (serverToolType web_fetch_*)
+  web_search     (serverToolType web_search_*)
+  code_execution (serverToolType code_execution_*)
+And clear_session should also be registered (registered inline by main.ts:147;
+  its JSON is parked as capabilities/clear-session.json.disabled and is NOT loaded)
+And each local capability should be callable and return results
+And server-side capabilities should be forwarded to the provider, never spawned locally
 ```
 
 ### Scenario: jarvis_eval provides runtime introspection
@@ -685,8 +785,11 @@ And it should have access to: bus, capabilityRegistry, sessions, providerRouter,
 ```gherkin
 Given the main session exists
 When session_info is called
-Then it should return sessionId, label, state, messageCount, provider, model
+Then it should return sessionId, state, messageCount, provider, model,
+  systemTokensEstimate, toolsTokensEstimate, createdAt
 And messageCount should be > 0 if messages have been exchanged
+And the reported model should be the session's EFFECTIVE model
+  (peekModel() / stickyModelOverride), not the global config.model
 ```
 
 ### Scenario: Diff viewer capabilities work
@@ -709,7 +812,8 @@ Then a side-by-side comparison should appear
 Given JARVIS is installed
 When the McpManager starts with no explicit configPath argument
 Then it reads `~/.jarvis/mcp.json` (user home), NOT `<cwd>/mcp.json`
-And the user-override file is `~/.jarvis/mcp.user.json`
+And an explicit configPath argument overrides it (used by tests only)
+And there is NO user-override layer for MCP — mcp.json is the single file
 ```
 
 ### Scenario: mcp_refresh adds a new server

@@ -4,8 +4,9 @@
 // Tools, prompts loaded at runtime. Pieces/renderers in phase 2.
 
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, mkdirSync, rmSync, copyFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, mkdirSync, rmSync, copyFileSync, cpSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import type { EventBus } from "./bus.js";
 import type { Piece } from "./piece.js";
 import type { HudUpdateMessage, ChatTimelineEntry } from "./types.js";
@@ -24,8 +25,9 @@ import { graphRegistry } from "./graph-registry.js";
 import { log } from "../logger/index.js";
 import { DEFAULT_SESSION } from "./constants.js";
 
-const PLUGINS_DIR = join(process.env.HOME ?? "~", ".jarvis", "plugins");
-const JARVIS_DIR  = join(process.env.HOME ?? "~", ".jarvis");
+// homedir() is portable — process.env.HOME is undefined on Windows native (cmd/PS).
+const PLUGINS_DIR = join(homedir(), ".jarvis", "plugins");
+const JARVIS_DIR  = join(homedir(), ".jarvis");
 
 /**
  * Plugin bootstrap — runs after every install or auto-clone.
@@ -77,7 +79,8 @@ function runPluginBootstrap(pluginDir: string, pluginName: string): void {
     const dest = join(skillsDir, skillName);
     if (!existsSync(src)) { log.warn({ pluginName, skillName }, "PluginManager: bootstrap skill dir not found"); continue; }
     try {
-      execSync(`cp -r "${src}" "${dest}"`, { timeout: 5000 });
+      // cpSync is portable (no shell, no cp binary). Requires Node 16.7+.
+      cpSync(src, dest, { recursive: true, force: true });
       log.info({ pluginName, skillName }, "PluginManager: bootstrap copied skill");
     } catch (err) { log.warn({ pluginName, skillName, err: String(err) }, "PluginManager: bootstrap copy skill failed"); }
   }
