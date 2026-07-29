@@ -38,8 +38,27 @@ interface CapabilityConfig {
 // ESM __dirname equivalent via import.meta.url.
 // Override with JARVIS_CAPABILITIES_DIR env var for custom layouts.
 const _loaderDir = fileURLToPath(new URL(".", import.meta.url));
-const getCapabilitiesDir = () =>
-  process.env.JARVIS_CAPABILITIES_DIR ?? join(_loaderDir, "..", "capabilities");
+// Resolve capabilities/ relative to this file, searching upward if needed.
+// Works in both dev (tsx: src/capabilities/) and bundle (app/) layouts.
+function _findCapsDir(): string {
+  // Walk up from _loaderDir until we find a directory named "capabilities"
+  // that contains at least one .json file — that's the real one.
+  let dir = _loaderDir;
+  for (let i = 0; i < 5; i++) {
+    const candidate = join(dir, "capabilities");
+    try {
+      const entries = require("node:fs").readdirSync(candidate);
+      if (entries.some((f: string) => f.endsWith(".json"))) return candidate;
+    } catch { /* not found, keep going */ }
+    const parent = join(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Last resort: cwd/capabilities (original behaviour)
+  return join(process.cwd(), "capabilities");
+}
+const _capsDir = _findCapsDir();
+const getCapabilitiesDir = () => process.env.JARVIS_CAPABILITIES_DIR ?? _capsDir;
 
 /**
  * Returns spawn options appropriate for the current platform.
