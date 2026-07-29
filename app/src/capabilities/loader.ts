@@ -2,6 +2,7 @@
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import type { EventBus } from "../core/bus.js";
@@ -33,8 +34,12 @@ interface CapabilityConfig {
   serverToolType?: string;
 }
 
-// Resolved at call time (not module load) so JARVIS_HOME override is honoured.
-const getCapabilitiesDir = () => jarvisPath("capabilities");
+// capabilities/ lives next to the compiled loader (source or bundle).
+// ESM __dirname equivalent via import.meta.url.
+// Override with JARVIS_CAPABILITIES_DIR env var for custom layouts.
+const _loaderDir = fileURLToPath(new URL(".", import.meta.url));
+const getCapabilitiesDir = () =>
+  process.env.JARVIS_CAPABILITIES_DIR ?? join(_loaderDir, "..", "capabilities");
 
 /**
  * Returns spawn options appropriate for the current platform.

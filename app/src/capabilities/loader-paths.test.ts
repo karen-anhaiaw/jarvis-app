@@ -53,32 +53,23 @@ describe("CapabilityLoaderPiece — path resolution", () => {
     vi.unstubAllEnvs();
   });
 
-  it("loads capabilities from jarvisHome()/capabilities/, not process.cwd()", async () => {
-    vi.stubEnv("JARVIS_HOME", tmpHome);
-    // Reimport after env change so module picks up new JARVIS_HOME
+  it("loads capabilities from JARVIS_CAPABILITIES_DIR when set", async () => {
+    // Point JARVIS_CAPABILITIES_DIR directly at our tmp caps dir
+    vi.stubEnv("JARVIS_CAPABILITIES_DIR", tmpCaps);
     vi.resetModules();
     const { CapabilityLoaderPiece } = await import("./loader.js");
     const { CapabilityRegistry } = await import("./registry.js");
 
     const registry = new CapabilityRegistry();
     const piece = new CapabilityLoaderPiece(registry);
-
-    // Simulate start without a real bus
     const fakeBus = { publish: vi.fn() } as any;
     await piece.start(fakeBus);
 
-    const names = registry.names;
-    expect(names).toContain("test_tool");
+    expect(registry.names).toContain("test_tool");
   });
 
-  it("does NOT load from process.cwd() when JARVIS_HOME is set", async () => {
-    // Put a DIFFERENT tool in cwd/capabilities
-    const cwdCaps = path.join(process.cwd(), "capabilities");
-    const sentinel = path.join(cwdCaps, "sentinel-should-not-load.json");
-    const sentinelExists = fs.existsSync(sentinel);
-    // We don't create it — just verify that if JARVIS_HOME points elsewhere,
-    // tools from cwd are not automatically loaded.
-    vi.stubEnv("JARVIS_HOME", tmpHome);
+  it("does NOT load sentinel from the real capabilities dir when JARVIS_CAPABILITIES_DIR overrides", async () => {
+    vi.stubEnv("JARVIS_CAPABILITIES_DIR", tmpCaps);
     vi.resetModules();
     const { CapabilityLoaderPiece } = await import("./loader.js");
     const { CapabilityRegistry } = await import("./registry.js");
@@ -88,7 +79,6 @@ describe("CapabilityLoaderPiece — path resolution", () => {
     const fakeBus = { publish: vi.fn() } as any;
     await piece.start(fakeBus);
 
-    // Only the tool from tmpHome should be loaded
     expect(registry.names).toContain("test_tool");
     expect(registry.names).not.toContain("sentinel-should-not-load");
   });
