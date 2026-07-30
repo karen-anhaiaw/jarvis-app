@@ -19,6 +19,14 @@ const execFileAsync = promisify(execFile);
 interface CapabilityConfig {
   name: string;
   description: string;
+  /**
+   * Optional platform filter. When present, the capability is only loaded on
+   * the matching Node.js platform string (e.g. "unix" matches everything
+   * except "win32"; "win32" matches only Windows).
+   * Absent = universal (loaded on all platforms).
+   * Special alias: "unix" means any platform !== "win32".
+   */
+  platform?: "unix" | "win32";
   /** "script"/"executable" → local handler. "server" → Anthropic-executed. */
   type: "script" | "executable" | "server";
   command?: string;
@@ -149,6 +157,20 @@ The user's home directory is ${homedir()}. Current working directory is ${proces
       try {
         const content = readFileSync(join(capsDir, file), "utf-8");
         const config: CapabilityConfig = JSON.parse(content);
+
+        // Platform filter: skip capabilities not targeting this OS.
+        // "unix" = any platform except win32. "win32" = Windows only.
+        // Absent = universal.
+        if (config.platform) {
+          const here = process.platform;
+          const match =
+            config.platform === "win32" ? here === "win32" : here !== "win32";
+          if (!match) {
+            log.info({ file, platform: config.platform, here }, "CapabilityLoader: skipping (platform mismatch)");
+            continue;
+          }
+        }
+
         this.registerCapability(config);
         this.loaded.push(config.name);
       } catch (err) {
