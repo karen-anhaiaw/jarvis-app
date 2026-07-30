@@ -3,148 +3,223 @@
 // JARVIS icon generator
 //
 // Emits the JARVIS icon as SVG. The visual language mirrors the live HUD core
-// node view (app/ui/src/components/renderers/core-node/) — a blue incandescent
-// core with green satellite nodes radiating on faint constellation lines.
+// node view (app/ui/src/components/renderers/core-node/): a blue incandescent
+// core with green satellites on faint constellation lines — and, like the real
+// HUD, satellites that are themselves hubs with their own children.
+//
+// Structure is a RECURSIVE TREE, not a single ring:
+//   depth 0  the core
+//   depth 1  primary satellites, spread around the core
+//   depth 2  children of each primary, fanning out in the outward direction
+//   depth 3  grandchildren
+//
+// Radius, node size and line opacity all decay with depth. That decay is what
+// makes the hierarchy legible — without it 56 nodes read as uniform noise.
+// Children fan out ALONG the parent's outward angle so the tree looks like it
+// grows away from the core instead of folding back onto it.
 //
 // Palette is inherited from the existing brand assets, not invented:
 //   background #0a1628 · core #44aaff / #88ccff / #2266aa · accent #00e5b0
 //
-// Variants trade fidelity for legibility at small sizes:
-//   constellation — irregular, ~18 nodes, closest to the live HUD
-//   burst         — balanced radial spread, ~11 nodes, survives downscaling
-//   core          — dominant orb, 6 satellites, closest to the current icon
+// SMALL SIZES: a 56-node tree turns to mush below ~64px. Use --depth to prune —
+// `--depth 1` keeps only the core and the primary ring, which is what the 32px
+// and 16px variants (Windows taskbar, favicon) should be built from.
 //
 // Usage:
-//   node scripts/gen-icon.mjs <variant> [--size N] [--bare]
-//   node scripts/gen-icon.mjs burst > icon.svg
-//
-//   --bare   emit inner markup only (no <svg> wrapper), for embedding
+//   node scripts/gen-icon.mjs [variant] [--size N] [--depth N] [--bare] [--count]
+//   node scripts/gen-icon.mjs constellation --size 1024 > icon.svg
+//   node scripts/gen-icon.mjs constellation --size 32 --depth 1 > icon-32.svg
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BG = '#0a1628';
+const BG = "#0a1628";
 
-/** Deterministic PRNG so a given variant always renders identically. */
+/**
+ * Maximum distance from the centre, as a fraction of the icon side, that any
+ * node may occupy. Leaves room for the node's own glow so nothing collides with
+ * the rounded corners. Enforced as a hard clamp: the per-level `dist` budgets
+ * are tuned to stay under it, and this catches any retuning that does not.
+ */
+const SAFE_R = 0.44;
+
+/** Deterministic PRNG — a given variant always renders identically. */
 function rng(seed) {
   let s = seed >>> 0;
-  return () => {
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 4294967296;
-  };
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
 }
 
+const r1 = (n) => Math.round(n * 10) / 10;
+
+/** Pulls a point back along the centre→point ray so it lands inside SAFE_R. */
+function clampToDisc(x, y, c, size) {
+  const dx = x - c;
+  const dy = y - c;
+  const d = Math.hypot(dx, dy);
+  const max = size * SAFE_R;
+  return d <= max ? [x, y] : [c + (dx * max) / d, c + (dy * max) / d];
+}
+
+/**
+ * Per-depth shape of the tree.
+ *   count/branch — nodes at depth 0 / children per node deeper
+ *   dist         — distance from parent, as a fraction of the icon side
+ *   spread       — angular cone around the outward direction, radians
+ *   scale        — node size multiplier
+ *   line         — connecting line opacity multiplier
+ */
 const VARIANTS = {
-  constellation: { count: 18, seed: 7, jitterAngle: 0.42, rMin: 0.30, rMax: 0.46, coreR: 0.135, nodeR: 4.2, glowR: 20 },
-  burst:         { count: 11, seed: 3, jitterAngle: 0.12, rMin: 0.33, rMax: 0.42, coreR: 0.150, nodeR: 5.0, glowR: 24 },
-  core:          { count: 6,  seed: 5, jitterAngle: 0.08, rMin: 0.34, rMax: 0.39, coreR: 0.200, nodeR: 5.6, glowR: 28 },
+  // Closest to the live HUD: dense, irregular, three levels deep.
+  // Radius budget closes: 0.29 + 0.075 + 0.040 = 0.405 < SAFE_R
+  constellation: {
+    seed: 11,
+    coreR: 0.115,
+    levels: [
+      { count: 18, dist: [0.21, 0.29], spread: 0.4, scale: 1.0, line: 0.62 },
+      { branch: [0, 2], dist: [0.045, 0.075], spread: 1.05, scale: 0.58, line: 0.4 },
+      { branch: [0, 2], dist: [0.022, 0.04], spread: 1.3, scale: 0.36, line: 0.26 },
+    ],
+  },
+  // Balanced spread, two levels — survives downscaling better.
+  burst: {
+    seed: 3,
+    coreR: 0.135,
+    levels: [
+      { count: 11, dist: [0.25, 0.32], spread: 0.14, scale: 1.0, line: 0.62 },
+      { branch: [1, 2], dist: [0.055, 0.09], spread: 0.95, scale: 0.6, line: 0.4 },
+    ],
+  },
+  // Dominant orb, few satellites — closest to the previous icon.
+  core: {
+    seed: 5,
+    coreR: 0.185,
+    levels: [
+      { count: 6, dist: [0.3, 0.35], spread: 0.1, scale: 1.0, line: 0.62 },
+      { branch: [1, 1], dist: [0.07, 0.09], spread: 0.8, scale: 0.62, line: 0.4 },
+    ],
+  },
 };
 
-function nodes(cfg, size) {
+/** Builds the node tree. Returns a flat list with parent coords attached. */
+function buildTree(cfg, size, maxDepth) {
   const rand = rng(cfg.seed);
   const c = size / 2;
-  const out = [];
-  for (let i = 0; i < cfg.count; i++) {
-    const base = (i / cfg.count) * Math.PI * 2 - Math.PI / 2;
-    const angle = base + (rand() - 0.5) * cfg.jitterAngle;
-    const radius = size * (cfg.rMin + rand() * (cfg.rMax - cfg.rMin));
-    out.push({
-      x: +(c + Math.cos(angle) * radius).toFixed(1),
-      y: +(c + Math.sin(angle) * radius).toFixed(1),
-      // Satellites vary in weight so the ring does not read as a mechanical dial
-      scale: +(0.72 + rand() * 0.55).toFixed(2),
-      dim: +(0.45 + rand() * 0.5).toFixed(2),
-    });
+  const pick = ([lo, hi]) => lo + rand() * (hi - lo);
+  const all = [];
+  let frontier = [];
+
+  const L0 = cfg.levels[0];
+  for (let i = 0; i < L0.count; i++) {
+    const angle = (i / L0.count) * Math.PI * 2 - Math.PI / 2 + (rand() - 0.5) * L0.spread;
+    const d = size * pick(L0.dist);
+    const [x, y] = clampToDisc(c + Math.cos(angle) * d, c + Math.sin(angle) * d, c, size);
+    const node = {
+      x: r1(x), y: r1(y), px: c, py: c, depth: 0, angle,
+      scale: r1(L0.scale * (0.78 + rand() * 0.44)),
+      dim: r1(0.5 + rand() * 0.5),
+    };
+    all.push(node);
+    frontier.push(node);
   }
-  return out;
+
+  const limit = Math.min(cfg.levels.length, maxDepth + 1);
+  for (let depth = 1; depth < limit; depth++) {
+    const L = cfg.levels[depth];
+    const next = [];
+    for (const parent of frontier) {
+      const [bMin, bMax] = L.branch;
+      const n = bMin + Math.floor(rand() * (bMax - bMin + 1));
+      for (let k = 0; k < n; k++) {
+        const angle = parent.angle + (rand() - 0.5) * L.spread;
+        const d = size * pick(L.dist);
+        const [x, y] = clampToDisc(parent.x + Math.cos(angle) * d, parent.y + Math.sin(angle) * d, c, size);
+        const node = {
+          x: r1(x), y: r1(y), px: parent.x, py: parent.y, depth, angle,
+          scale: r1(L.scale * (0.8 + rand() * 0.4)),
+          dim: r1(0.45 + rand() * 0.5),
+        };
+        all.push(node);
+        next.push(node);
+      }
+    }
+    frontier = next;
+  }
+
+  return all;
 }
 
-export function buildIcon(variantName = 'burst', size = 512, idPrefix = variantName) {
+export function buildIcon(variantName = "constellation", size = 512, opts = {}) {
   const cfg = VARIANTS[variantName];
-  if (!cfg) throw new Error(`Unknown variant "${variantName}". Expected: ${Object.keys(VARIANTS).join(', ')}`);
+  if (!cfg) throw new Error(`Unknown variant "${variantName}". Expected: ${Object.keys(VARIANTS).join(", ")}`);
 
+  const { depth = 99, idPrefix: p = "j" } = opts;
   const c = size / 2;
-  const p = idPrefix;
-  const ns = nodes(cfg, size);
-  const coreR = size * cfg.coreR;
-
-  const lines = ns.map(n =>
-    `<line x1="${c}" y1="${c}" x2="${n.x}" y2="${n.y}" stroke="url(#${p}Line)" stroke-width="${(size / 512) * 1.1}" opacity="${n.dim * 0.65}"/>`
-  ).join('\n    ');
-
-  const sats = ns.map(n =>
-    `<use href="#${p}Node" x="${n.x}" y="${n.y}" transform="translate(${n.x} ${n.y}) scale(${n.scale}) translate(${-n.x} ${-n.y})" opacity="${0.55 + n.dim * 0.45}"/>`
-  ).join('\n    ');
-
   const k = size / 512;
+  const coreR = r1(size * cfg.coreR);
+  const nodes = buildTree(cfg, size, depth);
 
-  const inner = `
-  <defs>
-    <radialGradient id="${p}Bloom" cx="50%" cy="50%" r="50%">
-      <stop offset="0%"   stop-color="#5cb8ff" stop-opacity="0.55"/>
-      <stop offset="40%"  stop-color="#1e7fd0" stop-opacity="0.20"/>
-      <stop offset="100%" stop-color="${BG}"   stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="${p}Core" cx="42%" cy="38%" r="58%">
-      <stop offset="0%"   stop-color="#eaf6ff"/>
-      <stop offset="22%"  stop-color="#88ccff"/>
-      <stop offset="52%"  stop-color="#44aaff"/>
-      <stop offset="78%"  stop-color="#1d5a99"/>
-      <stop offset="100%" stop-color="#0d2740" stop-opacity="0.35"/>
-    </radialGradient>
-    <radialGradient id="${p}Halo" cx="50%" cy="50%" r="50%">
-      <stop offset="60%"  stop-color="#00e5b0" stop-opacity="0"/>
-      <stop offset="88%"  stop-color="#00e5b0" stop-opacity="0.10"/>
-      <stop offset="100%" stop-color="#00e5b0" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="${p}Line" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%"   stop-color="#44aaff" stop-opacity="0.55"/>
-      <stop offset="100%" stop-color="#00e5b0" stop-opacity="0.30"/>
-    </linearGradient>
-    <radialGradient id="${p}NodeGlow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%"   stop-color="#7dffd6" stop-opacity="0.85"/>
-      <stop offset="35%"  stop-color="#00e5b0" stop-opacity="0.40"/>
-      <stop offset="100%" stop-color="#00e5b0" stop-opacity="0"/>
-    </radialGradient>
-    <g id="${p}Node">
-      <circle r="${(cfg.glowR * k).toFixed(1)}" fill="url(#${p}NodeGlow)"/>
-      <circle r="${(cfg.nodeR * k).toFixed(1)}" fill="#c6ffee"/>
-      <circle cx="${(7 * k).toFixed(1)}" cy="${(-5 * k).toFixed(1)}" r="${(2.4 * k).toFixed(1)}" fill="#5fffc6" opacity="0.85"/>
-      <circle cx="${(-6 * k).toFixed(1)}" cy="${(6 * k).toFixed(1)}" r="${(1.9 * k).toFixed(1)}" fill="#2fe8ae" opacity="0.65"/>
-    </g>
-  </defs>
+  const lines = nodes
+    .map((n) =>
+      `<line x1="${n.px}" y1="${n.py}" x2="${n.x}" y2="${n.y}" stroke="url(#${p}L)" stroke-width="${r1(k * (1.3 - n.depth * 0.3))}" opacity="${r1(cfg.levels[n.depth].line * n.dim)}"/>`,
+    )
+    .join("");
 
-  <rect width="${size}" height="${size}" rx="${(110 * k).toFixed(0)}" fill="${BG}"/>
-  <circle cx="${c}" cy="${c}" r="${size * 0.47}" fill="url(#${p}Halo)"/>
+  // Waypoint pips midway along depth-0 spokes — present in the live HUD, and
+  // what keeps the long primary lines from reading as empty.
+  const pips = nodes
+    .filter((n) => n.depth === 0)
+    .map((n) => {
+      const t = 0.45 + (n.dim % 0.2);
+      return `<circle cx="${r1(n.px + (n.x - n.px) * t)}" cy="${r1(n.py + (n.y - n.py) * t)}" r="${r1(1.7 * k)}" fill="#3fe8b4" opacity="${r1(n.dim * 0.55)}"/>`;
+    })
+    .join("");
 
-  <g stroke-linecap="round">
-    ${lines}
-  </g>
+  // Deeper nodes paint first so shallower (larger, brighter) ones land on top.
+  const sats = [...nodes]
+    .sort((a, b) => b.depth - a.depth)
+    .map((n) => `<use href="#${p}N" transform="translate(${n.x} ${n.y}) scale(${n.scale})" opacity="${r1(0.5 + n.dim * 0.5)}"/>`)
+    .join("");
 
-  <circle cx="${c}" cy="${c}" r="${size * 0.40}" fill="url(#${p}Bloom)"/>
+  const inner = `<defs>\
+<radialGradient id="${p}B" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#5cb8ff" stop-opacity="0.55"/><stop offset="40%" stop-color="#1e7fd0" stop-opacity="0.2"/><stop offset="100%" stop-color="${BG}" stop-opacity="0"/></radialGradient>\
+<radialGradient id="${p}C" cx="42%" cy="38%" r="58%"><stop offset="0%" stop-color="#eaf6ff"/><stop offset="22%" stop-color="#88ccff"/><stop offset="52%" stop-color="#44aaff"/><stop offset="78%" stop-color="#1d5a99"/><stop offset="100%" stop-color="#0d2740" stop-opacity="0.35"/></radialGradient>\
+<linearGradient id="${p}L" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#44aaff" stop-opacity="0.55"/><stop offset="100%" stop-color="#00e5b0" stop-opacity="0.3"/></linearGradient>\
+<radialGradient id="${p}G" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#7dffd6" stop-opacity="0.85"/><stop offset="35%" stop-color="#00e5b0" stop-opacity="0.4"/><stop offset="100%" stop-color="#00e5b0" stop-opacity="0"/></radialGradient>\
+<g id="${p}N"><circle r="${r1(13 * k)}" fill="url(#${p}G)"/><circle r="${r1(3 * k)}" fill="#c6ffee"/><circle cx="${r1(5 * k)}" cy="${r1(-3.5 * k)}" r="${r1(1.8 * k)}" fill="#5fffc6" opacity="0.85"/><circle cx="${r1(-4 * k)}" cy="${r1(4 * k)}" r="${r1(1.4 * k)}" fill="#2fe8ae" opacity="0.6"/></g>\
+<clipPath id="${p}K"><rect width="${size}" height="${size}" rx="${Math.round(110 * k)}"/></clipPath>\
+</defs>\
+<rect width="${size}" height="${size}" rx="${Math.round(110 * k)}" fill="${BG}"/>\
+<g clip-path="url(#${p}K)">\
+<g stroke-linecap="round">${lines}</g>${pips}\
+<circle cx="${c}" cy="${c}" r="${r1(size * 0.4)}" fill="url(#${p}B)"/>\
+<g>${sats}</g>\
+<circle cx="${c}" cy="${c}" r="${r1(coreR * 1.9)}" fill="url(#${p}B)"/>\
+<circle cx="${c}" cy="${c}" r="${coreR}" fill="url(#${p}C)"/>\
+<circle cx="${c}" cy="${c}" r="${r1(coreR * 0.86)}" fill="#00e5b0" opacity="0.1"/>\
+<circle cx="${c}" cy="${c}" r="${coreR}" fill="none" stroke="#8fd4ff" stroke-width="${r1(1.6 * k)}" opacity="0.35"/>\
+<circle cx="${r1(c - coreR * 0.28)}" cy="${r1(c - coreR * 0.3)}" r="${r1(coreR * 0.42)}" fill="#fff" opacity="0.16"/>\
+</g>`;
 
-  <g>
-    ${sats}
-  </g>
-
-  <circle cx="${c}" cy="${c}" r="${(coreR * 1.9).toFixed(1)}" fill="url(#${p}Bloom)"/>
-  <circle cx="${c}" cy="${c}" r="${coreR.toFixed(1)}" fill="url(#${p}Core)"/>
-  <circle cx="${c}" cy="${c}" r="${(coreR * 0.86).toFixed(1)}" fill="#00e5b0" opacity="0.10"/>
-  <circle cx="${c}" cy="${c}" r="${coreR.toFixed(1)}" fill="none" stroke="#8fd4ff" stroke-width="${(1.6 * k).toFixed(1)}" opacity="0.35"/>
-  <circle cx="${(c - coreR * 0.28).toFixed(1)}" cy="${(c - coreR * 0.30).toFixed(1)}" r="${(coreR * 0.42).toFixed(1)}" fill="#ffffff" opacity="0.16"/>`;
-
-  return { inner, size };
+  return { inner, size, nodeCount: nodes.length };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
-const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop());
-if (isMain) {
-  const args = process.argv.slice(2);
-  const variant = args.find(a => !a.startsWith('--')) ?? 'burst';
-  const sizeArg = args.indexOf('--size');
-  const size = sizeArg !== -1 ? Number(args[sizeArg + 1]) : 512;
-  const bare = args.includes('--bare');
+const invokedDirectly = process.argv[1]?.endsWith("gen-icon.mjs");
 
-  const { inner } = buildIcon(variant, size);
+if (invokedDirectly) {
+  const args = process.argv.slice(2);
+  const num = (flag, fallback) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? Number(args[i + 1]) : fallback;
+  };
+  const variant = args.find((a) => !a.startsWith("--") && !/^\d+$/.test(a)) ?? "constellation";
+  const size = num("--size", 512);
+  const depth = num("--depth", 99);
+
+  const { inner, nodeCount } = buildIcon(variant, size, { depth });
+  if (args.includes("--count")) process.stderr.write(`nodes: ${nodeCount}\n`);
+
   process.stdout.write(
-    bare ? inner : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">${inner}\n</svg>\n`
+    args.includes("--bare")
+      ? inner
+      : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">${inner}</svg>\n`,
   );
 }
