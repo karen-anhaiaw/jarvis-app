@@ -100,7 +100,7 @@ export class AnthropicSessionFactory implements AISessionFactory {
     const blockBuilder = () => this.buildCustomSystemBlocks(basePromptOverride, roleContext, label);
     log.debug({ label, hasBaseOverride: !!basePromptOverride, hasRoleContext: !!roleContext, restoredSessionId: !!restoredSessionId }, "AnthropicSessionFactory: creating custom session with cache");
     return new AnthropicSession({
-      model: () => config.model,
+      model: config.model,
       systemPrompt: blockBuilder,
       getTools: this.getTools,
       label,
@@ -175,7 +175,12 @@ export class AnthropicSessionFactory implements AISessionFactory {
     log.debug({ label, contextBlocks: this.getCoreContext().length + this.getPluginContext().length, restoredSessionId: !!options?.restoredSessionId }, "AnthropicSessionFactory: creating session");
 
     const session = new AnthropicSession({
-      model: () => config.model,
+      // Capture config.model BY VALUE at birth — not `() => config.model`. A live
+      // closure over the global let one session's model bleed into every other
+      // session that had no sticky override (Sir, 2026-07-30: switch actor-fix,
+      // actor-teste followed). The session's own getBaseModel now returns the
+      // model it was born with; new sessions still start from the current global.
+      model: config.model,
       systemPrompt: () => this.buildSystemBlocks(label),
       getTools: this.getTools,
       label,

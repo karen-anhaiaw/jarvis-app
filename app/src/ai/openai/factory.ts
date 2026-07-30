@@ -54,7 +54,7 @@ export class OpenAISessionFactory implements AISessionFactory {
 
     return new OpenAISession({
       client: this.client,
-      model: () => config.model,
+      model: config.model,
       systemPrompt: () => fullPrompt,
       getTools: this.getTools,
       label,
@@ -66,7 +66,10 @@ export class OpenAISessionFactory implements AISessionFactory {
     const label = options?.label ?? `openai-${this.sessionCounter++}`;
     const session = new OpenAISession({
       client: this.client,
-      model: () => config.model,
+      // Capture config.model BY VALUE at birth — see the note in the Anthropic
+      // factory. A live `() => config.model` closure leaked one session's model
+      // into every sticky-less sibling.
+      model: config.model,
       systemPrompt: this.getSystemPrompt,
       getTools: this.getTools,
       label,

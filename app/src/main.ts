@@ -199,14 +199,27 @@ async function main() {
       required: ["model"],
     },
     handler: async (input) => {
-      const result = setModel(input.model as string);
-      if (result.providerChanged) {
+      // Session-scoped by default (Sir, 2026-07-30: "apenas a session em
+      // questão"). This used to call setModel() unconditionally — mutating the
+      // GLOBAL config.model and aborting a hardcoded "main" — so a switch on one
+      // actor bled into every sticky-less session. Same-provider switches now
+      // touch ONLY the calling session's sticky, matching the /model command.
+      // config.model changes only on a cross-PROVIDER switch, which is
+      // inherently global (the factory is swapped process-wide).
+      const sessionId = String(input.__sessionId ?? "main");
+      const target = input.model as string;
+
+      if (getProviderForModel(target) !== getCurrentProvider()) {
+        const result = setModel(target);
         await providerRouter.switchTo(result.provider, bus);
         sessions.updateFactory(providerRouter.getFactory());
         sessions.setProvider(result.provider);
-        jarvisCore.abortSession("main");
+        jarvisCore.abortSession(sessionId);
+        return result.message;
       }
-      return result.message;
+
+      modelRouter.setStickyModel(sessionId, target, "tool:model_set");
+      return `Model for ${sessionId} set to ${target} (this session only).`;
     },
   });
   capabilityRegistry.register({
