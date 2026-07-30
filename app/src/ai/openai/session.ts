@@ -10,6 +10,53 @@ type CapabilityDef =
   | { type: string; name: string };
 type Message = OpenAI.Chat.ChatCompletionMessageParam;
 
+/** OpenAI's Chat Completions API rejects requests whose `tools` array has
+ *  more than 128 entries ("Invalid 'tools': array too long"). JARVIS often
+ *  exposes far more (core + plugin + every connected MCP tool), so the list
+ *  is trimmed to this cap before each call. See toOpenAITools(). */
+const OPENAI_MAX_TOOLS = 128;
+
+/** Usage in the Anthropic-shaped form the HUD and telemetry expect. */
+export interface NormalizedUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+}
+
+/**
+ * Converts OpenAI usage into the Anthropic-shaped form used across JARVIS.
+ *
+ * WHY THIS EXISTS
+ *   message_complete used to report cache_creation_input_tokens: 0 and
+ *   cache_read_input_tokens: 0 as HARDCODED literals. OpenAI returns the real
+ *   figure in usage.prompt_tokens_details.cached_tokens, which was never read,
+ *   so the HUD showed zero cache even on a perfect hit — making a working cache
+ *   indistinguishable from a broken one.
+ *
+ * SEMANTICS — the two APIs disagree, and getting this wrong doubles the bill
+ * on screen:
+ *   OpenAI    prompt_tokens INCLUDES the cached tokens.
+ *   Anthropic input_tokens  EXCLUDES them (cache reads are counted separately).
+ * The HUD speaks Anthropic's shape, so the cached portion is subtracted here.
+ *
+ * cache_creation stays 0 on purpose: OpenAI has no explicit cache-write step
+ * and does not bill one — caching is automatic and keyed on prompt prefix.
+ */
+export function mapOpenAIUsage(u: {
+  prompt_tokens: number;
+  completion_tokens: number;
+  prompt_tokens_details?: { cached_tokens?: number } | null;
+}): NormalizedUsage {
+  const cached = Math.max(0, u.prompt_tokens_details?.cached_tokens ?? 0);
+  return {
+    input_tokens: Math.max(0, u.prompt_tokens - cached),
+    output_tokens: u.completion_tokens,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: cached,
+  };
+}
+
 const STREAMING_VERBS = [
   "Analyzing", "Bloviating", "Cogitating", "Deliberating", "Elaborating",
   "Formulating", "Generating", "Hypothesizing", "Inferring", "Juggling",
@@ -216,7 +263,7 @@ export class OpenAISession implements AISession {
     const tools = this.getTools();
     const filtered = this.toolFilter ? tools.filter(t => this.toolFilter!(t.name)) : tools;
     // OpenAI does not support Anthropic server tools — skip them (no `description` field).
-    return filtered
+    const mapped = filtered
       .filter((t): t is { name: string; description: string; input_schema: Record<string, unknown> } => "description" in t)
       .map(t => ({
         type: "function" as const,
@@ -226,6 +273,26 @@ export class OpenAISession implements AISession {
           parameters: t.input_schema,
         },
       }));
+
+    // OpenAI hard-caps the `tools` array at 128 entries; JARVIS routinely
+    // exposes many more (core + plugin + every connected MCP tool). Sending
+    // >128 makes the API reject the whole request ("array too long"), so we
+    // trim here. Priority: keep ALL non-MCP tools (core capabilities, slash,
+    // plugin tools) first — those are the JARVIS essentials — then fill the
+    // remaining slots with MCP tools (name-prefixed `mcp__`). This keeps the
+    // model functional on OpenAI even when dozens of MCP servers are connected.
+    if (mapped.length <= OPENAI_MAX_TOOLS) return mapped;
+
+    const isMcp = (name: string) => name.startsWith("mcp__");
+    const core = mapped.filter(t => !isMcp(t.function.name));
+    const mcp = mapped.filter(t => isMcp(t.function.name));
+    const kept = [...core, ...mcp].slice(0, OPENAI_MAX_TOOLS);
+    const dropped = mapped.length - kept.length;
+    log.warn(
+      { label: this.label, total: mapped.length, kept: kept.length, dropped, coreKept: Math.min(core.length, OPENAI_MAX_TOOLS) },
+      "OpenAISession: tool list exceeds OpenAI's 128 limit — trimmed (MCP tools dropped first)",
+    );
+    return kept;
   }
 
   private async *streamFromAPI(): AsyncGenerator<AIStreamEvent, void> {
@@ -271,7 +338,7 @@ export class OpenAISession implements AISession {
 
       const toolCalls: CapabilityCall[] = [];
       let fullText = "";
-      let usage: { input_tokens: number; output_tokens: number } | undefined;
+      let usage: NormalizedUsage | undefined;
 
       // Track tool call assembly (streamed in pieces)
       const pendingToolCalls = new Map<number, { id: string; name: string; args: string }>();
@@ -299,10 +366,7 @@ export class OpenAISession implements AISession {
 
         // Usage in the final chunk
         if (chunk.usage) {
-          usage = {
-            input_tokens: chunk.usage.prompt_tokens,
-            output_tokens: chunk.usage.completion_tokens,
-          };
+          usage = mapOpenAIUsage(chunk.usage);
         }
       }
 
@@ -338,6 +402,8 @@ export class OpenAISession implements AISession {
             model,
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
             durationMs: Date.now() - t0,
           },
         } as any);
@@ -346,12 +412,7 @@ export class OpenAISession implements AISession {
       yield {
         type: "message_complete",
         stopReason: toolCalls.length > 0 ? "tool_use" : "end_turn",
-        usage: usage ? {
-          input_tokens: usage.input_tokens,
-          output_tokens: usage.output_tokens,
-          cache_creation_input_tokens: 0,
-          cache_read_input_tokens: 0,
-        } : undefined,
+        usage,
       };
 
       log.info({

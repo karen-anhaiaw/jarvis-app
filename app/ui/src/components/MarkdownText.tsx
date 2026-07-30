@@ -1,39 +1,33 @@
 import { useMemo } from 'react'
 import { marked } from 'marked'
 
-// Configure marked for inline-friendly rendering
+// Configure marked for chat rendering. We let marked do the full block + inline
+// parsing (headings, lists, code, tables, AND correct nesting of strong/em/code/
+// links inside paragraphs). The previous hand-rolled `paragraph` renderer only
+// handled top-level tokens and dumped raw markdown for any nested token
+// (e.g. a link inside bold, or code inside bold) — which is what produced the
+// garbled "**...** `...` (...)" wall of text in dense answers. marked resolves
+// nesting natively, so we no longer override `paragraph`.
+//
+// We keep ONE override: links must open in the external browser (Electron),
+// styled as links. Everything else uses marked's default renderer.
 marked.setOptions({
-  breaks: true,
+  breaks: true, // single newline -> <br> (chat-friendly)
   gfm: true,
 })
 
-// Custom renderer to keep output compact
 const renderer = new marked.Renderer()
 
-// Paragraphs: no wrapping <p> tags — just content with line breaks
-renderer.paragraph = ({ tokens }) => {
-  // Render child tokens inline (avoid re-entering parser which causes stack overflow)
-  const body = tokens.map((t: any) => {
-    if (t.type === 'text') return t.text
-    if (t.type === 'codespan') return `<code>${t.text}</code>`
-    if (t.type === 'strong') return `<strong>${t.text}</strong>`
-    if (t.type === 'em') return `<em>${t.text}</em>`
-    if (t.type === 'link') return `<a href="${t.href}" target="_blank" rel="noopener" style="color:#4af;text-decoration:underline">${t.text}</a>`
-    if (t.type === 'br') return '<br>'
-    return t.raw ?? ''
-  }).join('')
-  return body + '\n'
-}
-
-// Links: open in external browser
+// Links open in the external browser, with explicit styling (CSS also covers it).
 renderer.link = ({ href, text }) => {
-  return `<a href="${href}" target="_blank" rel="noopener" style="color:#4af;text-decoration:underline">${text}</a>`
+  const safeHref = String(href ?? '')
+  return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer" style="color:#4af;text-decoration:underline">${text}</a>`
 }
 
 export function MarkdownText({ text, className }: { text: string; className?: string }) {
   const html = useMemo(() => {
-    const raw = marked.parse(text, { renderer, async: false }) as string
-    // Trim trailing newlines from block rendering
+    const raw = marked.parse(text ?? '', { renderer, async: false }) as string
+    // Trim a single trailing newline from block rendering.
     return raw.replace(/\n$/, '')
   }, [text])
 

@@ -206,3 +206,128 @@ describe("OpenAI parity — F2.4 cleanupAbortedToolMessages", () => {
     expect(cleanupAbortedToolMessages(history, [])).toEqual(history);
   });
 });
+
+// ── OpenAI 128-tool cap ─────────────────────────────────────────────────────
+// OpenAI rejects requests with a `tools` array longer than 128 entries
+// ("Invalid 'tools': array too long"). The session trims to 128, keeping
+// non-MCP (core/plugin) tools first and filling the rest with MCP tools.
+
+describe("OpenAI tool cap — 128 limit", () => {
+  // Fake client that also captures the args passed to create().
+  function capturingClient(chunks: Chunk[]) {
+    const calls: any[] = [];
+    const client = {
+      chat: {
+        completions: {
+          create: async (args: any) => {
+            calls.push(args);
+            return (async function* () { for (const c of chunks) yield c; })();
+          },
+        },
+      },
+    } as any;
+    return { client, calls };
+  }
+
+  const def = (name: string) => ({ name, description: `desc ${name}`, input_schema: { type: "object", properties: {} } });
+
+  it("trims to 128, keeping all core tools and dropping MCP overflow", async () => {
+    // 20 core tools + 223 MCP tools = 243 total (matches the reported bug)
+    const core = Array.from({ length: 20 }, (_, i) => def(`core_${i}`));
+    const mcp = Array.from({ length: 223 }, (_, i) => def(`mcp__server__tool_${i}`));
+    const { client, calls } = capturingClient([textChunk("ok"), usageChunk()]);
+
+    const s = new OpenAISession({
+      client, model: "gpt-test", systemPrompt: "sys",
+      getTools: () => [...core, ...mcp], label: "test",
+    });
+    await drain(s.sendAndStream("go"));
+
+    const sentTools = calls[0].tools as any[];
+    expect(sentTools).toHaveLength(128);
+    // Every core tool survives...
+    const sentNames = new Set(sentTools.map(t => t.function.name));
+    for (const c of core) expect(sentNames.has(c.name)).toBe(true);
+    // ...and the remaining 108 slots are MCP tools.
+    expect(sentTools.filter(t => t.function.name.startsWith("mcp__"))).toHaveLength(108);
+  });
+
+  it("passes tools through untouched when at or below 128", async () => {
+    const tools = Array.from({ length: 100 }, (_, i) => def(`t_${i}`));
+    const { client, calls } = capturingClient([textChunk("ok"), usageChunk()]);
+    const s = new OpenAISession({
+      client, model: "gpt-test", systemPrompt: "sys",
+      getTools: () => tools, label: "test",
+    });
+    await drain(s.sendAndStream("go"));
+    expect((calls[0].tools as any[])).toHaveLength(100);
+  });
+});
+
+// ─── usage mapping: cached tokens ────────────────────────────────────────────
+//
+// BUG: message_complete reported cache_creation_input_tokens: 0 and
+// cache_read_input_tokens: 0 as HARDCODED literals. OpenAI returns the real
+// figure in usage.prompt_tokens_details.cached_tokens, which was never read —
+// so the HUD showed zero cache even on a perfect hit, making it impossible to
+// tell a working cache from a broken one.
+//
+// SEMANTICS: OpenAI's prompt_tokens INCLUDES cached tokens. Anthropic's
+// input_tokens EXCLUDES them (cache reads are counted separately). The HUD
+// speaks Anthropic's shape, so the cached portion must be SUBTRACTED from
+// input_tokens — otherwise cached tokens get billed twice in the display.
+
+describe("mapOpenAIUsage — cached tokens must be read, not hardcoded to zero", () => {
+  it("reads cached_tokens into cache_read_input_tokens", async () => {
+    const { mapOpenAIUsage } = await import("./session.js");
+    const out = mapOpenAIUsage({
+      prompt_tokens: 10_000,
+      completion_tokens: 500,
+      prompt_tokens_details: { cached_tokens: 8_000 },
+    });
+    expect(out.cache_read_input_tokens).toBe(8_000);
+  });
+
+  it("subtracts the cached portion from input_tokens (OpenAI counts them in prompt_tokens)", async () => {
+    const { mapOpenAIUsage } = await import("./session.js");
+    const out = mapOpenAIUsage({
+      prompt_tokens: 10_000,
+      completion_tokens: 500,
+      prompt_tokens_details: { cached_tokens: 8_000 },
+    });
+    expect(out.input_tokens).toBe(2_000);
+    expect(out.input_tokens + out.cache_read_input_tokens).toBe(10_000);
+  });
+
+  it("reports zero cache when the API omits prompt_tokens_details", async () => {
+    const { mapOpenAIUsage } = await import("./session.js");
+    const out = mapOpenAIUsage({ prompt_tokens: 1_234, completion_tokens: 7 });
+    expect(out.cache_read_input_tokens).toBe(0);
+    expect(out.input_tokens).toBe(1_234);
+  });
+
+  it("keeps cache_creation at zero — OpenAI has no explicit cache-write step", async () => {
+    const { mapOpenAIUsage } = await import("./session.js");
+    const out = mapOpenAIUsage({
+      prompt_tokens: 900,
+      completion_tokens: 10,
+      prompt_tokens_details: { cached_tokens: 400 },
+    });
+    expect(out.cache_creation_input_tokens).toBe(0);
+  });
+
+  it("never goes negative if the API ever reports cached > prompt", async () => {
+    const { mapOpenAIUsage } = await import("./session.js");
+    const out = mapOpenAIUsage({
+      prompt_tokens: 100,
+      completion_tokens: 1,
+      prompt_tokens_details: { cached_tokens: 500 },
+    });
+    expect(out.input_tokens).toBe(0);
+  });
+
+  it("passes output_tokens through untouched", async () => {
+    const { mapOpenAIUsage } = await import("./session.js");
+    expect(mapOpenAIUsage({ prompt_tokens: 5, completion_tokens: 42 }).output_tokens).toBe(42);
+  });
+});

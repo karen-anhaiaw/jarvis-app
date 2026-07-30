@@ -293,9 +293,13 @@ body {
 
 /* ─── Markdown in Chat ───────────────────────────────────────── */
 
-.md-content { word-break: break-word; }
-.md-content p { display: inline; }
-.md-content p + p { display: block; margin-top: 6px; }
+.md-content { word-break: break-word; line-height: 1.55; }
+/* Paragraphs are real blocks with compact spacing. (Previously `display:inline`
+   collapsed dense multi-paragraph answers into one confusing wall of text.)
+   First paragraph has no top margin so a single short line stays tight. */
+.md-content p { display: block; margin: 0 0 8px; }
+.md-content p:first-child { margin-top: 0; }
+.md-content p:last-child { margin-bottom: 0; }
 .md-content strong { color: #fff; font-weight: 600; }
 .md-content em { font-style: italic; opacity: 0.9; }
 .md-content code {
