@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Line-ending policy
+#
+# Git for Windows installs with core.autocrlf=true by default. Without the
+# rules below, every text file is rewritten to CRLF on checkout — including
+# app/capabilities/scripts/*.sh, which is what EVERY bash-backed capability in
+# app/capabilities/*.json executes.
+#
+# bash cannot run a CRLF script. It fails with:
+#     bash: capabilities/scripts/bash-exec.sh: line 2: $'\r': command not found
+# or, when the shebang itself is affected:
+#     /usr/bin/env: 'bash\r': No such file or directory
+#
+# The symptom looks like "Windows has no bash" even when Git Bash is installed
+# and resolvable — the shell is fine, the scripts are corrupted at checkout.
+#
+# Later rules win, so the .cmd/.bat/.ps1 overrides below survive the blanket
+# eol=lf on the first line.
+# ─────────────────────────────────────────────────────────────────────────────
+
+* text=auto eol=lf
+
+# Scripts and sources executed by bash / node — must be LF on every platform
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.js    text eol=lf
+*.jsx   text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.proto text eol=lf
+
+# Windows-native scripts — cmd.exe expects CRLF
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+
+# Binary assets — never touch
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.icns  binary
+*.svg   text eol=lf
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
