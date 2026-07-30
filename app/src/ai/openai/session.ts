@@ -10,11 +10,8 @@ type CapabilityDef =
   | { type: string; name: string };
 type Message = OpenAI.Chat.ChatCompletionMessageParam;
 
-/** OpenAI's Chat Completions API rejects requests whose `tools` array has
- *  more than 128 entries ("Invalid 'tools': array too long"). JARVIS often
- *  exposes far more (core + plugin + every connected MCP tool), so the list
- *  is trimmed to this cap before each call. See toOpenAITools(). */
-const OPENAI_MAX_TOOLS = 128;
+import { selectWithinBudget, logBudget } from "../../capabilities/tool-budget.js";
+import { classifyForOpenAI, OPENAI_MAX_TOOLS } from "./tool-tiers.js";
 
 /** Usage in the Anthropic-shaped form the HUD and telemetry expect. */
 export interface NormalizedUsage {
@@ -263,36 +260,28 @@ export class OpenAISession implements AISession {
     const tools = this.getTools();
     const filtered = this.toolFilter ? tools.filter(t => this.toolFilter!(t.name)) : tools;
     // OpenAI does not support Anthropic server tools — skip them (no `description` field).
-    const mapped = filtered
-      .filter((t): t is { name: string; description: string; input_schema: Record<string, unknown> } => "description" in t)
-      .map(t => ({
-        type: "function" as const,
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.input_schema,
-        },
-      }));
-
-    // OpenAI hard-caps the `tools` array at 128 entries; JARVIS routinely
-    // exposes many more (core + plugin + every connected MCP tool). Sending
-    // >128 makes the API reject the whole request ("array too long"), so we
-    // trim here. Priority: keep ALL non-MCP tools (core capabilities, slash,
-    // plugin tools) first — those are the JARVIS essentials — then fill the
-    // remaining slots with MCP tools (name-prefixed `mcp__`). This keeps the
-    // model functional on OpenAI even when dozens of MCP servers are connected.
-    if (mapped.length <= OPENAI_MAX_TOOLS) return mapped;
-
-    const isMcp = (name: string) => name.startsWith("mcp__");
-    const core = mapped.filter(t => !isMcp(t.function.name));
-    const mcp = mapped.filter(t => isMcp(t.function.name));
-    const kept = [...core, ...mcp].slice(0, OPENAI_MAX_TOOLS);
-    const dropped = mapped.length - kept.length;
-    log.warn(
-      { label: this.label, total: mapped.length, kept: kept.length, dropped, coreKept: Math.min(core.length, OPENAI_MAX_TOOLS) },
-      "OpenAISession: tool list exceeds OpenAI's 128 limit — trimmed (MCP tools dropped first)",
+    const local = filtered.filter(
+      (t): t is { name: string; description: string; input_schema: Record<string, unknown> } => "description" in t,
     );
-    return kept;
+
+    // Trim BEFORE mapping. The policy classifies by NAME, and the OpenAI wire
+    // shape buries the name inside `function` — selecting first keeps the
+    // classifier working on the natural shape.
+    //
+    // Limit and priority both belong to THIS implementation (see tool-tiers.ts):
+    // OpenAI is what rejects an array over 128, so OpenAI decides who survives.
+    // Order of sacrifice is mcp, then piece, never core.
+    const budget = selectWithinBudget(local, OPENAI_MAX_TOOLS, classifyForOpenAI);
+    logBudget(budget, { label: this.label, limit: OPENAI_MAX_TOOLS });
+
+    return budget.tools.map(t => ({
+      type: "function" as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.input_schema,
+      },
+    }));
   }
 
   private async *streamFromAPI(): AsyncGenerator<AIStreamEvent, void> {
