@@ -1,47 +1,63 @@
 // src/capabilities/loader-spawn.test.ts
 //
-// TDD — RED first. Tests that CapabilityLoaderPiece.execWithProgress
-// passes shell:true on Windows and shell:false on Unix.
+// HISTORY — this file previously asserted the opposite of what it asserts now.
 //
-// ESM native modules cannot be vi.spied directly. We test via a
-// platform-aware helper extracted from loader.ts: spawnOptions(platform).
-// The helper is a pure function — testable without mocking spawn itself.
+// It used to test spawnOptions(platform), which returned shell:true on win32
+// so that .cmd shims (npx, npm) could be found by spawn(). That turned out to
+// be the source of a production bug on Windows: with shell:true, Node does not
+// forward `args` as a vector — it concatenates them into a single command line
+// for cmd.exe WITHOUT quoting arguments containing spaces, and cmd.exe then
+// re-tokenizes on whitespace. Every capability argument shifted by one position.
+//
+// spawnOptions was therefore replaced by buildSpawnPlan, which never sets
+// shell:true. The .cmd/.bat use case is preserved by invoking cmd.exe
+// explicitly with a command line we quote ourselves. See loader.ts and
+// loader-spawn-plan.test.ts for the behavioural contract.
+//
+// What remains here is the guard against regression: no code path may ever
+// re-introduce shell:true, on any platform.
 
 import { describe, it, expect } from "vitest";
 
-// ─── SUT import (will fail until spawnOptions is exported) ──────────────────
-// We expect loader.ts to export a testable helper:
-//   export function spawnOptions(platform?: string): { shell: boolean; timeout: number }
+const PLATFORMS = ["win32", "darwin", "linux", "freebsd"] as const;
+const ALWAYS_RESOLVES = () => "C:\\Program Files\\Git\\bin\\bash.exe";
 
-describe("spawnOptions — shell flag by platform", () => {
-  it("returns shell:true on win32", async () => {
-    const { spawnOptions } = await import("./loader.js");
-    const opts = spawnOptions("win32");
-    expect(opts.shell).toBe(true);
+describe("spawn invariants — shell must never be enabled", () => {
+  it("never returns shell:true, on any platform", async () => {
+    const { buildSpawnPlan } = await import("./loader.js");
+    for (const platform of PLATFORMS) {
+      const plan = buildSpawnPlan("bash", ["script.sh", "arg with space"], platform, ALWAYS_RESOLVES);
+      expect(plan.options.shell, `shell must be false on ${platform}`).toBe(false);
+    }
   });
 
-  it("returns shell:false on darwin", async () => {
-    const { spawnOptions } = await import("./loader.js");
-    const opts = spawnOptions("darwin");
-    expect(opts.shell).toBe(false);
+  it("carries a positive timeout on every platform", async () => {
+    const { buildSpawnPlan } = await import("./loader.js");
+    for (const platform of PLATFORMS) {
+      const plan = buildSpawnPlan("bash", [], platform, ALWAYS_RESOLVES);
+      expect(plan.options.timeout, `timeout must be set on ${platform}`).toBeGreaterThan(0);
+    }
   });
 
-  it("returns shell:false on linux", async () => {
-    const { spawnOptions } = await import("./loader.js");
-    const opts = spawnOptions("linux");
-    expect(opts.shell).toBe(false);
+  it("no longer exports spawnOptions — the shell:true helper is gone for good", async () => {
+    const mod: Record<string, unknown> = await import("./loader.js");
+    expect(mod.spawnOptions).toBeUndefined();
   });
 
-  it("defaults to current process.platform when called without args", async () => {
-    const { spawnOptions } = await import("./loader.js");
-    const opts = spawnOptions();
-    const expected = process.platform === "win32";
-    expect(opts.shell).toBe(expected);
+  it("defaults to the running platform when none is given", async () => {
+    const { buildSpawnPlan } = await import("./loader.js");
+    // On Unix hosts this must pass the command through untouched. On a Windows
+    // host it resolves via PATH; either way shell stays false.
+    const plan = buildSpawnPlan("bash", ["x"], undefined, ALWAYS_RESOLVES);
+    expect(plan.options.shell).toBe(false);
+    expect(plan.args).toEqual(["x"]);
   });
 
-  it("always includes a timeout", async () => {
-    const { spawnOptions } = await import("./loader.js");
-    expect(spawnOptions("win32").timeout).toBeGreaterThan(0);
-    expect(spawnOptions("darwin").timeout).toBeGreaterThan(0);
+  it("preserves arguments containing spaces as single arguments on unix", async () => {
+    const { buildSpawnPlan } = await import("./loader.js");
+    const args = ["capabilities/scripts/bash-exec.sh", "echo OK", "10"];
+    const plan = buildSpawnPlan("bash", args, "linux");
+    expect(plan.args).toEqual(args);
+    expect(plan.args).toHaveLength(3);
   });
 });

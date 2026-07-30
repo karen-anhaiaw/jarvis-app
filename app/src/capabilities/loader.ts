@@ -1,6 +1,6 @@
 // src/capabilities/loader.ts
 import { readdirSync, readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, delimiter as pathDelimiter } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFile, spawn } from "node:child_process";
@@ -60,23 +60,113 @@ function _findCapsDir(): string {
 const _capsDir = _findCapsDir();
 const getCapabilitiesDir = () => process.env.JARVIS_CAPABILITIES_DIR ?? _capsDir;
 
+const SPAWN_TIMEOUT_MS = 600000;
+
+export interface SpawnPlan {
+  file: string;
+  args: string[];
+  options: { shell: boolean; timeout: number; windowsVerbatimArguments?: boolean };
+}
+
 /**
- * Returns spawn options appropriate for the current platform.
+ * Quotes a single argument for a Windows command line handed to cmd.exe
+ * verbatim (windowsVerbatimArguments), so Node performs no quoting of its own.
  *
- * Windows (win32): shell:true is required so .cmd shims (npx, npm) are found
- * by spawn(). Without it, spawn() throws ENOENT for any command that lives
- * in PATH only as a .cmd file — which is the case for Node tooling on Windows.
- *
- * Unix (darwin, linux, …): shell:false is preferred — faster and avoids
- * shell injection risk when args contain user-controlled values.
- *
- * Exported for unit tests.
+ * Rules: wrap in double quotes, escape embedded quotes as \", and double any
+ * run of backslashes that precedes a quote or terminates the argument —
+ * otherwise a trailing backslash would escape our closing quote.
  */
-export function spawnOptions(platform: string = process.platform): { shell: boolean; timeout: number } {
-  return {
-    shell: platform === "win32",
-    timeout: 600000,
-  };
+export function quoteWindowsArg(arg: string): string {
+  if (arg === "") return '""';
+  const escaped = arg
+    .replace(/(\\*)"/g, '$1$1\\"')
+    .replace(/(\\*)$/, "$1$1");
+  return `"${escaped}"`;
+}
+
+/**
+ * Locates an executable on Windows by walking PATH against PATHEXT.
+ * Returns an absolute path, or null when nothing matches.
+ */
+function resolveOnWindowsPath(command: string): string | null {
+  // Already an explicit path — trust it if it exists.
+  if (/[\\/]/.test(command)) return existsSync(command) ? command : null;
+
+  const dirs = (process.env.PATH ?? "").split(pathDelimiter).filter(Boolean);
+  const exts = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+
+  for (const dir of dirs) {
+    // A bare name may already carry its extension (e.g. "bash.exe").
+    const direct = join(dir, command);
+    if (existsSync(direct)) return direct;
+    for (const ext of exts) {
+      const lower = join(dir, command + ext.toLowerCase());
+      if (existsSync(lower)) return lower;
+      const upper = join(dir, command + ext);
+      if (existsSync(upper)) return upper;
+    }
+  }
+  return null;
+}
+
+/**
+ * Builds the spawn invocation for a capability.
+ *
+ * WHY THIS EXISTS — the bug it replaces
+ *   The previous implementation passed shell:true on win32. With shell:true,
+ *   Node does not forward `args` as a vector: it concatenates them into one
+ *   command line for cmd.exe WITHOUT quoting arguments that contain spaces,
+ *   and cmd.exe then re-tokenizes on whitespace. A capability invoked with
+ *   command "echo OK" reached bash-exec.sh as $1="echo", $2="OK",
+ *   $3=<timeout> — every argument shifted by one. Observed in production on
+ *   Windows as "Working directory not found: 10". It affected every capability
+ *   receiving an argument containing a space, which in practice is all of them.
+ *
+ * THE FIX
+ *   Never let cmd.exe re-tokenize. Resolve the command to an absolute path and
+ *   spawn it with shell:false, which makes Node quote the argv vector properly.
+ *
+ *   shell:true had a legitimate purpose: finding .cmd/.bat shims (npx, npm).
+ *   Those genuinely require cmd.exe to interpret them, so for that case we
+ *   invoke cmd.exe explicitly and build the command line ourselves with
+ *   quoteWindowsArg + windowsVerbatimArguments, keeping Node out of it.
+ *
+ * Exported for unit tests. `resolver` is injectable so Windows behaviour can be
+ * tested without a Windows host.
+ */
+export function buildSpawnPlan(
+  command: string,
+  args: string[],
+  platform: string = process.platform,
+  resolver: (command: string, platform: string) => string | null = resolveOnWindowsPath,
+): SpawnPlan {
+  const options = { shell: false, timeout: SPAWN_TIMEOUT_MS };
+
+  if (platform !== "win32") {
+    return { file: command, args, options };
+  }
+
+  const resolved = resolver(command, platform);
+  if (!resolved) {
+    throw new Error(
+      `Cannot resolve executable "${command}" on Windows. Searched PATH against ` +
+        `PATHEXT. If this is bash, install Git for Windows and ensure its bin ` +
+        `directory is on PATH.`,
+    );
+  }
+
+  // .cmd / .bat are scripts, not images — only cmd.exe can execute them.
+  if (/\.(cmd|bat)$/i.test(resolved)) {
+    const line = [resolved, ...args].map(quoteWindowsArg).join(" ");
+    return {
+      file: process.env.COMSPEC ?? "cmd.exe",
+      args: ["/d", "/s", "/c", line],
+      options: { ...options, windowsVerbatimArguments: true },
+    };
+  }
+
+  // Real executable — Node quotes the argv vector correctly with shell:false.
+  return { file: resolved, args, options };
 }
 
 export class CapabilityLoaderPiece implements Piece {
@@ -174,7 +264,8 @@ The user's home directory is ${homedir()}. Current working directory is ${proces
   ): Promise<{ stdout: string; stderr: string }> {
     const PROGRESS_THROTTLE_MS = 100;
     return new Promise((resolve, reject) => {
-      const child = spawn(command, args, spawnOptions());
+      const plan = buildSpawnPlan(command, args);
+      const child = spawn(plan.file, plan.args, plan.options);
       let stdout = "";
       let stderr = "";
       let pendingChunk = "";
