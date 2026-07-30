@@ -30,6 +30,7 @@ import { createDeepSeekProvider } from "./ai/deepseek/provider.js";
 import { AnthropicSessionFactory } from "./ai/anthropic/factory.js";
 import { abortRegistry } from "./capabilities/abort-registry.js";
 import { bootstrap, resolveSourceRoot } from "./core/bootstrap.js";
+import { loadBasePrompt } from "./ai/system-prompt.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join as pathJoin } from "node:path";
 import { homedir } from "node:os";
@@ -129,8 +130,11 @@ async function main() {
   // Provider router — manages active AI provider + metrics HUD
   // Find the plugin manager piece lazily (it's in the pieces array)
   const getPluginManager = () => pieces.find(p => p.id === "plugin-manager") as any;
+  // Read jarvis-system.md ONCE at boot; every provider reads it from here.
+  const basePrompt = loadBasePrompt();
   const providerRouter = new ProviderRouter({
     getTools: () => capabilityRegistry.getDefinitions(),
+    getBasePrompt: () => basePrompt,
     getCoreContext: () => pieces.filter(p => p.id !== "plugin-manager" && p.systemContext).map(p => p.systemContext!()),
     getPluginInstructions: () => {
       const pm = getPluginManager();

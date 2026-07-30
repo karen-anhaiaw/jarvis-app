@@ -3,6 +3,7 @@ import type { Provider, ProviderConfig } from "../provider.js";
 import { OpenAISessionFactory } from "./factory.js";
 import { OpenAIMetricsHud } from "./metrics-hud.js";
 import { load as loadSettings } from "../../core/settings.js";
+import { composeSystemPrompt } from "../system-prompt.js";
 
 export function createOpenAIProvider(config: ProviderConfig): Provider {
   const providerCfg = loadSettings().providers?.["openai"] ?? {};
@@ -10,17 +11,13 @@ export function createOpenAIProvider(config: ProviderConfig): Provider {
   const baseURL = providerCfg.baseUrl ?? process.env.OPENAI_BASE_URL;
   const apiKey = providerCfg.apiKey ?? process.env.OPENAI_API_KEY;
 
+  // composeSystemPrompt is shared with the DeepSeek provider (which used to
+  // carry a verbatim copy of this lambda) and includes the base prompt, which
+  // the old inline version omitted entirely. It also orders sections stable →
+  // volatile so OpenAI's automatic prefix cache can actually engage.
   const factory = new OpenAISessionFactory(
     config.getTools,
-    () => {
-      const core = config.getCoreContext().filter(Boolean);
-      const pluginInstr = config.getPluginInstructions().filter(Boolean);
-      const pluginCtx = config.getPluginContext().filter(Boolean);
-      const { content: instructions, filename: instrFile } = config.getInstructions();
-      const parts = [core.join("\n\n---\n\n"), pluginInstr.join("\n\n"), pluginCtx.join("\n\n")];
-      if (instructions) parts.push(`# ${instrFile || "instructions"}\n\n${instructions}`);
-      return parts.filter(Boolean).join("\n\n---\n\n");
-    },
+    () => composeSystemPrompt(config),
     { apiKey, baseURL },
   );
   const metricsPiece = new OpenAIMetricsHud(factory);

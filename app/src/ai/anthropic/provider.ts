@@ -26,6 +26,7 @@ export function createAnthropicProvider(config: ProviderConfig): Provider {
     config.getPluginInstructions,
     config.getPluginContext,
     config.getInstructions,
+    config.getBasePrompt,
   );
   const metricsPiece = new AnthropicMetricsHud(factory);
 

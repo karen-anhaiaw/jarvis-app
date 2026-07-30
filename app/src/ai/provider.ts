@@ -20,6 +20,16 @@ type InstructionsProvider = () => { content: string; filename: string };
 
 export interface ProviderConfig {
   getTools: CapabilityDefProvider;
+  /**
+   * The JARVIS base system prompt (jarvis-system.md).
+   *
+   * Lives on the ROUTER contract, not inside each factory. Previously only
+   * AnthropicSessionFactory knew how to read it, so the OpenAI and DeepSeek
+   * providers silently ran with no system prompt at all — no identity, no
+   * Asimov's laws. Putting it here means every provider, present and future,
+   * inherits it instead of having to remember.
+   */
+  getBasePrompt: () => string;
   getCoreContext: ContextProvider;
   getPluginInstructions: ContextProvider;
   getPluginContext: ContextProvider;

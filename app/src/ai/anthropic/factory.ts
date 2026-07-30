@@ -1,6 +1,6 @@
 // src/ai/anthropic/factory.ts
-import { readFileSync, existsSync } from "node:fs";
 import type { TextBlockParam } from "@anthropic-ai/sdk/resources/messages";
+import { loadBasePrompt } from "../system-prompt.js";
 import type { AISession, AISessionFactory, CreateWithPromptOptions } from "../types.js";
 import type { EventBus } from "../../core/bus.js";
 import { AnthropicSession } from "./session.js";
@@ -29,8 +29,12 @@ export class AnthropicSessionFactory implements AISessionFactory {
     getPluginInstructions?: () => string[],
     getPluginContext?: (sessionId?: string) => string[],
     getInstructions?: () => { content: string; filename: string },
+    getBasePrompt?: () => string,
   ) {
-    this.basePrompt = this.loadBasePrompt();
+    // The base prompt comes from the router (ProviderConfig.getBasePrompt) so
+    // every provider shares one source. The local read stays as a fallback for
+    // direct construction in tests and tooling.
+    this.basePrompt = getBasePrompt ? getBasePrompt() : loadBasePrompt();
     this.getTools = getTools;
     this.getCoreContext = getCoreContext ?? (() => []);
     this.getPluginInstructions = getPluginInstructions ?? (() => []);
@@ -199,14 +203,4 @@ export class AnthropicSessionFactory implements AISessionFactory {
     return this.basePrompt + "\n\n---\n\n" + all.join("\n\n---\n\n");
   }
 
-  private loadBasePrompt(): string {
-    const path = config.systemPromptPath;
-    if (!existsSync(path)) {
-      log.warn({ path }, "System prompt file not found, using default");
-      return "You are JARVIS, an AI assistant created by Mr. Stark. Be helpful, concise, and precise. Address the user as Sir.";
-    }
-    const content = readFileSync(path, "utf-8");
-    log.info({ path, size: content.length }, "System prompt loaded");
-    return content;
-  }
 }

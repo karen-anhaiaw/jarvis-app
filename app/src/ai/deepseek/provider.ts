@@ -16,6 +16,7 @@ import type { Provider, ProviderConfig } from "../provider.js";
 import { OpenAISessionFactory } from "../openai/factory.js";
 import { OpenAIMetricsHud } from "../openai/metrics-hud.js";
 import { load as loadSettings } from "../../core/settings.js";
+import { composeSystemPrompt } from "../system-prompt.js";
 
 /** Official DeepSeek API root. The `/v1` suffix also works and is unrelated to model version. */
 const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com";
@@ -39,17 +40,11 @@ export function createDeepSeekProvider(config: ProviderConfig): Provider {
     );
   }
 
+  // Shared with the OpenAI provider — this used to be a verbatim copy of that
+  // lambda, which meant the missing-base-prompt bug existed in two places.
   const factory = new OpenAISessionFactory(
     config.getTools,
-    () => {
-      const core = config.getCoreContext().filter(Boolean);
-      const pluginInstr = config.getPluginInstructions().filter(Boolean);
-      const pluginCtx = config.getPluginContext().filter(Boolean);
-      const { content: instructions, filename: instrFile } = config.getInstructions();
-      const parts = [core.join("\n\n---\n\n"), pluginInstr.join("\n\n"), pluginCtx.join("\n\n")];
-      if (instructions) parts.push(`# ${instrFile || "instructions"}\n\n${instructions}`);
-      return parts.filter(Boolean).join("\n\n---\n\n");
-    },
+    () => composeSystemPrompt(config),
     { apiKey, baseURL },
   );
   const metricsPiece = new OpenAIMetricsHud(factory);
