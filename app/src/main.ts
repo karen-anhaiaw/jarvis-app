@@ -29,7 +29,7 @@ import { createOpenAIProvider } from "./ai/openai/provider.js";
 import { createDeepSeekProvider } from "./ai/deepseek/provider.js";
 import { AnthropicSessionFactory } from "./ai/anthropic/factory.js";
 import { abortRegistry } from "./capabilities/abort-registry.js";
-import { bootstrap } from "./core/bootstrap.js";
+import { bootstrap, resolveSourceRoot } from "./core/bootstrap.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join as pathJoin } from "node:path";
 import { homedir } from "node:os";
@@ -71,10 +71,20 @@ async function main() {
   // Uses node:fs only — no shell, no process.env.HOME, no process.cwd().
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = dirname(__filename);
-  // sourceRoot is the app/ directory (two levels up from src/core/)
-  const sourceRoot = pathJoin(__dirname, "..", "..");
+  // sourceRoot is found by walking up for jarvis-system.md, NOT by a hardcoded
+  // depth: the previous pathJoin(__dirname, "..", "..") assumed this file lived
+  // in src/core/ and resolved one level too high, so the copy silently never ran
+  // and ~/.jarvis/jarvis-system.md was never created on any platform.
+  const sourceRoot = resolveSourceRoot(__dirname) ?? pathJoin(__dirname, "..");
   const jarvisHome = process.env.JARVIS_HOME ?? pathJoin(homedir(), ".jarvis");
-  await bootstrap({ jarvisHome, sourceRoot });
+  const bootReport = await bootstrap({ jarvisHome, sourceRoot });
+  if (bootReport.missing.length > 0) {
+    // Loud on purpose. A missing shipped default degrades JARVIS silently —
+    // no system prompt means the model runs with no identity and no rules.
+    console.error(
+      `[bootstrap] shipped defaults NOT found under ${sourceRoot}: ${bootReport.missing.join(", ")}`,
+    );
+  }
 
   // Verify UI build integrity before anything else — if assets are stale, rebuild
   ensureUiBuildIntegrity();

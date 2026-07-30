@@ -207,8 +207,9 @@ describe("bootstrap — Windows: never uses process.env.HOME or process.cwd()", 
     vi.stubEnv("HOME", undefined as any);
 
     const { bootstrap: boot } = await import("./bootstrap.js");
-    // Must not throw
-    await expect(boot({ jarvisHome: tmpHome, sourceRoot: tmpSource })).resolves.toBeUndefined();
+    // Must not throw. bootstrap now resolves to a BootstrapReport instead of
+    // void — the assertion below preserves the original intent (no throw).
+    await expect(boot({ jarvisHome: tmpHome, sourceRoot: tmpSource })).resolves.toBeDefined();
     expect(fs.existsSync(path.join(tmpHome, "sessions"))).toBe(true);
   });
 
@@ -229,7 +230,7 @@ describe("bootstrap — Windows: never uses process.env.HOME or process.cwd()", 
     // sandbox on CI. The test passes only if bootstrap uses fs.cpSync / mkdirSync.
     // On platforms where those binaries exist, the test still validates correctness.
     const { bootstrap: boot } = await import("./bootstrap.js");
-    await expect(boot({ jarvisHome: tmpHome, sourceRoot: tmpSource })).resolves.toBeUndefined();
+    await expect(boot({ jarvisHome: tmpHome, sourceRoot: tmpSource })).resolves.toBeDefined();
   });
 });
 
@@ -266,5 +267,92 @@ describe("bootstrap — JARVIS_HOME override is honoured", () => {
     const b = JSON.parse(fs.readFileSync(path.join(tmpB, "settings.user.json"), "utf-8"));
     expect(a.tag).toBe("A");
     expect(b.tag).toBe("B");
+  });
+});
+
+// ─── sourceRoot resolution ───────────────────────────────────────────────────
+//
+// THE GAP THESE TESTS CLOSE
+//   The suite above proves bootstrap() copies jarvis-system.md correctly *given
+//   a correct sourceRoot*. It always passed — while production was broken.
+//
+//   main.ts computed the root as pathJoin(__dirname, "..", "..") with the
+//   comment "two levels up from src/core/". But main.ts lives in src/, not
+//   src/core/, so two levels up is the REPOSITORY ROOT — one level too far.
+//   jarvis-system.md lives at app/jarvis-system.md, so existsSync() was false
+//   and bootstrap skipped the copy SILENTLY. config/index.ts then pointed at
+//   ~/.jarvis/jarvis-system.md, a file nothing had ever created.
+//
+//   Observed on Windows (C:\Users\giova\.jarvis) and, unnoticed, on macOS too.
+//   Nothing tested the path arithmetic, so nothing caught it.
+
+describe("resolveSourceRoot — locates the dir that actually holds the marker", () => {
+  let tmpRoot: string;
+  let appDir: string;
+
+  beforeEach(() => {
+    tmpRoot = makeTmpDir();
+    appDir = path.join(tmpRoot, "app");
+    fs.mkdirSync(path.join(appDir, "src", "core"), { recursive: true });
+    fs.writeFileSync(path.join(appDir, "jarvis-system.md"), "# SYSTEM\n", "utf-8");
+  });
+
+  afterEach(() => rmrf(tmpRoot));
+
+  it("resolves from src/ — the exact case that was broken in main.ts", async () => {
+    const { resolveSourceRoot } = await import("./bootstrap.js");
+    expect(resolveSourceRoot(path.join(appDir, "src"))).toBe(appDir);
+  });
+
+  it("resolves from src/core/ — survives the caller moving deeper", async () => {
+    const { resolveSourceRoot } = await import("./bootstrap.js");
+    expect(resolveSourceRoot(path.join(appDir, "src", "core"))).toBe(appDir);
+  });
+
+  it("resolves when already at the root", async () => {
+    const { resolveSourceRoot } = await import("./bootstrap.js");
+    expect(resolveSourceRoot(appDir)).toBe(appDir);
+  });
+
+  it("returns null when no ancestor holds the marker, instead of guessing", async () => {
+    const { resolveSourceRoot } = await import("./bootstrap.js");
+    const orphan = makeTmpDir();
+    try {
+      expect(resolveSourceRoot(orphan)).toBeNull();
+    } finally {
+      rmrf(orphan);
+    }
+  });
+});
+
+describe("bootstrap — a missing shipped default must be reported, not swallowed", () => {
+  let tmpHome: string;
+  let tmpSource: string;
+
+  beforeEach(() => {
+    tmpHome = makeTmpDir();
+    tmpSource = makeTmpDir();
+  });
+
+  afterEach(() => {
+    rmrf(tmpHome);
+    rmrf(tmpSource);
+  });
+
+  it("lists jarvis-system.md as missing when the source tree lacks it", async () => {
+    const { bootstrap } = await import("./bootstrap.js");
+    const report = await bootstrap({ jarvisHome: tmpHome, sourceRoot: tmpSource });
+    expect(report, "bootstrap must return a report").toBeDefined();
+    expect(report.missing).toContain("jarvis-system.md");
+  });
+
+  it("reports nothing missing on a healthy source tree", async () => {
+    fs.mkdirSync(path.join(tmpSource, ".jarvis"), { recursive: true });
+    fs.writeFileSync(path.join(tmpSource, "jarvis-system.md"), "# SYSTEM\n", "utf-8");
+    fs.writeFileSync(path.join(tmpSource, ".jarvis", "settings.json"), "{}\n", "utf-8");
+
+    const { bootstrap } = await import("./bootstrap.js");
+    const report = await bootstrap({ jarvisHome: tmpHome, sourceRoot: tmpSource });
+    expect(report.missing).toEqual([]);
   });
 });
