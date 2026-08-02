@@ -7,6 +7,7 @@ import { execSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, mkdirSync, rmSync, copyFileSync, cpSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
 import type { EventBus } from "./bus.js";
 import type { Piece } from "./piece.js";
 import type { HudUpdateMessage, ChatTimelineEntry } from "./types.js";
@@ -501,7 +502,7 @@ export class PluginManager implements Piece {
           // node_modules, or plugins added outside the normal install path.
           let mod: any;
           try {
-            mod = await import(`${entryPath}?t=${_pMtime}`);
+            mod = await import(`${pathToFileURL(entryPath).href}?t=${_pMtime}`);
           } catch (importErr: any) {
             const errStr = String(importErr?.message ?? importErr);
             const isMissingDep = /Cannot find (package|module)/i.test(errStr);
@@ -526,7 +527,7 @@ export class PluginManager implements Piece {
                 );
                 log.info({ name }, "PluginManager: npm install succeeded — retrying import");
                 // New timestamp to bypass Node's module cache
-                mod = await import(`${entryPath}?t=${Date.now()}`);
+                mod = await import(`${pathToFileURL(entryPath).href}?t=${Date.now()}`);
               } catch (healErr: any) {
                 const healErrStr = String(healErr?.message ?? healErr);
                 log.error({ name, healErr: healErrStr }, "PluginManager: self-heal failed");
@@ -542,7 +543,7 @@ export class PluginManager implements Piece {
               try {
                 execSync(`npm rebuild`, { cwd: pluginDir, timeout: 120000 });
                 log.info({ name }, "PluginManager: npm rebuild succeeded — retrying import");
-                mod = await import(`${entryPath}?t=${Date.now()}`);
+                mod = await import(`${pathToFileURL(entryPath).href}?t=${Date.now()}`);
               } catch (healErr: any) {
                 const healErrStr = String(healErr?.message ?? healErr);
                 log.error({ name, healErr: healErrStr }, "PluginManager: native rebuild self-heal failed");
