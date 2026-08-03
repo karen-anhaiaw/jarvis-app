@@ -14,10 +14,9 @@
 // (e.g. main + actor side-panel) each render their OWN slot with their OWN
 // sessionId — anchors never bleed across.
 
-import { useEffect, useState } from 'react'
-import type { ComponentType } from 'react'
 import { useAnchors, chatAnchorRegistry, type ChatAnchor } from '../../hooks/useChatAnchors'
 import { ChoiceCard, type ChatEntry, type ChoiceAnswer } from './ChatTimeline'
+import { PluginAnchorRenderer, anchorErrorStyle } from './PluginAnchorRenderer'
 
 interface Props {
   sessionId: string
@@ -30,62 +29,6 @@ interface Props {
   /** Dismiss handler — host sends a `(dismissed)` signal to the AI and removes
    *  the anchor. Only choice anchors expose a Dismiss button. */
   onChoiceDismiss?: (anchorId: string) => void
-}
-
-// ── Plugin renderer cache (one Module per plugin/file pair) ─────────────────
-
-type PluginModule = { default?: ComponentType<any> } & Record<string, any>
-const pluginCache = new Map<string, Promise<PluginModule>>()
-
-function loadPluginRenderer(plugin: string, file: string): Promise<PluginModule> {
-  const key = `${plugin}::${file}`
-  let p = pluginCache.get(key)
-  if (!p) {
-    const url = `/plugins/${encodeURIComponent(plugin)}/renderers/${encodeURIComponent(file)}.js`
-    p = import(/* @vite-ignore */ url).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error('[anchor] failed to load plugin renderer', { plugin, file, err })
-      pluginCache.delete(key)
-      throw err
-    })
-    pluginCache.set(key, p)
-  }
-  return p
-}
-
-function PluginAnchorRenderer({ anchor }: { anchor: ChatAnchor }) {
-  const [Comp, setComp] = useState<ComponentType<any> | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!anchor.renderer) return
-    let cancelled = false
-    loadPluginRenderer(anchor.renderer.plugin, anchor.renderer.file)
-      .then((mod) => {
-        if (cancelled) return
-        const comp = mod.default ?? null
-        if (!comp) setErr('plugin renderer has no default export')
-        else setComp(() => comp)
-      })
-      .catch((e) => {
-        if (!cancelled) setErr(String(e?.message ?? e))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [anchor.renderer?.plugin, anchor.renderer?.file])
-
-  if (err) {
-    return (
-      <div style={anchorErrorStyle}>
-        anchor renderer error ({anchor.renderer?.plugin}/{anchor.renderer?.file}): {err}
-      </div>
-    )
-  }
-  if (!Comp) {
-    return <div style={anchorPendingStyle}>loading anchor renderer…</div>
-  }
-  return <Comp anchor={anchor} payload={anchor.payload} />
 }
 
 // ── Built-in choice renderer adapter ────────────────────────────────────────
@@ -153,22 +96,6 @@ const slotContainerStyle: React.CSSProperties = {
   flex: '0 0 auto',
 }
 
-const anchorPendingStyle: React.CSSProperties = {
-  padding: '6px 10px',
-  fontSize: '11px',
-  color: '#888',
-  fontStyle: 'italic',
-}
-
-const anchorErrorStyle: React.CSSProperties = {
-  padding: '6px 10px',
-  fontSize: '11px',
-  color: '#ff6b6b',
-  background: '#2a1620',
-  borderLeft: '3px solid #ff6b6b',
-  borderRadius: '4px',
-}
-
 export function ChatAnchorSlot({
   sessionId,
   assistantLabel,
@@ -176,7 +103,14 @@ export function ChatAnchorSlot({
   onChoiceSubmit,
   onChoiceDismiss,
 }: Props) {
-  const anchors = useAnchors(sessionId)
+  // This slot renders the "composer-above" mount point only: anchors that
+  // target `composer-above` OR carry no `slot` at all (historical anchors,
+  // e.g. choice cards, default here — preserves pre-0.10.0 behaviour byte-for-
+  // byte). Anchors bound to other slots (composer-actions, header-actions,
+  // message-footer) are rendered by their own ChatSlotHost elsewhere.
+  const anchors = useAnchors(sessionId).filter(
+    (a) => a.slot === undefined || a.slot === 'composer-above',
+  )
   if (anchors.length === 0) return null
 
   return (

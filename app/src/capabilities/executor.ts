@@ -90,6 +90,10 @@ export class CapabilityExecutor implements Piece {
     const sessionId = msg.target!;
     const calls = msg.calls;
     const traceId = (msg as any).traceId;
+    // Abort epoch (part 4): echoed back on capability.result so the dispatcher
+    // can discard results from a tool round the user aborted. Cast — epoch is
+    // not part of the public message contract.
+    const epoch = (msg as any).epoch as number | undefined;
     const t0 = Date.now();
     log.info({ sessionId, traceId, count: calls.length, names: calls.map(c => c.name) }, "CapabilityExecutor: executing");
 
@@ -149,6 +153,7 @@ export class CapabilityExecutor implements Piece {
         target: sessionId,
         results: errorResults,
         ...(traceId ? { traceId } : {}),
+        ...(epoch !== undefined ? { epoch } : {}),
       } as any);
       return;
     }
@@ -163,6 +168,9 @@ export class CapabilityExecutor implements Piece {
       // Propagate the turn's traceId on the result leg (F4.17) so the
       // request→execute→result chain shares one id end-to-end.
       ...(traceId ? { traceId } : {}),
+      // Echo the abort epoch (part 4) so the dispatcher can discard results
+      // from a tool round the user aborted.
+      ...(epoch !== undefined ? { epoch } : {}),
     } as any);
 
     this.bus.publish({

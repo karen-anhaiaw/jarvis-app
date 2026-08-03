@@ -4,11 +4,15 @@ import { HudRenderer } from './components/HudRenderer'
 import { DetachedPanelRenderer } from './components/DetachedPanelRenderer'
 import { useHudState, useHudPiece, useHudReactor } from './hooks/useHudStream'
 import { useAnchors } from './hooks/useChatAnchors'
+// Side-effect: importing useChatSlotFills registers window.__JARVIS_CHAT_SLOTS
+import { chatSlotFillRegistry } from './hooks/useChatSlotFills'
 
 // Expose HUD hooks globally so plugin renderers can access them
 // without importing from the main bundle (they run in isolated esbuild scope)
 ;(window as any).__JARVIS_HUD_HOOKS = { useHudState, useHudPiece, useHudReactor, useAnchors }
 // Side-effect: importing useChatAnchors registers window.__JARVIS_CHAT_ANCHORS
+// Reference the registry so the import is not tree-shaken (keeps the global).
+void chatSlotFillRegistry
 
 // Inject theme CSS vars into a <style> tag, hot-reloading on change
 function useTheme() {

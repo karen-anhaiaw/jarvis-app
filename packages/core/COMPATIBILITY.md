@@ -21,6 +21,7 @@ This package follows **Semantic Versioning (semver)**:
 | **0.6.0** | + `BusMessage.traceId?` | ✅ Unchanged | Additive optional field. Plugins that don't set it keep working — bus auto-fills a fresh id per publish. Plugins that DO set it on the originating publish (and propagate it on follow-ups) get end-to-end log correlation across chat→bus→core→provider→stream. |
 | **0.7.0** | + `CapabilityDefinition.category?` | ✅ Unchanged | Additive optional field. Declarative slash-menu grouping per tool (F3.15). Tools without it fall back to "mcp" (`mcp__` prefix) or "general". Old plugins keep working unchanged. |
 | **0.8.0** | + `TurnSummary` / `TurnToolStat` types + `system.event: turn.summary` | ✅ Unchanged | Additive. jarvis-core emits one summary per turn traceId; plugins MAY subscribe. No existing shape changed (F5). |
+| **0.10.0** | + `ChatSlot` type + optional `ChatAnchor.slot?` | ✅ Unchanged | Additive. Named chat mount points (`composer-above`/`composer-actions`/`header-actions`/`message-footer`). Core names slots; UI owns geometry; plugins target by name. `slot` optional → anchors without it default to `composer-above` (historical position). `0.9.0` had no changelog entry (drift); alignment restored here. |
 
 ## Public API Surface
 

@@ -22,12 +22,24 @@
 
 import { useSyncExternalStore } from 'react'
 
+// Mirror of @jarvis/core ChatSlot — keep in sync with packages/core/src/types.ts.
+// Named mount points the chat UI exposes for anchors. The core names them;
+// ChatPanel owns where each renders; plugins target a slot by name.
+export type ChatSlot =
+  | 'composer-above'
+  | 'composer-actions'
+  | 'header-actions'
+  | 'message-footer'
+
 // Mirror of @jarvis/core ChatAnchor — duplicated here because the UI bundle
 // does not depend on @jarvis/core. Keep these in sync.
 export interface ChatAnchor {
   id: string
   sessionId: string
   source: string
+  /** Named mount point. Omitted ⇒ treated as 'composer-above' (historical
+   *  anchor position — choice cards). Keep in sync with core ChatAnchor.slot. */
+  slot?: ChatSlot
   priority?: number
   rendererKind: string
   payload: unknown

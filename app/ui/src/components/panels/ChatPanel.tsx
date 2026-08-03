@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent } from 'react'
 import { ChatTimeline, type ChatEntry } from './ChatTimeline'
 import { ChatAnchorSlot } from './ChatAnchorSlot'
+import { ChatSlotHost } from './ChatSlotHost'
 import { chatAnchorRegistry, useAnchors } from '../../hooks/useChatAnchors'
 import { SlashMenu } from './SlashMenu'
 import { ModelPicker } from './ModelPicker'
@@ -860,9 +861,19 @@ export function ChatPanel({
 
   return (
     <div className="chatDocked" ref={panelRef}>
+      {/* header-actions slot: plugin controls at the top of the chat surface.
+          Self-hiding — ChatSlotHost renders null when the slot is empty, so
+          no header chrome appears unless a plugin populates it. */}
+      <ChatSlotHost
+        sessionId={sessionId}
+        slot="header-actions"
+        className="chatSlotHost chatSlot-header-actions chatDockedHeader"
+        style={{ justifyContent: 'flex-end', padding: '4px 8px' }}
+      />
       <div className="chatDockedOutput" onMouseDown={e => e.stopPropagation()}>
         <ChatTimeline
           entries={entries}
+          sessionId={sessionId}
           streamingText={streamingText}
           isStreaming={isStreaming}
           isThinking={isThinking}
@@ -938,6 +949,9 @@ export function ChatPanel({
               rows={1}
               className="chatInput chatTextarea"
             />
+            {/* composer-actions slot: plugin action buttons (e.g. voice mic).
+                Empty ⇒ renders null ⇒ input bar unchanged. */}
+            <ChatSlotHost sessionId={sessionId} slot="composer-actions" style={{ paddingBottom: '2px' }} />
           </div>
         </div>
       </div>

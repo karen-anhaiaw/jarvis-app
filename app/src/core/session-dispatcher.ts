@@ -37,6 +37,15 @@ interface SessionDispatch {
    * message before the AI continues. Set when the user sends a message while
    * the session is in waiting_tools (between tool rounds). */
   pendingMidTurnInjection?: string;
+  /**
+   * Monotonic abort counter (F-abort part 4). Stamped on every
+   * capability.request; the executor echoes it back on capability.result.
+   * abort() increments it so any result produced for a PRE-abort tool round
+   * carries a stale epoch and is discarded in handleToolResult — closing the
+   * race where a killed bash's late result corrupts the pendingToolCalls of a
+   * new tool round the session already re-armed. Starts at 0.
+   */
+  abortEpoch?: number;
 }
 
 /** Shorten tool name for display (strips bash→bash, edit_file→edit_file, etc.) */
@@ -107,6 +116,12 @@ export class SessionDispatcher {
     const d = this.state.get(sessionId);
     if (!d) return;
 
+    // Bump the abort epoch FIRST. Any capability.result still in flight for the
+    // tool round we're aborting was stamped with the previous epoch; bumping now
+    // guarantees handleToolResult can recognise and discard it even if the
+    // session re-arms waiting_tools for a NEW round before the late result lands.
+    d.abortEpoch = (d.abortEpoch ?? 0) + 1;
+
     // IMPORTANT: read state BEFORE sessions.abort() — that call does an
     // internal popState which would change the state we're branching on.
     // If we read after, "waiting_tools" becomes "processing" and Case A
@@ -126,26 +141,65 @@ export class SessionDispatcher {
     //    terminates (the abort signal causes it to receive an "aborted" event or
     //    throw, then fall through to the drain path).
     if (sessionState === "waiting_tools") {
+      // Repair the message history BEFORE anything else. The stream already
+      // yielded tool_use blocks (the bash call) but addToolResults never ran —
+      // so history has an orphan tool_use with no matching tool_result. The
+      // Anthropic API rejects that with HTTP 400 on the NEXT turn, bricking the
+      // session. cleanupAbortedTools injects a synthetic
+      // "[Tool execution was aborted by user]" tool_result for each orphan,
+      // restoring the tool_use/tool_result pairing invariant.
+      //
+      // Guard: the session may not implement cleanupAbortedTools (optional in
+      // the AISession interface — OpenAI has its own path). Only call when both
+      // the method and the pending calls exist.
+      const managed = this.sessions.peek(sessionId);
+      if (d.pendingToolCalls && managed?.session.cleanupAbortedTools) {
+        managed.session.cleanupAbortedTools(d.pendingToolCalls);
+      }
       // Kill any in-flight tool processes (e.g. bash sleep) so the child
       // process doesn't keep running after the user aborts.
       abortRegistry.abortSession(sessionId);
       // sessions.abort() already popped once (waiting_tools → processing).
       // Pop again to return to idle.
       this.sessions.popState(sessionId);
-      this.broadcastSessionState(sessionId, "idle");
+    } else {
+      // processing — the stream is still iterating inside consumeStream. In
+      // the happy path it receives an "aborted" event and resets running via
+      // the streamWasAborted branch. But that is NOT guaranteed: a stream stuck
+      // in I/O (bash blocked, provider that never signals) may never yield a
+      // clean aborted event, so consumeStream never runs the reset. We must not
+      // depend on it — the reconciliation step below is the safety net.
+      d.currentTraceId = undefined;
+      d.pendingToolCalls = undefined;
+    }
+
+    // ── Reconciliation (the fix) ────────────────────────────────────────────
+    // ROOT CAUSE of the zombie/queue-stuck bug: d.running (dispatcher flag) and
+    // SessionManager.stateStack are two independent sources of truth for "is the
+    // session busy?", and the abort path updated them inconsistently. If the
+    // manager stack has returned to idle but d.running stays true, every future
+    // ai.request hits the `if (d.running)` branch and only enqueues — nothing
+    // ever drains the queue (observed live: actor-dp-link idle+running=true,
+    // queueLen=1, stuck forever).
+    //
+    // Make d.running DERIVED from the stack truth: if the manager says idle,
+    // the dispatcher obeys. Idempotent and self-consistent regardless of whether
+    // the stream yielded cleanly. When the stack is still non-idle (a tool round
+    // is genuinely in flight below the aborted frame), we leave running alone —
+    // that lower frame owns the drain when it completes.
+    const stateAfter = this.sessions.getState(sessionId);
+    if (stateAfter === "idle") {
       d.running = false;
       d.currentTraceId = undefined;
       d.pendingToolCalls = undefined;
+      this.broadcastSessionState(sessionId, "idle");
       this.broadcastPendingQueue(sessionId);
       void this.drainQueue(sessionId);
     } else {
-      // processing — let consumeStream own the drain
-      d.currentTraceId = undefined;
-      d.pendingToolCalls = undefined;
       this.broadcastPendingQueue(sessionId);
     }
 
-    log.info({ sessionId, sessionState }, "SessionDispatcher: aborted");
+    log.info({ sessionId, sessionState, stateAfter }, "SessionDispatcher: aborted");
   }
 
   get size(): number {
@@ -335,6 +389,21 @@ export class SessionDispatcher {
 
     if (sessionState !== "waiting_tools") {
       log.warn({ traceId, sessionId, state: sessionState }, "SessionDispatcher: tool result but not waiting — discarding");
+      return;
+    }
+
+    // Stale-epoch guard (part 4). A result stamped with an epoch older than the
+    // session's current one belongs to a tool round the user aborted. Applying
+    // it would corrupt the pendingToolCalls of the CURRENT round (the session
+    // may have re-armed waiting_tools for a new tool). The sessionState guard
+    // above does NOT catch this — the state is legitimately waiting_tools again.
+    const resultEpoch = (msg as any).epoch as number | undefined;
+    const currentEpoch = d.abortEpoch ?? 0;
+    if (resultEpoch !== undefined && resultEpoch !== currentEpoch) {
+      log.warn(
+        { traceId, sessionId, resultEpoch, currentEpoch },
+        "SessionDispatcher: tool result from a stale (pre-abort) epoch — discarding",
+      );
       return;
     }
 
@@ -668,6 +737,10 @@ export class SessionDispatcher {
         target: sessionId,
         calls: toolCalls,
         traceId,
+        // Stamp the current abort epoch so the executor echoes it back on the
+        // result — lets handleToolResult discard results from a round the user
+        // aborted (part 4). Cast: epoch is not in the public message contract.
+        epoch: d.abortEpoch ?? 0,
       } as any);
     } else {
       log.info({

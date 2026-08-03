@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react'
 import { MarkdownText } from '../MarkdownText'
+import { ChatSlotHost } from './ChatSlotHost'
 
 // ─── TimelineEntryRenderer ────────────────────────────────────────────────────
 // Generic renderer for `kind: 'timeline_entry'` entries. Attempts to load the
@@ -185,6 +186,10 @@ export interface PendingQueueItem {
 
 interface Props {
   entries: ChatEntry[]
+  /** Session this timeline belongs to — used by per-message slot hosts
+   *  (message-footer) to scope anchors. Optional for back-compat with
+   *  callers that predate slot hosts. */
+  sessionId?: string
   streamingText: string
   isStreaming: boolean
   isThinking: boolean
@@ -613,6 +618,7 @@ export function ChoiceCard({ index, entry, onSubmit, onDismiss, assistantLabel, 
 
 export const ChatTimeline = React.memo(function ChatTimeline({
   entries,
+  sessionId,
   streamingText,
   isStreaming,
   isThinking,
@@ -727,6 +733,12 @@ export const ChatTimeline = React.memo(function ChatTimeline({
               )}
               {entry.aborted && (
                 <span style={{ color: '#666', fontStyle: 'italic', marginLeft: '8px', fontSize: '10px' }}>⊘ interrupted</span>
+              )}
+              {/* message-footer slot: plugin controls under each assistant
+                  message (e.g. copy/regenerate/react). Self-hiding when empty.
+                  Only mounted for assistant messages with a known session. */}
+              {entry.role === 'assistant' && sessionId && (
+                <ChatSlotHost sessionId={sessionId} slot="message-footer" style={{ marginTop: '4px' }} />
               )}
             </div>
           )

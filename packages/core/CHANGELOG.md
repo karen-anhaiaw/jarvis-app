@@ -4,6 +4,23 @@ All notable changes to this package will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-07-31
+
+### Added
+- **`ChatSlot` type + `ChatAnchor.slot?` field** — named mount points the chat
+  UI exposes for anchors (mission: voice mic button in the composer). The core
+  names the slots (`"composer-above"`, `"composer-actions"`, `"header-actions"`,
+  `"message-footer"`); the UI (app/ui `ChatPanel`) owns WHERE each renders; a
+  plugin targets a slot BY NAME. Same layering as distributed chat: core defines
+  the protocol, UI is the concrete impl, plugins plug against the protocol.
+  `slot` is **optional** — anchors without it default to `"composer-above"`
+  (the historical anchor position), so every existing anchor is unchanged.
+  Additive, backward compatible.
+
+> Note: `0.9.0` was set in `package.json` without a corresponding changelog
+> entry (drift predating this mission). This entry restores changelog↔version
+> alignment at `0.10.0`.
+
 ## [0.8.0] — 2026-06-10
 
 ### Added

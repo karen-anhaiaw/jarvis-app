@@ -62,10 +62,55 @@ const getCapabilitiesDir = () => process.env.JARVIS_CAPABILITIES_DIR ?? _capsDir
 
 const SPAWN_TIMEOUT_MS = 600000;
 
+/** Grace period after SIGTERM before we escalate to SIGKILL on the tree. */
+const KILL_ESCALATION_MS = 2000;
+
+/**
+ * Kill a spawned child AND its descendants on abort.
+ *
+ * The direct child (e.g. bash) often spawns grandchildren (`bash -c "sleep 300"`
+ * → a `sleep` grandchild). child.kill("SIGTERM") signals ONLY the direct child,
+ * leaving the grandchild running as an orphan — the exact leak the user hit when
+ * aborting a running bash. When the child was spawned detached (POSIX process
+ * group leader), we signal the whole group with a NEGATIVE pid, then escalate to
+ * SIGKILL after a grace period for processes that ignore SIGTERM.
+ *
+ * Windows / non-detached: fall back to child.kill(), which is the best a single
+ * handle offers there (no POSIX process groups).
+ *
+ * All kills are wrapped in try/catch — a race where the process already exited
+ * (ESRCH) must never throw out of the abort handler.
+ *
+ * NOTE — capabilities that wrap with `timeout`: killTree signals the DIRECT
+ * child's process group. `timeout` (coreutils) runs its target in its OWN group,
+ * so killTree alone does NOT reach a grandchild launched under `timeout`. Such
+ * capabilities need their own signal trap that targets the timeout's group — see
+ * capabilities/scripts/bash-exec.sh and docs/features/bdd/abort-process-tree.feature.
+ */
+export function killTree(
+  child: { pid?: number; kill: (sig?: NodeJS.Signals | number) => boolean },
+  detached: boolean,
+): void {
+  const pid = child.pid;
+  if (detached && typeof pid === "number") {
+    // Negative pid = process group. Take the whole tree.
+    try { process.kill(-pid, "SIGTERM"); } catch { /* already gone */ }
+    // Escalate for anything that ignored SIGTERM. unref so this timer never
+    // keeps the event loop (or a test) alive on its own.
+    const t = setTimeout(() => {
+      try { process.kill(-pid, "SIGKILL"); } catch { /* already gone */ }
+    }, KILL_ESCALATION_MS);
+    (t as { unref?: () => void }).unref?.();
+    return;
+  }
+  // Fallback: direct child only (Windows, or no pid available).
+  try { child.kill("SIGTERM"); } catch { /* already gone */ }
+}
+
 export interface SpawnPlan {
   file: string;
   args: string[];
-  options: { shell: boolean; timeout: number; windowsVerbatimArguments?: boolean };
+  options: { shell: boolean; timeout: number; windowsVerbatimArguments?: boolean; detached?: boolean };
 }
 
 /**
@@ -140,7 +185,14 @@ export function buildSpawnPlan(
   platform: string = process.platform,
   resolver: (command: string, platform: string) => string | null = resolveOnWindowsPath,
 ): SpawnPlan {
-  const options = { shell: false, timeout: SPAWN_TIMEOUT_MS };
+  // detached:true makes the child the leader of a NEW process group on POSIX,
+  // so an abort can signal the whole group (process.kill(-pid, ...)) and take
+  // any grandchildren with it — e.g. `bash -c "sleep 300"` spawns a `sleep`
+  // grandchild that child.kill() alone would orphan. Windows has no POSIX
+  // process groups; detached there changes console semantics, so we keep it off
+  // and fall back to child.kill() (see execWithProgress abort handler).
+  const detached = platform !== "win32";
+  const options = { shell: false, timeout: SPAWN_TIMEOUT_MS, detached };
 
   if (platform !== "win32") {
     return { file: command, args, options };
@@ -314,7 +366,7 @@ The user's home directory is ${homedir()}. Current working directory is ${proces
 
       signal?.addEventListener("abort", () => {
         if (flushTimer) clearTimeout(flushTimer);
-        child.kill("SIGTERM");
+        killTree(child, plan.options.detached === true);
         reject(new Error("aborted"));
       });
     });

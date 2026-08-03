@@ -197,9 +197,39 @@ export interface TurnSummary {
   costUsd?: number;
 }
 
-// chat.anchor — pieces declare/remove/clear UI anchors that float above the
-// chat composer (per-session). Generic mechanism: any piece can publish.
-// The frontend AnchorRegistry consumes via SSE forwarding in ChatPiece.
+/**
+ * Named mount points the chat UI (app/ui ChatPanel) exposes for anchors.
+ *
+ * This is the CONTRACT between the core and any piece/plugin that wants to
+ * inject UI into the chat surface. The core names the slots; the UI is the
+ * sole owner of WHERE each slot renders (its geometry). A plugin targets a
+ * slot BY NAME — it never references the UI layout, and the UI never imports
+ * the plugin. Same layering discipline as the distributed chat: core defines
+ * the protocol, the UI is the concrete impl, plugins plug against the protocol.
+ *
+ * Closed union on purpose — a plugin can only pick a slot the UI actually
+ * declares a host for. Adding a slot is a deliberate MINOR change to the
+ * contract (see COMPATIBILITY.md).
+ *
+ * Slots:
+ *  - "composer-above"   — floats directly above the input bar. This is the
+ *                         HISTORICAL anchor position (choice cards). Anchors
+ *                         with no `slot` set default here (back-compat).
+ *  - "composer-actions" — inline INSIDE the input bar, beside the textarea.
+ *                         For action buttons (e.g. voice mic push-to-talk).
+ *  - "header-actions"   — in the panel header row, beside title/model picker.
+ *  - "message-footer"   — footer strip under each assistant message.
+ */
+export type ChatSlot =
+  | "composer-above"
+  | "composer-actions"
+  | "header-actions"
+  | "message-footer";
+
+// chat.anchor — pieces declare/remove/clear UI anchors mounted at a named
+// ChatSlot in the chat surface (per-session). Generic mechanism: any piece
+// can publish. The frontend AnchorRegistry consumes via SSE forwarding in
+// ChatPiece.
 export interface ChatAnchor {
   /** Unique within (sessionId, source). */
   id: string;
@@ -207,6 +237,10 @@ export interface ChatAnchor {
   sessionId: string;
   /** Owner identifier (piece id, plugin name, etc.) for diagnostics. */
   source: string;
+  /** Named mount point in the chat UI. Optional for back-compat: when
+   *  omitted, the UI treats it as "composer-above" (the historical anchor
+   *  position). New anchors SHOULD set this explicitly. */
+  slot?: ChatSlot;
   /** Higher = rendered higher in the stack. Default 0. */
   priority?: number;
   /** Discriminator interpreted by the front renderer registry.
