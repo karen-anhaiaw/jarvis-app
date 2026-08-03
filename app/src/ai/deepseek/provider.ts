@@ -1,37 +1,28 @@
 // src/ai/deepseek/provider.ts
 //
-// DeepSeek provider — direct API (api.deepseek.com), not via gateway.
+// DeepSeek provider — API OpenAI-compatible com cache nativo.
 //
-// DeepSeek exposes an OpenAI-compatible /chat/completions endpoint, so we reuse
-// OpenAISessionFactory and OpenAIMetricsHud wholesale. Only the credentials and
-// baseURL differ. The metrics piece keeps the shared "token-counter" id so the
-// ModelPicker / TokenCounterRenderer keep working unchanged.
+// Features:
+//   - Prefix cache: automático via DeepSeek API (como OpenAI)
+//   - System prompt: composição completa (base + contextos)
 //
-// Model IDs (2026-07): deepseek-v4-pro, deepseek-v4-flash — both 1M context,
-// 384K max output. NOTE: deepseek-chat and deepseek-reasoner were retired on
-// 2026-07-24 and now return 404. Do not reintroduce them.
-//
+// Model IDs (2026-07): deepseek-v4-pro, deepseek-v4-flash
 // Docs: https://api-docs.deepseek.com
+//
+// TODO: Adicionar compaction (Engine B) em próxima iteração
 import type { Provider, ProviderConfig } from "../provider.js";
 import { OpenAISessionFactory } from "../openai/factory.js";
 import { OpenAIMetricsHud } from "../openai/metrics-hud.js";
 import { load as loadSettings } from "../../core/settings.js";
-import { composeSystemPrompt } from "../system-prompt.js";
+import { log } from "../../logger/index.js";
 
-/** Official DeepSeek API root. The `/v1` suffix also works and is unrelated to model version. */
 const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com";
 
 export function createDeepSeekProvider(config: ProviderConfig): Provider {
   const providerCfg = loadSettings().providers?.["deepseek"] ?? {};
-  // Priority: settings.user.json > env vars > official default. No cross-provider fallback.
   const baseURL = providerCfg.baseUrl ?? process.env.DEEPSEEK_BASE_URL ?? DEEPSEEK_DEFAULT_BASE_URL;
   const apiKey = providerCfg.apiKey ?? process.env.DEEPSEEK_API_KEY;
 
-  // Fail loudly instead of silently leaking another provider's credential.
-  // OpenAISessionFactory falls back to process.env.OPENAI_API_KEY when apiKey is
-  // undefined — harmless for OpenAI, but here it would ship the OpenAI/gateway
-  // key to api.deepseek.com. Provider factories run lazily on switchTo(), so
-  // throwing here cannot break boot; it only blocks an unconfigured switch.
   if (!apiKey) {
     throw new Error(
       "DeepSeek provider is not configured: set providers.deepseek.apiKey in " +
@@ -40,11 +31,12 @@ export function createDeepSeekProvider(config: ProviderConfig): Provider {
     );
   }
 
-  // Shared with the OpenAI provider — this used to be a verbatim copy of that
-  // lambda, which meant the missing-base-prompt bug existed in two places.
+  log.info({ baseURL }, "DeepSeekProvider: factory created");
+
+  // Reuse OpenAI factory but with DeepSeek endpoint + base prompt
   const factory = new OpenAISessionFactory(
     config.getTools,
-    () => composeSystemPrompt(config),
+    config.getBasePrompt,
     { apiKey, baseURL },
   );
   const metricsPiece = new OpenAIMetricsHud(factory);
