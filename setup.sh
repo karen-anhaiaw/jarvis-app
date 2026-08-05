@@ -534,28 +534,42 @@ header "Step 3/6 — Dependencies"
 
 # Force public npm registry — isolates from ANY authenticated private registry
 # (Nubank CodeArtifact, JFrog, Verdaccio, etc.). npm has four config layers;
-# --userconfig=/dev/null only neutralizes ~/.npmrc, so a global npmrc (or a
-# parent-directory .npmrc picked up by the cwd cascade — e.g. ~/dev/nu/.npmrc)
-# can still inject a //codeartifact.../:_authToken=. An expired token there
-# fails the install with E401. --globalconfig=/dev/null closes that gap too.
+# neutralizing only ~/.npmrc (--userconfig) leaves a global npmrc — or a
+# parent-directory .npmrc picked up by the cwd cascade (e.g. ~/dev/nu/.npmrc) —
+# free to inject a //codeartifact.../:_authToken=. An expired token there fails
+# the install with E401.
+#
+# We isolate via npm_config_* ENV VARS (highest precedence) instead of flags:
+#   - npm 11 / @npmcli/config REJECTS the same path in two config levels
+#     ("double-loading config /dev/null as global, previously loaded as user"),
+#     so --userconfig=/dev/null --globalconfig=/dev/null is invalid.
+#   - Two DISTINCT empty temp files sidestep that: each config level loads its
+#     own file, both empty, so no private registry/authToken leaks in.
+#   - npm_config_registry pins the public registry.
 # The project's own .npmrc (public registry) still pins the registry via cwd.
 #
 # NOTE: no --silent. Silencing npm hides the real error on failure — run_step
 # redirects stdout+stderr to a log, and --silent leaves that log empty on
 # exit 1, making failures undebuggable. Let npm speak.
-NPM_OPTS="--userconfig=/dev/null --globalconfig=/dev/null --registry=https://registry.npmjs.org/"
+NPM_USERCONFIG_TMP=$(mktemp "${TMPDIR:-/tmp}/jarvis-npmrc-user.XXXXXX")
+NPM_GLOBALCONFIG_TMP=$(mktemp "${TMPDIR:-/tmp}/jarvis-npmrc-global.XXXXXX")
+trap 'rm -f "$NPM_USERCONFIG_TMP" "$NPM_GLOBALCONFIG_TMP"' EXIT
+export npm_config_userconfig="$NPM_USERCONFIG_TMP"
+export npm_config_globalconfig="$NPM_GLOBALCONFIG_TMP"
+export npm_config_registry="https://registry.npmjs.org/"
 
 # The root workspace install covers app/ and packages/* in one shot.
 # We run app/ui separately because it has a Vite build step that npm
-# workspaces doesn't trigger automatically.
+# workspaces doesn't trigger automatically. The npm_config_* env vars above
+# are inherited by both installs (and by the sh -c subshell).
 
 run_step "Installing dependencies..." /tmp/jarvis-setup-npm-root.log \
-  npm install $NPM_OPTS \
+  npm install \
   && success "Dependencies installed" \
   || fail "npm install failed — check /tmp/jarvis-setup-npm-root.log"
 
 run_step "Installing UI dependencies..." /tmp/jarvis-setup-npm-ui.log \
-  sh -c "cd '$REPO_DIR/app/ui' && npm install $NPM_OPTS" \
+  sh -c "cd '$REPO_DIR/app/ui' && npm install" \
   && success "UI dependencies installed" \
   || fail "UI npm install failed — check /tmp/jarvis-setup-npm-ui.log"
 
