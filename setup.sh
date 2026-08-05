@@ -532,23 +532,30 @@ success "Provider: $PROVIDER_LABEL | Default model: $DEFAULT_MODEL"
 
 header "Step 3/6 — Dependencies"
 
-# Force public npm registry — ignores user-level ~/.npmrc (which may point to
-# a private registry like Nubank CodeArtifact, JFrog, Verdaccio, etc.). A
-# project-level .npmrc also pins the registry when commands run from inside
-# the repo, but these flags make setup.sh robust regardless of cwd.
-NPM_OPTS="--userconfig=/dev/null --registry=https://registry.npmjs.org/"
+# Force public npm registry — isolates from ANY authenticated private registry
+# (Nubank CodeArtifact, JFrog, Verdaccio, etc.). npm has four config layers;
+# --userconfig=/dev/null only neutralizes ~/.npmrc, so a global npmrc (or a
+# parent-directory .npmrc picked up by the cwd cascade — e.g. ~/dev/nu/.npmrc)
+# can still inject a //codeartifact.../:_authToken=. An expired token there
+# fails the install with E401. --globalconfig=/dev/null closes that gap too.
+# The project's own .npmrc (public registry) still pins the registry via cwd.
+#
+# NOTE: no --silent. Silencing npm hides the real error on failure — run_step
+# redirects stdout+stderr to a log, and --silent leaves that log empty on
+# exit 1, making failures undebuggable. Let npm speak.
+NPM_OPTS="--userconfig=/dev/null --globalconfig=/dev/null --registry=https://registry.npmjs.org/"
 
 # The root workspace install covers app/ and packages/* in one shot.
 # We run app/ui separately because it has a Vite build step that npm
 # workspaces doesn't trigger automatically.
 
 run_step "Installing dependencies..." /tmp/jarvis-setup-npm-root.log \
-  npm install $NPM_OPTS --silent \
+  npm install $NPM_OPTS \
   && success "Dependencies installed" \
   || fail "npm install failed — check /tmp/jarvis-setup-npm-root.log"
 
 run_step "Installing UI dependencies..." /tmp/jarvis-setup-npm-ui.log \
-  sh -c "cd '$REPO_DIR/app/ui' && npm install $NPM_OPTS --silent" \
+  sh -c "cd '$REPO_DIR/app/ui' && npm install $NPM_OPTS" \
   && success "UI dependencies installed" \
   || fail "UI npm install failed — check /tmp/jarvis-setup-npm-ui.log"
 
