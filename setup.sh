@@ -75,14 +75,18 @@ prompt_api_key() {
 # "000" on connection error / timeout / DNS failure.
 PING_BODY_FILE="/tmp/jarvis-setup-ping.body"
 
+# NOTE: plain -s (no -k). The provider base URLs (incl. the Nu LiteLLM proxy
+# at ist-prod-litellm.nullmplatform.com) present publicly-valid certs, so TLS
+# verifies cleanly. `curl -sk` (insecure) with a credential header matches a
+# malicious-script pattern and trips endpoint-security alerts — avoid -k here.
 ping_anthropic() {
-  curl -sk -o "$PING_BODY_FILE" -w "%{http_code}" -X GET "${2%/}/v1/models" \
+  curl -s -o "$PING_BODY_FILE" -w "%{http_code}" -X GET "${2%/}/v1/models" \
     -H "x-api-key: $1" -H "anthropic-version: 2023-06-01" \
     --max-time 10 2>/dev/null || echo "000"
 }
 
 ping_openai() {
-  curl -sk -o "$PING_BODY_FILE" -w "%{http_code}" -X GET "${2%/}/models" \
+  curl -s -o "$PING_BODY_FILE" -w "%{http_code}" -X GET "${2%/}/models" \
     -H "Authorization: Bearer $1" --max-time 10 2>/dev/null || echo "000"
 }
 
@@ -751,6 +755,23 @@ echo ""
 if confirm "Run full system validation?" "y"; then
 
   HUD_PORT=50052
+  # The HUD serves HTTPS with a self-signed cert generated at first boot
+  # (~/.jarvis/certs/server.crt, CN=localhost). We pin that cert with
+  # --cacert so curl verifies TLS properly instead of using -k/--insecure.
+  # Rationale: `curl -kf` (insecure + fail) is a known malicious-script
+  # signature and trips endpoint-security alerts; --cacert is both safer
+  # (real TLS verification) and alert-free.
+  HUD_CACERT="${JARVIS_DIR}/certs/server.crt"
+  hud_curl() {
+    # Verify against the pinned self-signed cert when present; fall back to
+    # the system trust store otherwise (never -k). $1 = URL, rest = extra args.
+    local url="$1"; shift
+    if [ -f "$HUD_CACERT" ]; then
+      curl -sf --cacert "$HUD_CACERT" "$url" "$@"
+    else
+      curl -sf "$url" "$@"
+    fi
+  }
   JARVIS_TEST_LOG=/tmp/jarvis-setup-test.log
   CHECKS_PASSED=0
   CHECKS_FAILED=0
@@ -783,7 +804,7 @@ if confirm "Run full system validation?" "y"; then
     SERVER_READY=false
     for i in $(seq 1 30); do
       printf "\r  ${BLUE}⠋${RESET} Starting JARVIS... (%ds)" "$i"
-      if curl -skf "https://localhost:$HUD_PORT/hud" &>/dev/null; then
+      if hud_curl "https://localhost:$HUD_PORT/hud" &>/dev/null; then
         SERVER_READY=true
         break
       fi
@@ -816,7 +837,7 @@ if confirm "Run full system validation?" "y"; then
   if [ "${SKIP_CHECKS:-false}" = "false" ]; then
 
     # ── Check 2: HTTP server responding ─────────────
-    HUD_RESPONSE=$(curl -skf "https://localhost:$HUD_PORT/hud" 2>/dev/null || true)
+    HUD_RESPONSE=$(hud_curl "https://localhost:$HUD_PORT/hud" 2>/dev/null || true)
     if echo "$HUD_RESPONSE" | grep -q '"reactor"'; then
       check_pass "HTTP server responding on port $HUD_PORT"
     else
