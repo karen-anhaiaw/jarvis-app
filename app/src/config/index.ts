@@ -79,6 +79,11 @@ export interface ModelMeta {
   label: string;
   note: string;
   provider: string;
+  /** Present only on effort-capable rows (Anthropic non-Haiku) after cartesian
+   *  expansion. Undefined for the canonical catalog and for no-effort models. */
+  effort?: EffortLevel;
+  /** Display label for the effort segment ("Max"|"High"|"Medium"|"Low"). */
+  effortLabel?: string;
 }
 
 /**
@@ -108,6 +113,45 @@ export function getModelCatalog(): ModelMeta[] {
     { id: 'deepseek-v4-pro',   label: 'DeepSeek V4 Pro',   note: '1M · Frontier · Cheap', provider: 'deepseek' },
     { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', note: '1M · Fast · Cheap',     provider: 'deepseek' },
   ];
+}
+
+/** Reasoning-effort levels exposed in the picker (mission Gearbox). Order = display
+ *  order (top→bottom). Validated against the Anthropic API 2026-08-06:
+ *  'minimal' is rejected (400), 'xhigh' is accepted but omitted here by design —
+ *  Sir chose a 4-level ladder (Max/High/Medium/Low). */
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+
+const EFFORT_LEVELS: ReadonlyArray<{ key: EffortLevel; label: string }> = [
+  { key: 'max',    label: 'Max' },
+  { key: 'high',   label: 'High' },
+  { key: 'medium', label: 'Medium' },
+  { key: 'low',    label: 'Low' },
+];
+
+/** True when the model accepts output_config.effort (Anthropic non-Haiku).
+ *  Keying on provider + !haiku means future Anthropic models are auto-included
+ *  and future Haiku variants auto-excluded — no catalog edit needed. */
+function supportsEffort(m: ModelMeta): boolean {
+  return m.provider === 'anthropic' && !m.id.includes('haiku');
+}
+
+/**
+ * Cartesian expansion of the catalog: effort-capable models yield one row per
+ * effort level (label suffixed with the effort name); every other model yields
+ * a single unchanged row. Consumed by GET /chat/models — the picker renders a
+ * flat list where each effort is a selectable row (Sir's choice: no grouping).
+ */
+export function getModelCatalogExpanded(): ModelMeta[] {
+  return getModelCatalog().flatMap((m) =>
+    supportsEffort(m)
+      ? EFFORT_LEVELS.map((e) => ({
+          ...m,
+          effort: e.key,
+          effortLabel: e.label,
+          label: `${m.label} ${e.label}`,
+        }))
+      : [m],
+  );
 }
 
 export function getCurrentProvider(): string {
