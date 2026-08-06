@@ -124,6 +124,15 @@ export interface AISession {
   /** Effective model for the next call without consuming any override. */
   peekModel?(): string;
 
+  /** Sticky per-session params the PROVIDER interprets as it sees fit.
+   *  Anthropic reads `effort`; OpenAI reads `reasoning_effort`; others ignore.
+   *  Router and UI never inspect this map — they only transport it.
+   *  `undefined` clears back to the provider's seed. Mirrors setStickyModelOverride
+   *  (added @jarvis/core 0.11.0, mission Gearbox). */
+  setStickyParams?(params: Record<string, unknown> | undefined): void;
+  /** Current sticky params without consuming them. */
+  peekParams?(): Record<string, unknown>;
+
   // ─── Per-session tool filtering (optional) ──────────────────────────────
   // Plugins (e.g. a session-orchestrator) can restrict the visible tool surface by role.
   // Implemented by wrapping `getTools()` — the filter is consulted on every
