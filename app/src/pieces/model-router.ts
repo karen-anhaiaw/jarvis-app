@@ -111,6 +111,10 @@ export interface SessionRoute {
   /** True when the user explicitly chose this model (prefix or slash command).
    *  Auto-degrade is suppressed while this flag is set. */
   userForced?: boolean;
+  /** Provider-interpreted sticky params (e.g. { effort }), mission Gearbox.
+   *  Applied to the live session alongside the sticky model via
+   *  session.setStickyParams?.(...) — router/UI never inspect the keys. */
+  params?: Record<string, unknown>;
 }
 
 interface Decision {
@@ -236,23 +240,44 @@ export class ModelRouterPiece implements Piece {
    * Emits the same banner + system event as a prefix-driven change.
    * Returns the route after the change (for the slash command to surface).
    */
-  setStickyModel(sessionId: string, model: string, reason = "slash-command"): SessionRoute {
+  /**
+   * Change the sticky model AND/OR sticky params (effort) for a session.
+   * Mission Gearbox: params travel as an open map the SESSION interprets —
+   * this method and its callers never inspect keys, just transport them.
+   * `params` is a full replacement when provided (not merged) — callers pass
+   * the complete map they want in effect, mirroring how `model` replaces sticky.
+   */
+  setStickyModel(sessionId: string, model: string, reason = "slash-command", params?: Record<string, unknown>): SessionRoute {
     const route = this.ensureRoute(sessionId, loadRoutingConfig());
-    if (route.sticky === model) {
+    const paramsChanged = params !== undefined && JSON.stringify(params) !== JSON.stringify(route.params);
+    if (route.sticky === model && !paramsChanged) {
       return route;
     }
     const ctxTokens = this.estimateCtxTokens(sessionId);
     const cost = ctxTokens * priceOf(model).cacheWrite / 1_000_000;
     const prev = route.sticky;
     route.sticky = model;
+    if (params !== undefined) route.params = params;
     route.userForced = true; // slash command = explicit user choice
     route.switchCount++;
     route.lastSwitchAt = Date.now();
     route.lastReason = reason;
     saveRouteState(sessionId, route);
 
-    this.emitSwitch(sessionId, prev, model, ctxTokens, cost, reason);
-    this.emitBanner(sessionId, prev, model, ctxTokens, cost, reason);
+    // Apply model + params ATOMICALLY on the live session (Sir's explicit
+    // decision, mission Gearbox: "aplica AMBOS na sessão VIVA"). Pre-Gearbox,
+    // setStickyModel only updated the in-memory route — the session itself
+    // only picked up the new model on the NEXT onRequest (real ai.request),
+    // one turn later. That gap is closed here: both take effect immediately,
+    // not deferred. onRequest still re-applies both on every turn (idempotent
+    // — harmless double-application, and the source of truth for sessions
+    // created after this call, e.g. actors not yet materialized).
+    const session = (this.sessions.peek(sessionId) as any)?.session;
+    session?.setStickyModelOverride?.(model);
+    if (params !== undefined) session?.setStickyParams?.(params);
+
+    this.emitSwitch(sessionId, prev, model, ctxTokens, cost, reason, route.params);
+    this.emitBanner(sessionId, prev, model, ctxTokens, cost, reason, route.params);
     return route;
   }
 
@@ -446,12 +471,15 @@ export class ModelRouterPiece implements Piece {
     ctxTokens: number,
     costUsd: number,
     reason: string,
+    params?: Record<string, unknown>,
   ): void {
     this.bus.publish({
       channel: "system.event",
       source: this.id,
       event: "router.switch",
-      data: { sessionId, fromModel, toModel, ctxTokens, costUsd, reason },
+      // `effort` surfaced explicitly (mission Gearbox) so chat-piece can forward
+      // it on the model_changed SSE event without inspecting the whole map.
+      data: { sessionId, fromModel, toModel, ctxTokens, costUsd, reason, effort: params?.effort },
     });
     log.info(
       { sessionId, fromModel, toModel, ctxTokens, costUsd: costUsd.toFixed(4), reason },
@@ -466,14 +494,22 @@ export class ModelRouterPiece implements Piece {
     ctxTokens: number,
     costUsd: number,
     reason: string,
+    params?: Record<string, unknown>,
   ): void {
     const reasonLabel = reason.startsWith("prefix:")
       ? `Explicit ${reason}`
       : reason;
 
+    // Effort label appended to the target model name when present (mission
+    // Gearbox), e.g. "Opus 4.8 · High". Router stays blind to other keys.
+    const effort = params?.effort as string | undefined;
+    const toLabel = effort
+      ? `${shortName(toModel)} · ${effort.charAt(0).toUpperCase()}${effort.slice(1)}`
+      : shortName(toModel);
+
     // Compose banner. Surfaced as a `system` timeline entry via ChatPiece —
     // it appears inline above the next assistant message and is non-blocking.
-    const line1 = `⚠️ Model switch — ${shortName(fromModel)} → ${shortName(toModel)} (${reasonLabel})`;
+    const line1 = `⚠️ Model switch — ${shortName(fromModel)} → ${toLabel} (${reasonLabel})`;
     const line2 = ctxTokens > 0
       ? `   ↳ context ${(ctxTokens / 1000).toFixed(1)}k tokens · reconstruction ~$${costUsd.toFixed(2)}`
       : "";
