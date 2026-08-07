@@ -20,6 +20,8 @@ streaming, tool calls, model overrides, context injection, and compaction.
 | `stickyModelOverride` | `string?` | Model override that persists across turns (set via `model_set`). Wins over base model. |
 | `nextModelOverride` | `string?` | One-shot model override, consumed on first read within a turn. Wins over sticky. |
 | `injectedContextCount` | `number` | Tracks ephemeral injected messages (Mnemosyne memories). Reset after compaction. |
+| `effortSeed` | `EffortLevel` | (mission Gearbox, 2026-08-07) Set ONCE by the factory at construction: `"max"` for the human default session, `"high"` for background sessions. Fallback when no runtime override is set. Replaces the old `readonly highEffort: boolean`. |
+| `stickyParams` | `Record<string, unknown>` | (mission Gearbox) Provider-interpreted sticky params from the ModelRouter/HUD picker. Only `effort` is read today. Sticky until cleared via `setStickyParams(undefined)`. Mirrors `stickyModelOverride` semantics — isolated per session. |
 
 ## Key Methods
 
@@ -33,6 +35,9 @@ streaming, tool calls, model overrides, context injection, and compaction.
 | `getModel()` | Resolves model priority: nextModelOverride → stickyModelOverride → baseModel. |
 | `setMessages(messages)` | Restores history from persistence (session save/restore). |
 | `getHistory()` | Returns filtered message history (excludes ephemeral injected messages). |
+| `setStickyParams(params)` | (mission Gearbox) Sets/clears the sticky params map. `undefined` reverts to `effortSeed`. Called by the ModelRouter (from `/model <id> <json>` or the HUD picker), and by `SessionManager` on boot restore. |
+| `peekParams()` | (mission Gearbox) Returns a defensive copy of `stickyParams` — read-only inspection (e.g. `/chat/session-info`, `/model` status line). |
+| `resolveEffort(model)` | (mission Gearbox, private) Single source of truth for `output_config.effort`: Haiku → `undefined` (beta rejects it, 400); else `stickyParams.effort ?? effortSeed`. Feeds BOTH request paths (beta + standard) AND both usage-log call sites — eliminates the pre-Gearbox divergence where the log recorded `"xhigh"` while the request sent `"max"`. |
 
 ## Compaction
 

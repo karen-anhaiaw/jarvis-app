@@ -8,6 +8,7 @@ import {
   loadConversation,
   clearConversation,
   listSavedSessions,
+  loadRouteState,
 } from "./conversation-store.js";
 import { config } from "../config/index.js";
 
@@ -226,6 +227,16 @@ export class SessionManager {
         log.info({ sessionId, model: saved.model }, "SessionManager: restored sticky model from saved conversation");
       }
 
+      // Restore sticky effort/params (mission Gearbox) — lives in route state
+      // (same file the ModelRouter persists to), same lifecycle as the sticky
+      // model itself. Without this, every restart silently drops the operator's
+      // chosen effort back to the factory seed.
+      const savedRoute = loadRouteState(sessionId);
+      if (savedRoute?.params && (session as any).setStickyParams) {
+        (session as any).setStickyParams(savedRoute.params);
+        log.info({ sessionId, params: savedRoute.params }, "SessionManager: restored sticky params from route state");
+      }
+
       managed = {
         session,
         stateStack: [],
@@ -365,6 +376,16 @@ export class SessionManager {
     if (!options.model && saved?.model && (session as any).setStickyModelOverride) {
       (session as any).setStickyModelOverride(saved.model);
       log.info({ sessionId, model: saved.model }, "SessionManager: restored sticky model from saved conversation (custom session)");
+    }
+
+    // Restore sticky effort/params (mission Gearbox) — same guard as the model
+    // restore above: only when the caller didn't already pass explicit params.
+    if (!options.model) {
+      const savedRoute = loadRouteState(sessionId);
+      if (savedRoute?.params && (session as any).setStickyParams) {
+        (session as any).setStickyParams(savedRoute.params);
+        log.info({ sessionId, params: savedRoute.params }, "SessionManager: restored sticky params from route state (custom session)");
+      }
     }
 
     managed = {

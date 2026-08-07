@@ -12,6 +12,7 @@ import { logUsage } from "./usage-log.js";
 import { load as loadSettings, getCompactionSettings } from "../../core/settings.js";
 import { archivePreCompactBackup } from "../../core/conversation-store.js";
 import { getMaxContext, getMaxOutput, supportsLongContext } from "../../config/index.js";
+import type { EffortLevel } from "../../config/index.js";
 
 /** Local (client) tool wire shape. */
 type LocalCapabilityDef = { name: string; description: string; input_schema: Record<string, unknown> };
@@ -79,10 +80,16 @@ export class AnthropicSession implements AISession {
    *  correlate with the bus/core logs of the same turn. Deliberately NOT on
    *  the AISession interface: app-internal concern, no plugin contract. */
   private turnTraceId?: string;
-  /** High-effort tier flag — set once at construction by the FACTORY (F3.12).
-   *  true → API effort "max" + usage-log tier "xhigh"; false → "high".
-   *  Immutable: effort policy is session-creation policy, never per-turn. */
-  private readonly highEffort: boolean;
+  /** Effort SEED set once at construction by the FACTORY (F3.12): "max" for the
+   *  human default session, "high" for background sessions. This is the FALLBACK
+   *  — the runtime override (stickyParams.effort, set by the ModelRouter from the
+   *  HUD picker) takes precedence. See resolveEffort. The seed is immutable; the
+   *  override is the knob (mission Gearbox — effort is now per-session runtime). */
+  private readonly effortSeed: EffortLevel;
+  /** Provider-interpreted sticky params from the router/UI (mission Gearbox).
+   *  Only `effort` is read today. Sticky until cleared via setStickyParams(undefined).
+   *  Mirrors stickyModelOverride semantics — isolated per session. */
+  private stickyParams: Record<string, unknown> = {};
   private abortController?: AbortController;
   /** Called on every raw SSE event during a beta/standard stream. Lets the
    *  session-dispatcher watchdog observe that the API connection is alive even
@@ -146,7 +153,9 @@ export class AnthropicSession implements AISession {
     highEffort?: boolean;
   }) {
     this._sessionId = opts.restoredSessionId ?? crypto.randomUUID();
-    this.highEffort = opts.highEffort ?? false;
+    // Effort seed: "max" for the human default session (highEffort), "high" for
+    // background. The runtime override (stickyParams.effort) supersedes this.
+    this.effortSeed = (opts.highEffort ?? false) ? "max" : "high";
     // Explicit auth: pass apiKey/baseURL from process.env (which provider.ts
     // populates from settings.user.json) so the SDK doesn't auto-read a
     // conflicting ANTHROPIC_AUTH_TOKEN — when both env vars are set, the SDK
@@ -199,7 +208,10 @@ export class AnthropicSession implements AISession {
     logUsage({
       sessionId: this.label,
       instanceId: this.sessionId,
-      effort: this.highEffort ? "xhigh" : "high",
+      // Log the effort ACTUALLY resolved for this model (mission Gearbox) — not a
+      // hardcoded tier. Fixes the pre-Gearbox divergence where "xhigh" was logged
+      // while "max" was sent. "none" when the model has no effort (Haiku).
+      effort: this.resolveEffort(modelUsed) ?? "none",
       model: modelUsed,
       input_tokens: usage.input_tokens,
       output_tokens: usage.output_tokens,
@@ -281,6 +293,30 @@ export class AnthropicSession implements AISession {
   /** Returns the currently effective model without consuming any override. */
   peekModel(): string {
     return this.nextModelOverride ?? this.stickyModelOverride ?? this.getBaseModel();
+  }
+
+  /** @see AISession.setStickyParams — sticky, provider-interpreted. `undefined` clears. */
+  setStickyParams(params: Record<string, unknown> | undefined): void {
+    this.stickyParams = params ? { ...params } : {};
+  }
+
+  /** @see AISession.peekParams — returns a defensive copy. */
+  peekParams(): Record<string, unknown> {
+    return { ...this.stickyParams };
+  }
+
+  /**
+   * Resolve output_config.effort for a given model (mission Gearbox).
+   *   - Haiku: undefined — the effort-2025-11-24 beta rejects Haiku (400).
+   *   - else: stickyParams.effort (runtime override from the HUD picker) ?? effortSeed.
+   * SINGLE source of truth for BOTH request paths (beta + standard) AND BOTH
+   * usage-log sites. Before Gearbox the log recorded "xhigh" while the request
+   * sent "max" — a divergence this centralization eliminates.
+   */
+  private resolveEffort(model: string): EffortLevel | undefined {
+    if (model.includes("haiku")) return undefined;
+    const override = this.stickyParams.effort as EffortLevel | undefined;
+    return override ?? this.effortSeed;
   }
 
   /**
@@ -1262,7 +1298,9 @@ export class AnthropicSession implements AISession {
           logUsage({
             sessionId: this.label,
             instanceId: this.sessionId,
-            effort: this.highEffort ? "xhigh" : "high",
+            // Effort resolved for the compaction model (mission Gearbox) — same
+            // resolver as the main path, no hardcoded tier.
+            effort: this.resolveEffort(compactionModel) ?? "none",
             model: compactionModel,
             input_tokens: usage.input_tokens ?? 0,
             output_tokens: usage.output_tokens ?? 0,
@@ -1517,17 +1555,16 @@ export class AnthropicSession implements AISession {
 
       const betaHeaders = this.getBetaHeaders(modelForCall);
       const betas: string[] = [...betaHeaders];
-      // effort is only supported by Sonnet and Opus — Haiku rejects it.
-      const modelSupportsEffort = !modelForCall.includes("haiku");
+      // Effort resolution (mission Gearbox): single source of truth. Haiku →
+      // undefined (beta rejects it); else the runtime override (stickyParams.effort
+      // from the HUD picker) ?? the factory seed. All four values (low/medium/high/max)
+      // are API-validated (2026-08-06). The beta header is only added when effort
+      // is actually in play (i.e. not Haiku).
+      const effort = this.resolveEffort(modelForCall);
+      const modelSupportsEffort = effort !== undefined;
       if (modelSupportsEffort && !betas.includes("effort-2025-11-24")) {
         betas.push("effort-2025-11-24");
       }
-
-      // effort: "max" for high-effort sessions (factory marks the default
-      // session), "high" for background sessions. NOTE: some models don't support
-      // "xhigh" — use "max" which is universally accepted by all models that
-      // support the effort-2025-11-24 beta header.
-      const effort = modelSupportsEffort ? (this.highEffort ? "max" : "high") : undefined;
 
       // metadata.user_id: mirrors CC pattern — session_id for backend cache optimization
       const metadata = { user_id: JSON.stringify({ session_id: this.sessionId }) };

@@ -4,6 +4,20 @@ All notable changes to this package will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-08-06
+
+### Added
+- **`AISession.setStickyParams?` + `AISession.peekParams?`** (mission Gearbox) —
+  a sticky, per-session, provider-interpreted params map. Anthropic reads
+  `effort` (→ `output_config.effort`); OpenAI will read `reasoning_effort`;
+  other providers ignore it. The ModelRouter and the HUD picker transport the
+  map **blind** — only the concrete provider session interprets keys, so new
+  keys need no router/UI change. Both methods are **optional** — providers and
+  plugins that don't implement them keep working (callers use `?.`). Directly
+  mirrors the 0.5.0 `setStickyModelOverride?` addition. Enables the effort
+  selector: choosing "Opus 4.8 High" applies `{ effort: "high" }` on the live
+  session without recreating it. Additive, backward compatible.
+
 ## [0.10.0] — 2026-07-31
 
 ### Added

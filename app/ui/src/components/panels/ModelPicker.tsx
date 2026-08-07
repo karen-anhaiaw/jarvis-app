@@ -5,6 +5,9 @@ interface ModelMeta {
   label: string
   note: string
   provider: string
+  /** Present only on effort-capable rows (Anthropic non-Haiku), mission Gearbox. */
+  effort?: string
+  effortLabel?: string
 }
 
 interface ModelPickerProps {
@@ -12,12 +15,17 @@ interface ModelPickerProps {
   sendUrl: string
   /** Model pushed from ChatPanel via SSE model_changed — replaces /chat/session-info polling. */
   externalModel?: string | null
+  /** Effort pushed from ChatPanel via SSE model_changed (mission Gearbox). */
+  externalEffort?: string | null
 }
 
-export function ModelPicker({ sessionId, sendUrl, externalModel }: ModelPickerProps) {
+export function ModelPicker({ sessionId, sendUrl, externalModel, externalEffort }: ModelPickerProps) {
   const [open, setOpen] = useState(false)
   const [catalog, setCatalog] = useState<ModelMeta[]>([])
   const [sessionModel, setSessionModel] = useState<string | null>(null)
+  // Current effort (mission Gearbox) — null means "no effort" (Haiku/OpenAI/
+  // DeepSeek) or "not yet known". Mirrors sessionModel's hydration pattern.
+  const [sessionEffort, setSessionEffort] = useState<string | null>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   // Token-counter HUD piece aggregates the most-recent model ACROSS ALL
@@ -34,6 +42,7 @@ export function ModelPicker({ sessionId, sendUrl, externalModel }: ModelPickerPr
     if (externalModel) {
       // ChatPanel already has the model via SSE — trust it immediately.
       setSessionModel(externalModel)
+      setSessionEffort(externalEffort ?? null)
       return
     }
     // Fallback: fetch once on mount or when externalModel is null/undefined
@@ -42,15 +51,21 @@ export function ModelPicker({ sessionId, sendUrl, externalModel }: ModelPickerPr
     let cancelled = false
     fetch(`/chat/session-info?sessionId=${encodeURIComponent(sid)}`)
       .then(r => r.json())
-      .then((data: { model: string | null }) => { if (!cancelled) setSessionModel(data.model) })
+      .then((data: { model: string | null; effort?: string | null }) => {
+        if (cancelled) return
+        setSessionModel(data.model)
+        setSessionEffort(data.effort ?? null)
+      })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [sessionId, externalModel])
+  }, [sessionId, externalModel, externalEffort])
 
   // '…' only until the first session-info response lands (<100ms typical).
   const currentModel = sessionModel ?? '…'
 
   // Fetch model catalog from backend — single source of truth from config/index.ts
+  // Mission Gearbox: expanded cartesian catalog (one row per effort level for
+  // effort-capable models; single row otherwise). Flat list, no grouping.
   useEffect(() => {
     fetch('/chat/models')
       .then(r => r.json())
@@ -70,17 +85,24 @@ export function ModelPicker({ sessionId, sendUrl, externalModel }: ModelPickerPr
     return () => document.removeEventListener('mousedown', handler)
   }, [open])
 
-  const selectModel = useCallback((modelId: string) => {
+  // Mission Gearbox: selecting a row sends model + effort as a single JSON
+  // command — atomic on the live session (Sir's decision). effort is optional:
+  // no-effort models (Haiku/OpenAI/DeepSeek) send a bare "/model <id>".
+  const selectModel = useCallback((modelId: string, effort?: string) => {
     setOpen(false)
-    // Send /model <id> slash command as a system message
+    const suffix = effort ? ` ${JSON.stringify({ effort })}` : ''
     fetch(sendUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId, prompt: `/model ${modelId}` }),
+      body: JSON.stringify({ sessionId, prompt: `/model ${modelId}${suffix}` }),
     }).catch(() => {})
   }, [sessionId, sendUrl])
 
-  const meta = catalog.find(m => m.id === currentModel)
+  // Trigger label: find the catalog row matching BOTH model and effort so the
+  // header shows "Opus 4.8 High" (not just "Opus 4.8"). Falls back to any row
+  // with just the model id (no-effort models, or effort not yet hydrated).
+  const meta = catalog.find(m => m.id === currentModel && (m.effort ?? null) === (sessionEffort ?? null))
+    ?? catalog.find(m => m.id === currentModel)
   const displayLabel = meta?.label ?? currentModel
   const displayNote = meta?.note ?? ''
 
@@ -103,13 +125,15 @@ export function ModelPicker({ sessionId, sendUrl, externalModel }: ModelPickerPr
             <span className="modelPickerSearchLabel">Select model</span>
           </div>
           <div className="modelPickerList">
-            {catalog.map(({ id, label, note }) => {
-              const isActive = id === currentModel
+            {catalog.map(({ id, label, note, effort }) => {
+              // Active row = model AND effort combined (mission Gearbox) — a
+              // model with 4 effort rows only ever has ONE active at a time.
+              const isActive = id === currentModel && (effort ?? null) === (sessionEffort ?? null)
               return (
                 <button
-                  key={id}
+                  key={`${id}:${effort ?? '-'}`}
                   className={`modelPickerItem${isActive ? ' active' : ''}`}
-                  onClick={() => selectModel(id)}
+                  onClick={() => selectModel(id, effort)}
                 >
                   <span className="modelPickerItemLabel">{label}</span>
                   {note && <span className="modelPickerItemNote">{note}</span>}

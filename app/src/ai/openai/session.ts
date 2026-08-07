@@ -134,6 +134,20 @@ export class OpenAISession implements AISession {
     return this.nextModelOverride ?? this.stickyModelOverride ?? this.getModel();
   }
 
+  // ── Sticky params (mission Gearbox) ───────────────────────────────────
+  // OpenAI ignores sticky params for now — reasoning_effort wiring for o3/o4-mini
+  // is future work (spec section 3, "who interprets the map"). Present for
+  // interface parity so the ModelRouter can call session.setStickyParams?.(...)
+  // uniformly across providers without type-checking which one it's talking to.
+
+  setStickyParams(_params: Record<string, unknown> | undefined): void {
+    /* no-op — OpenAI does not yet interpret any sticky param key */
+  }
+
+  peekParams(): Record<string, unknown> {
+    return {};
+  }
+
   // ── Tool filtering ────────────────────────────────────────────────────
 
   setToolFilter(filter: ((toolName: string) => boolean) | undefined): void {

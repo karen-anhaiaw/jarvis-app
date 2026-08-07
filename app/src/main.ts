@@ -38,7 +38,7 @@ import { registerSessionInspectorTools } from "./ai/anthropic/session-inspector.
 import { HudCoreNodePiece } from "./core/hud-core-node.js";
 import { DiffViewerPiece } from "./pieces/diff-viewer.js";
 import { ChoicePromptPiece } from "./pieces/choice-prompt.js";
-import { ModelRouterPiece } from "./pieces/model-router.js";
+import { ModelRouterPiece, parseModelCommand } from "./pieces/model-router.js";
 import { TurnInspectorPiece } from "./pieces/turn-inspector.js";
 import { DelegateTaskPiece } from "./pieces/delegate-task.js";
 import { load as loadSettingsForSlash } from "./core/settings.js";
@@ -373,14 +373,24 @@ async function main() {
     source: "system",
     handler: async (args, ctx) => {
       const sessionId = ctx?.sessionId ?? "main";
-      const arg = (args ?? "").trim();
+      // Mission Gearbox: /model now accepts an optional trailing JSON params
+      // map — "/model claude-opus-4-8 {"effort":"high"}". parseModelCommand is
+      // BLIND to the map's keys; it just splits id-or-alias from the JSON
+      // suffix and forwards it. Bare "/model opus" still works unchanged
+      // (params is undefined, nothing about the existing flow below changes).
+      const raw = (args ?? "").trim();
+      const { model: arg, params } = parseModelCommand(raw);
+      if (params === undefined && raw.includes("{")) {
+        log.warn({ sessionId, raw }, "/model: malformed params JSON ignored");
+      }
       const route = modelRouter.getRoute(sessionId);
 
       if (!arg) {
         const sticky = route?.sticky ?? "(default)";
         const switches = route?.switchCount ?? 0;
+        const eff = route?.params?.effort ? ` · effort ${route.params.effort}` : "";
         return {
-          message: `🔧 Sticky model for ${sessionId}: \`${sticky}\` (${switches} switches this session)\nUsage: /model opus|sonnet|haiku|<model-id>`,
+          message: `🔧 Sticky model for ${sessionId}: \`${sticky}\`${eff} (${switches} switches this session)\nUsage: /model opus|sonnet|haiku|<model-id> [{"effort":"high"}]`,
         };
       }
 
@@ -405,9 +415,10 @@ async function main() {
         jarvisCore.abortSession(sessionId);
       }
 
-      const newRoute = modelRouter.setStickyModel(sessionId, target, "slash:/model");
+      const newRoute = modelRouter.setStickyModel(sessionId, target, "slash:/model", params);
+      const eff = newRoute.params?.effort ? ` · effort ${newRoute.params.effort}` : "";
       return {
-        message: `🔧 Sticky model for ${sessionId}: \`${newRoute.sticky}\` (was \`${route?.sticky ?? "(default)"}\`)`,
+        message: `🔧 Sticky model for ${sessionId}: \`${newRoute.sticky}\`${eff} (was \`${route?.sticky ?? "(default)"}\`)`,
       };
     },
   });

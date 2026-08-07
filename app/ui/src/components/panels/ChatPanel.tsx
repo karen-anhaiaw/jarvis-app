@@ -121,6 +121,9 @@ export function ChatPanel({
   // Current model for this session — hydrated via SSE model_changed events.
   // Replaces ModelPicker's per-instance polling of /chat/session-info.
   const [sessionModel, setSessionModel] = useState<string | null>(null)
+  // Current effort (mission Gearbox) — rides alongside model_changed so the
+  // picker's active row updates instantly, same immediacy as the model itself.
+  const [sessionEffort, setSessionEffort] = useState<string | null>(null)
 
   // Mirror of streaming/thinking state read inside the SSE callback — that
   // useEffect closes over initial values, so reading state directly there
@@ -228,6 +231,7 @@ export function ChatPanel({
         // idle → clear thinking+streaming; processing → thinking; waiting_tools → thinking.
         case 'model_changed':
           setSessionModel(data.model ?? null)
+          setSessionEffort(data.effort ?? null)
           break
         case 'session_state':
           if (data.state === 'idle') {
@@ -914,7 +918,7 @@ export function ChatPanel({
 
       <div className="chatDockedInput">
         {features.modelPicker && (
-          <ModelPicker sessionId={sessionId} sendUrl={sendUrl} externalModel={sessionModel} />
+          <ModelPicker sessionId={sessionId} sendUrl={sendUrl} externalModel={sessionModel} externalEffort={sessionEffort} />
         )}
         <div style={{ display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {features.slashMenu && (

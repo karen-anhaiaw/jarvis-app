@@ -208,6 +208,9 @@ interface StoredRoute {
   switchCount: number;
   lastSwitchAt?: number;
   lastReason?: string;
+  /** Provider-interpreted sticky params (e.g. { effort }), mission Gearbox.
+   *  Optional — legacy route files without it load fine (undefined, seed applies). */
+  params?: Record<string, unknown>;
   savedAt: string;
 }
 
@@ -222,7 +225,7 @@ function routeFilePath(sessionLabel: string): string {
  */
 export function saveRouteState(
   sessionLabel: string,
-  route: { sticky: string; switchCount: number; lastSwitchAt?: number; lastReason?: string },
+  route: { sticky: string; switchCount: number; lastSwitchAt?: number; lastReason?: string; params?: Record<string, unknown> },
 ): void {
   try {
     ensureDir();
@@ -232,6 +235,7 @@ export function saveRouteState(
       switchCount: route.switchCount,
       lastSwitchAt: route.lastSwitchAt,
       lastReason: route.lastReason,
+      params: route.params,
       savedAt: new Date().toISOString(),
     };
     writeFileSync(routeFilePath(sessionLabel), JSON.stringify(data, null, 2), "utf-8");
