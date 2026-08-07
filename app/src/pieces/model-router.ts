@@ -135,6 +135,27 @@ function parsePrefix(text: string): { tag?: string; rest: string } {
   return { tag: m[1].toLowerCase(), rest: text.slice(m[0].length) };
 }
 
+/**
+ * Parse a /model argument string into { model, params } (mission Gearbox).
+ * Grammar: "<id-or-alias>" optionally followed by whitespace + a JSON object.
+ * The parser is BLIND to the params keys — it just JSON.parses the suffix and
+ * forwards the map. Malformed JSON is swallowed (model kept, params undefined,
+ * caller logs). This keeps the map open: new provider keys need no parser change.
+ */
+export function parseModelCommand(arg: string): { model: string; params?: Record<string, unknown> } {
+  const trimmed = arg.trim();
+  const brace = trimmed.indexOf("{");
+  if (brace === -1) return { model: trimmed, params: undefined };
+  const model = trimmed.slice(0, brace).trim();
+  const jsonPart = trimmed.slice(brace);
+  try {
+    const params = JSON.parse(jsonPart) as Record<string, unknown>;
+    return { model, params };
+  } catch {
+    return { model, params: undefined };
+  }
+}
+
 export class ModelRouterPiece implements Piece {
   readonly id = "model-router";
   readonly name = "ModelRouter";
