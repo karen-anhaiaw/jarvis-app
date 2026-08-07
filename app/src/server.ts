@@ -225,9 +225,11 @@ export class HttpServer {
       // Import is synchronous-safe here: config/index.ts is already loaded at
       // startup. We use a dynamic import only to avoid circular-ref issues at
       // module level; the Promise resolves immediately from the module cache.
-      import("./config/index.js").then(({ getModelCatalog }) => {
+      // Mission Gearbox: expanded (cartesian) catalog — effort-capable models
+      // yield one row per effort level (Max/High/Medium/Low); others unchanged.
+      import("./config/index.js").then(({ getModelCatalogExpanded }) => {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(getModelCatalog()));
+        res.end(JSON.stringify(getModelCatalogExpanded()));
       }).catch(() => {
         res.writeHead(500); res.end();
       });

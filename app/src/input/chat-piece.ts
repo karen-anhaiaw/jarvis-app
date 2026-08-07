@@ -194,9 +194,12 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
     // Allows ModelPicker to go event-driven instead of polling /chat/session-info.
     this.bus.subscribe("system.event", (msg: any) => {
       if (msg.event !== "router.switch") return;
-      const { sessionId, toModel } = msg.data ?? {};
+      const { sessionId, toModel, effort } = msg.data ?? {};
       if (!sessionId || !toModel) return;
-      this.broadcast(sessionId, { type: "model_changed", model: toModel, session: sessionId });
+      // Mission Gearbox: effort rides alongside the model on this event so the
+      // picker's trigger/active-row updates instantly without a session-info
+      // round-trip — same immediacy the model itself already had.
+      this.broadcast(sessionId, { type: "model_changed", model: toModel, effort: effort ?? null, session: sessionId });
     });
 
     // chat.timeline → typed SSE bridge for per-session timeline entries.
@@ -431,8 +434,11 @@ Your text responses are shown in the chat panel. Additional I/O available via pl
       // instead of a placeholder.
       const model = session?.peekModel?.() ?? session?.stickyModelOverride ?? config.model ?? null;
       const provider = session?.constructor?.name?.replace("Session", "").toLowerCase() ?? null;
+      // Mission Gearbox: current effort (from sticky params), so the HUD picker
+      // can mark the active {model, effort} row without a separate round-trip.
+      const effort = (session?.peekParams?.() ?? {}).effort ?? null;
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ model, provider }));
+      res.end(JSON.stringify({ model, provider, effort }));
     } catch {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ model: null, provider: null }));
