@@ -21,22 +21,48 @@ export class JarvisOAuthProvider implements OAuthClientProvider {
   private callbackPort: number;
   private fixedClientId?: string;
 
-  // Each server gets a unique port based on name hash to avoid collisions
-  private static nextPort = 9876;
+  // Each server gets a DETERMINISTIC port derived from its name.
+  //
+  // WHY deterministic (not incremental): the OAuth client is registered ONCE with the
+  // dynamic-registration endpoint, and its redirect_uris (including the callback port) are
+  // baked into that registration on the provider side. If the callback port changed between
+  // connects (the old `nextPort++` behaviour), the redirect_uri sent to /authorize would no
+  // longer match the one on file for the client_id → the provider rejects the request. With
+  // Atlassian this surfaces as an opaque HTTP 500 "Internal Server Error" on /v1/authorize
+  // (it should be a 400 redirect_uri_mismatch, but their error is generic). Deriving the port
+  // from a stable hash of the server name guarantees the SAME port every connect, so the
+  // registered redirect_uri always matches. Collisions across servers are resolved by linear
+  // probing on the shared usedPorts set within a single process lifetime.
+  private static readonly PORT_BASE = 9876;
+  private static readonly PORT_SPAN = 1000; // ports 9876..10875
   private static usedPorts = new Set<number>();
+
+  /** Stable non-negative hash of a string (djb2). Deterministic across process restarts. */
+  private static hashName(name: string): number {
+    let h = 5381;
+    for (let i = 0; i < name.length; i++) {
+      h = ((h << 5) + h + name.charCodeAt(i)) | 0; // h * 33 + c
+    }
+    return Math.abs(h);
+  }
 
   constructor(serverName: string, oauthConfig?: { clientId?: string; callbackPort?: number }) {
     this.serverName = serverName;
     this.fixedClientId = oauthConfig?.clientId;
 
-    // Use configured port or assign unique one
+    // Use configured port, else derive a deterministic one from the server name.
     if (oauthConfig?.callbackPort) {
       this.callbackPort = oauthConfig.callbackPort;
     } else {
-      while (JarvisOAuthProvider.usedPorts.has(JarvisOAuthProvider.nextPort)) {
-        JarvisOAuthProvider.nextPort++;
+      let port =
+        JarvisOAuthProvider.PORT_BASE +
+        (JarvisOAuthProvider.hashName(serverName) % JarvisOAuthProvider.PORT_SPAN);
+      // Linear-probe only against ports already claimed in THIS process (avoids in-run
+      // collisions). The mapping stays stable across restarts because the seed is the name.
+      while (JarvisOAuthProvider.usedPorts.has(port)) {
+        port = JarvisOAuthProvider.PORT_BASE + ((port + 1 - JarvisOAuthProvider.PORT_BASE) % JarvisOAuthProvider.PORT_SPAN);
       }
-      this.callbackPort = JarvisOAuthProvider.nextPort++;
+      this.callbackPort = port;
     }
     JarvisOAuthProvider.usedPorts.add(this.callbackPort);
 
