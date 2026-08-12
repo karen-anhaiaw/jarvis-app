@@ -9,7 +9,7 @@ import { cleanupAbortedToolMessages } from "./cleanup-aborted-tools.js";
 import { sanitizeMessages } from "./sanitize-messages.js";
 import { unescapeToolInput } from "./unescape-tool-input.js";
 import { logUsage } from "./usage-log.js";
-import { load as loadSettings, getCompactionSettings } from "../../core/settings.js";
+import { load as loadSettings, getCompactionSettings, getRetrySettings } from "../../core/settings.js";
 import { archivePreCompactBackup } from "../../core/conversation-store.js";
 import { getMaxContext, getMaxOutput, supportsLongContext } from "../../config/index.js";
 import type { EffortLevel } from "../../config/index.js";
@@ -1464,6 +1464,110 @@ export class AnthropicSession implements AISession {
     };
   }
 
+  /**
+   * Classify an API error for retry purposes.
+   *
+   * Returns the wait strategy for a transient failure, or `null` when the error
+   * is non-retryable (abort or a deterministic client error).
+   *
+   * Retryable:
+   *  - HTTP 429 (rate limit)       → wait = retry-after header if present & respected, else rateLimitWaitMs.
+   *  - HTTP 408 / 409              → transient conflict/timeout, exponential backoff.
+   *  - HTTP 5xx (incl. 529)        → server-side, exponential backoff.
+   *  - Network errors              → terminated/socket/ECONNRESET/ETIMEDOUT/other side closed, exponential backoff.
+   *
+   * NON-retryable (returns null):
+   *  - Abort (handled separately by the caller — never reaches here as retryable).
+   *  - HTTP 400/401/403/404/422    → deterministic; the payload fails identically
+   *    on every attempt, so retrying only wastes time (proven: a 400 validation
+   *    error is a payload problem, not a transport one).
+   *
+   * @param err   the caught error (Anthropic SDK shape or a raw network error)
+   * @param attempt 1-based retry attempt number, used to compute backoff
+   * @param retry the resolved RetrySettings for this turn
+   * @returns { waitMs, kind } to retry, or null to give up
+   */
+  private classifyRetryError(
+    err: any,
+    attempt: number,
+    retry: { rateLimitWaitMs: number; backoffBaseMs: number; respectRetryAfter: boolean },
+  ): { waitMs: number; kind: "rate_limit" | "backoff" } | null {
+    const status: number | undefined = err?.status ?? err?.response?.status;
+    const errMsg = String(err?.message ?? err ?? "");
+    const isNetworkError = /terminated|socket|ECONNRESET|ETIMEDOUT|other side closed|fetch failed|EPIPE/i.test(errMsg);
+
+    // Deterministic client errors — never retry.
+    const NON_RETRYABLE = new Set([400, 401, 403, 404, 422]);
+    if (status !== undefined && NON_RETRYABLE.has(status)) return null;
+
+    // Rate limit — honor retry-after header when present & respected, else fixed wait.
+    if (status === 429) {
+      let waitMs = retry.rateLimitWaitMs;
+      if (retry.respectRetryAfter) {
+        const parsed = this.parseRetryAfter(err);
+        if (parsed !== undefined) waitMs = parsed;
+      }
+      return { waitMs, kind: "rate_limit" };
+    }
+
+    // Overload / other 5xx / transient conflict-timeout / network — exponential backoff.
+    const isServerOrTransient =
+      status === 408 || status === 409 || (status !== undefined && status >= 500) || isNetworkError;
+    if (isServerOrTransient) {
+      const waitMs = retry.backoffBaseMs * Math.pow(2, attempt - 1);
+      return { waitMs, kind: "backoff" };
+    }
+
+    // Unknown / unclassified — do not retry (conservative: avoid masking real bugs).
+    return null;
+  }
+
+  /**
+   * Extract the `retry-after` value (ms) from an Anthropic SDK error, if present.
+   *
+   * The header may be either a number of seconds (`"8"`) or an HTTP-date
+   * (`"Wed, 21 Oct 2026 07:28:00 GMT"`). The SDK exposes response headers under
+   * `err.headers` (a plain object or Headers-like). Returns undefined when
+   * absent or unparseable, so the caller falls back to the configured wait.
+   */
+  private parseRetryAfter(err: any): number | undefined {
+    const headers = err?.headers ?? err?.response?.headers;
+    if (!headers) return undefined;
+    const raw =
+      typeof headers.get === "function"
+        ? headers.get("retry-after")
+        : headers["retry-after"] ?? headers["Retry-After"];
+    if (raw == null) return undefined;
+    const asNum = Number(raw);
+    if (Number.isFinite(asNum)) return Math.max(0, asNum * 1000);
+    const asDate = Date.parse(String(raw));
+    if (Number.isFinite(asDate)) return Math.max(0, asDate - Date.now());
+    return undefined;
+  }
+
+  /**
+   * Sleep for `ms`, but resolve early if the current AbortController fires.
+   *
+   * Returns `true` if the wait completed, `false` if it was aborted. Used
+   * between retry attempts so pressing ESC during a rate-limit wait cancels
+   * the turn immediately instead of blocking for the full wait.
+   */
+  private abortableWait(ms: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const signal = this.abortController?.signal;
+      if (signal?.aborted) return resolve(false);
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(true);
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
   private async *streamFromAPI(): AsyncGenerator<AIStreamEvent, void> {
     const t0 = Date.now();
     // Snapshot the current token count BEFORE the API call so growthCompact can
@@ -1571,79 +1675,139 @@ export class AnthropicSession implements AISession {
 
       let message: any | undefined;
 
-      // Beta path: used whenever any beta header is needed (1M context,
-      // server-side compaction, or both). The beta endpoint is a strict
-      // superset of the standard endpoint when no betas are passed, so we
-      // ONLY take this branch when there's actually a beta to enable —
-      // otherwise we use the standard endpoint to keep the path simple.
-      if (betas.length > 0) {
+      // ─── Retry loop around API-call acquisition ──────────────────────────
+      // Only the network call that produces `message` is retried. Everything
+      // downstream (compaction, history push, recursion) runs exactly once,
+      // after `message` is successfully obtained. Transient failures — 429
+      // rate limits, 529 overload, other 5xx, and network errors — trigger a
+      // configurable wait + retry. Deterministic 4xx (400/401/403/404/422)
+      // and abort are NOT retried (classifyRetryError returns null). The
+      // beta-400 fallback and image-strip recovery keep their own paths and
+      // take priority over this loop.
+      const retryCfg = getRetrySettings(loadSettings());
+      let attempt = 0;
+      while (true) {
         try {
-          log.info({
-            label: this.label,
-            model: modelForCall,
-            betas,
-          }, "AnthropicSession: attempting beta API call");
-          const betaStream = (this.client.beta.messages as any).stream({
-            model: modelForCall,
-            max_tokens: maxOutForCall,
-            system: this.getSystemPrompt(),
-            messages: this.messages,
-            tools,
-            // NOTE: top-level cache_control intentionally removed — this provider
-            // owns explicit cache_control placement on (a) BP1+BP2 = the two
-            // system blocks (factory.ts), (b) BP3 = the last tool definition,
-            // and (c) BP4 = the last assistant message in history (placed by
-            // placeMessageCacheBreakpoint above). That uses Anthropic's full
-            // 4-breakpoint budget for stable, deterministic positions.
-            betas,
-            metadata,
-            ...(effort !== undefined ? { output_config: { effort } } : {}),
+          message = undefined;
 
-          }, { signal: this.abortController.signal });
+          // Beta path: used whenever any beta header is needed (1M context,
+          // server-side compaction, or both). The beta endpoint is a strict
+          // superset of the standard endpoint when no betas are passed, so we
+          // ONLY take this branch when there's actually a beta to enable —
+          // otherwise we use the standard endpoint to keep the path simple.
+          if (betas.length > 0) {
+            try {
+              log.info({
+                label: this.label,
+                model: modelForCall,
+                betas,
+              }, "AnthropicSession: attempting beta API call");
+              const betaStream = (this.client.beta.messages as any).stream({
+                model: modelForCall,
+                max_tokens: maxOutForCall,
+                system: this.getSystemPrompt(),
+                messages: this.messages,
+                tools,
+                // NOTE: top-level cache_control intentionally removed — this provider
+                // owns explicit cache_control placement on (a) BP1+BP2 = the two
+                // system blocks (factory.ts), (b) BP3 = the last tool definition,
+                // and (c) BP4 = the last assistant message in history (placed by
+                // placeMessageCacheBreakpoint above). That uses Anthropic's full
+                // 4-breakpoint budget for stable, deterministic positions.
+                betas,
+                metadata,
+                ...(effort !== undefined ? { output_config: { effort } } : {}),
 
-          // Tee raw SSE events to onStreamHeartbeat so the session-dispatcher
-          // watchdog stays alive during extended thinking turns (effort beta).
-          // Thinking blocks emit SSE frames (thinking_delta, ping) with zero
-          // yielded text — without this, the watchdog fires after WATCHDOG_MS
-          // and aborts the request before the response arrives.
-          betaStream.on("streamEvent", (evt: any) => {
-            this.onStreamHeartbeat?.(evt);
-          });
-          betaStream.on("text", () => {});
-          message = await betaStream.finalMessage();
-        } catch (betaErr: any) {
-          const status = betaErr?.status ?? betaErr?.response?.status;
-          const errMsg = String(betaErr?.message ?? betaErr ?? "");
-          const isNetworkError = /terminated|socket|ECONNRESET|ETIMEDOUT|other side closed/i.test(errMsg);
-          const isBetaError = status === 400 || /beta|compact|context-1m/i.test(errMsg) || isNetworkError;
-          if (isBetaError) {
-            log.warn({ label: this.label, status, err: errMsg, betas }, "AnthropicSession: beta API failed, falling back to standard API");
-            this.betaDisabledUntil = Date.now() + AnthropicSession.BETA_COOLDOWN_MS;
-            message = undefined; // fall through to standard path
-          } else {
-            throw betaErr; // non-beta error, propagate
+              }, { signal: this.abortController.signal });
+
+              // Tee raw SSE events to onStreamHeartbeat so the session-dispatcher
+              // watchdog stays alive during extended thinking turns (effort beta).
+              // Thinking blocks emit SSE frames (thinking_delta, ping) with zero
+              // yielded text — without this, the watchdog fires after WATCHDOG_MS
+              // and aborts the request before the response arrives.
+              betaStream.on("streamEvent", (evt: any) => {
+                this.onStreamHeartbeat?.(evt);
+              });
+              betaStream.on("text", () => {});
+              message = await betaStream.finalMessage();
+            } catch (betaErr: any) {
+              const status = betaErr?.status ?? betaErr?.response?.status;
+              const errMsg = String(betaErr?.message ?? betaErr ?? "");
+              const isNetworkError = /terminated|socket|ECONNRESET|ETIMEDOUT|other side closed/i.test(errMsg);
+              const isBetaError = status === 400 || /beta|compact|context-1m/i.test(errMsg) || isNetworkError;
+              if (isBetaError) {
+                log.warn({ label: this.label, status, err: errMsg, betas }, "AnthropicSession: beta API failed, falling back to standard API");
+                this.betaDisabledUntil = Date.now() + AnthropicSession.BETA_COOLDOWN_MS;
+                message = undefined; // fall through to standard path
+              } else {
+                throw betaErr; // non-beta error, propagate to retry classifier
+              }
+            }
           }
+
+          // Standard path (no betas needed, or beta fallback)
+          if (!message) {
+            const stream = this.client.messages.stream({
+              model: modelForCall,
+              max_tokens: maxOutForCall,
+              system: this.getSystemPrompt(),
+              messages: this.messages,
+              tools,
+              // top-level cache_control removed — see comment in beta path above.
+              metadata,
+              ...(effort !== undefined ? { output_config: { effort } } : {}),
+            } as any, { signal: this.abortController.signal });
+
+            stream.on("streamEvent", (evt: any) => {
+              this.onStreamHeartbeat?.(evt);
+            });
+            stream.on("text", () => {});
+            message = await stream.finalMessage();
+          }
+
+          // Success — exit the retry loop.
+          break;
+        } catch (apiErr: any) {
+          // Abort always wins — never retry a cancelled turn. Let it propagate
+          // to the outer catch, which yields { error: "aborted" }.
+          const aborted = this.abortController?.signal.aborted
+            || apiErr?.name === "AbortError"
+            || /request was aborted|aborted/i.test(String(apiErr?.message ?? apiErr ?? ""));
+          if (aborted) throw apiErr;
+
+          // Retry disabled, or budget exhausted, or non-retryable error → give up.
+          if (!retryCfg.enabled) throw apiErr;
+          const decision = attempt >= retryCfg.maxRetries
+            ? null
+            : this.classifyRetryError(apiErr, attempt + 1, retryCfg);
+          if (!decision) throw apiErr; // non-retryable or out of retries → outer catch
+
+          attempt++;
+          const status = apiErr?.status ?? apiErr?.response?.status;
+          const waitS = Math.round(decision.waitMs / 1000);
+          log.warn({
+            label: this.label,
+            traceId: this.turnTraceId,
+            status,
+            kind: decision.kind,
+            attempt,
+            maxRetries: retryCfg.maxRetries,
+            waitMs: decision.waitMs,
+          }, "AnthropicSession: transient API error — waiting before retry");
+
+          // Surface the wait to the user so the retry is visible in the HUD.
+          const reason = decision.kind === "rate_limit" ? "rate limit" : `API error${status ? ` ${status}` : ""}`;
+          yield { type: "text_delta", text: `\n⏳ ${reason} — aguardando ${waitS}s antes de retentar (tentativa ${attempt}/${retryCfg.maxRetries})...\n` };
+
+          // Abortable wait — ESC during the wait cancels immediately.
+          const completed = await this.abortableWait(decision.waitMs);
+          if (!completed) {
+            log.info({ label: this.label }, "AnthropicSession: retry wait aborted by user");
+            yield { type: "error", error: "aborted" };
+            return;
+          }
+          // loop continues → retry the API call
         }
-      }
-
-      // Standard path (no betas needed, or beta fallback)
-      if (!message) {
-        const stream = this.client.messages.stream({
-          model: modelForCall,
-          max_tokens: maxOutForCall,
-          system: this.getSystemPrompt(),
-          messages: this.messages,
-          tools,
-          // top-level cache_control removed — see comment in beta path above.
-          metadata,
-          ...(effort !== undefined ? { output_config: { effort } } : {}),
-        } as any, { signal: this.abortController.signal });
-
-        stream.on("streamEvent", (evt: any) => {
-          this.onStreamHeartbeat?.(evt);
-        });
-        stream.on("text", () => {});
-        message = await stream.finalMessage();
       }
 
       // Process response content

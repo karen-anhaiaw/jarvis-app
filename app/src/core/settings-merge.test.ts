@@ -5,7 +5,7 @@
 // or it is silently DROPPED from load(). The `delegate` field was added to
 // the interface but not to deepMerge, so settings.user.json values vanished.
 import { describe, it, expect } from "vitest";
-import { deepMerge, type Settings } from "./settings.js";
+import { deepMerge, getRetrySettings, type Settings } from "./settings.js";
 
 const base = (extra: Partial<Settings> = {}): Settings => ({ pieces: {}, ...extra });
 
@@ -31,5 +31,26 @@ describe("settings deepMerge — top-level field passthrough", () => {
   it("delegate absent everywhere → undefined (no crash)", () => {
     const merged = deepMerge(base(), base());
     expect(merged.delegate).toBeUndefined();
+  });
+
+  // retry field — same passthrough contract as delegate/compaction.
+  it("preserves retry declared only in the user file", () => {
+    const merged = deepMerge(base(), base({ retry: { enabled: true, maxRetries: 3, rateLimitWaitMs: 5000, backoffBaseMs: 1000, respectRetryAfter: false } }));
+    expect(merged.retry).toEqual({ enabled: true, maxRetries: 3, rateLimitWaitMs: 5000, backoffBaseMs: 1000, respectRetryAfter: false });
+  });
+
+  it("user retry overrides merge onto defaults (partial override fills gaps)", () => {
+    // Only rateLimitWaitMs provided in user layer — the rest come from DEFAULT_RETRY.
+    const merged = deepMerge(base(), base({ retry: { rateLimitWaitMs: 30000 } as any }));
+    expect(merged.retry?.rateLimitWaitMs).toBe(30000);
+    expect(merged.retry?.maxRetries).toBe(5); // default
+    expect(merged.retry?.enabled).toBe(true); // default
+  });
+
+  it("retry absent everywhere → undefined at merge, defaults applied by getRetrySettings", () => {
+    const merged = deepMerge(base(), base());
+    expect(merged.retry).toBeUndefined();
+    const eff = getRetrySettings(merged);
+    expect(eff).toEqual({ enabled: true, maxRetries: 5, rateLimitWaitMs: 15000, backoffBaseMs: 2000, respectRetryAfter: true });
   });
 });

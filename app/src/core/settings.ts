@@ -41,6 +41,36 @@ export interface CompactionSettings {
   summaryBudgetPercent: number;
 }
 
+/**
+ * Retry policy for Anthropic API calls (streamFromAPI).
+ *
+ * Applied around each streaming API call. Transient failures — rate limits
+ * (429), overload (529), other 5xx, and network errors — are retried up to
+ * `maxRetries` times. Deterministic client errors (400/401/403/404/422) are
+ * NOT retried: the payload will fail identically on every attempt, so a retry
+ * only wastes time. Abort always takes precedence and short-circuits retries.
+ *
+ * Rationale for the wait split:
+ *  - Rate limit (429): the server tells us how long to back off via the
+ *    `retry-after` header. When present we honor it; otherwise we wait a fixed
+ *    `rateLimitWaitMs` (default 15s) — a quota window rarely benefits from an
+ *    aggressive exponential curve.
+ *  - Overload / 5xx / network: no quota window, so we use exponential backoff
+ *    (`backoffBaseMs * 2^(attempt-1)`) to give the server room to recover.
+ */
+export interface RetrySettings {
+  /** Master switch. When false, streamFromAPI reverts to legacy no-retry behavior. */
+  enabled: boolean;
+  /** Max retry attempts after the initial call (5 = up to 6 total calls). */
+  maxRetries: number;
+  /** Fixed wait (ms) for 429 rate limits when no `retry-after` header is present. */
+  rateLimitWaitMs: number;
+  /** Base (ms) for exponential backoff on 529/5xx/network: base * 2^(attempt-1). */
+  backoffBaseMs: number;
+  /** Whether to honor the `retry-after` header on 429 responses when present. */
+  respectRetryAfter: boolean;
+}
+
 export interface PersistedCronJob {
   cron: string;
   prompt: string;
@@ -67,6 +97,7 @@ export interface Settings {
   providers?: Record<string, ProviderSettings>;
   model?: string;
   compaction?: CompactionSettings;
+  retry?: RetrySettings;
   theme?: string; // active theme name (maps to ~/.jarvis/themes/<name>/theme.json)
   cron?: CronSettings;
   /** Delegate worker defaults (delegate_read_task, cron delegate mode).
@@ -152,6 +183,14 @@ const DEFAULT_COMPACTION: CompactionSettings = {
   summaryBudgetPercent: 10,
 };
 
+const DEFAULT_RETRY: RetrySettings = {
+  enabled: true,
+  maxRetries: 5,
+  rateLimitWaitMs: 15_000,
+  backoffBaseMs: 2_000,
+  respectRetryAfter: true,
+};
+
 function mergeSections<T>(
   base: Record<string, T> | undefined,
   override: Record<string, T> | undefined,
@@ -185,6 +224,9 @@ export function deepMerge(base: Settings, override: Settings): Settings {
     compaction: override.compaction
       ? { ...DEFAULT_COMPACTION, ...base.compaction, ...override.compaction }
       : base.compaction,
+    retry: override.retry
+      ? { ...DEFAULT_RETRY, ...base.retry, ...override.retry }
+      : base.retry,
     theme: override.theme ?? base.theme,
     cron: {
       jobs: { ...base.cron?.jobs, ...override.cron?.jobs },
@@ -278,6 +320,10 @@ export function removeKey(section: "plugins" | "pieces", key: string): void {
 
 export function getCompactionSettings(settings: Settings): CompactionSettings {
   return { ...DEFAULT_COMPACTION, ...settings.compaction };
+}
+
+export function getRetrySettings(settings: Settings): RetrySettings {
+  return { ...DEFAULT_RETRY, ...settings.retry };
 }
 
 export function getPieceSettings(settings: Settings, pieceId: string): PieceSettings {

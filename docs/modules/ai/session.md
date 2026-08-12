@@ -6,7 +6,8 @@
 ## Responsibility
 
 Manages a single stateful conversation with the Anthropic API. Handles message history,
-streaming, tool calls, model overrides, context injection, and compaction.
+streaming, tool calls, model overrides, context injection, compaction, and **transient-error
+retry** (rate limits, overload, network) around the API call.
 
 ## Key Fields
 
@@ -38,6 +39,30 @@ streaming, tool calls, model overrides, context injection, and compaction.
 | `setStickyParams(params)` | (mission Gearbox) Sets/clears the sticky params map. `undefined` reverts to `effortSeed`. Called by the ModelRouter (from `/model <id> <json>` or the HUD picker), and by `SessionManager` on boot restore. |
 | `peekParams()` | (mission Gearbox) Returns a defensive copy of `stickyParams` — read-only inspection (e.g. `/chat/session-info`, `/model` status line). |
 | `resolveEffort(model)` | (mission Gearbox, private) Single source of truth for `output_config.effort`: Haiku → `undefined` (beta rejects it, 400); else `stickyParams.effort ?? effortSeed`. Feeds BOTH request paths (beta + standard) AND both usage-log call sites — eliminates the pre-Gearbox divergence where the log recorded `"xhigh"` while the request sent `"max"`. |
+| `classifyRetryError(err, attempt, retry)` | (private) Classifies an API error for retry. Returns `{ waitMs, kind }` for transient failures (429 → retry-after or `rateLimitWaitMs`; 408/409/5xx/network → exponential backoff `backoffBaseMs * 2^(attempt-1)`), or `null` for non-retryable errors (400/401/403/404/422 — deterministic; retrying wastes time). |
+| `parseRetryAfter(err)` | (private) Extracts the `retry-after` header (ms) from the SDK error. Accepts seconds (`"8"`) or HTTP-date. Returns `undefined` when absent/unparseable → caller falls back to the configured wait. |
+| `abortableWait(ms)` | (private) Sleeps `ms`, resolving early (`false`) if the AbortController fires. Lets ESC cancel a turn mid retry-wait instead of blocking the full wait. |
+
+## Retry (transient API errors)
+
+A retry loop wraps ONLY the `message`-acquisition block inside `streamFromAPI`
+(beta + standard paths). Everything downstream (compaction, history push,
+recursion) runs exactly once, after `message` is obtained. Config comes from
+`getRetrySettings(load())`, read fresh per turn (no restart to change values).
+
+| Error class | Retry? | Wait |
+|---|---|---|
+| 429 rate limit | yes | `retry-after` header (if present & `respectRetryAfter`) else `rateLimitWaitMs` (15s) |
+| 529 / other 5xx / 408 / 409 / network | yes | exponential backoff `backoffBaseMs * 2^(attempt-1)` (2s,4s,8s,16s,32s) |
+| 400 / 401 / 403 / 404 / 422 | **no** | — (deterministic; fails identically on retry) |
+| abort | **no** | — (propagates as `error: "aborted"`) |
+
+On each retry a `text_delta` is yielded ("⏳ … aguardando Ns …") so the wait is
+visible in the HUD. The wait is abortable (`abortableWait`) — ESC cancels
+immediately. Budget: up to `maxRetries` (default 5) after the initial call.
+Beta-400 fallback and image-strip recovery keep their own paths and take
+priority over this loop. Settings: `RetrySettings` in `core/settings.ts`
+(`enabled`, `maxRetries`, `rateLimitWaitMs`, `backoffBaseMs`, `respectRetryAfter`).
 
 ## Compaction
 
@@ -86,3 +111,7 @@ nextModelOverride (consumed after use)
 - The summarizer copy is sanitized (`sanitizeMessages`) and its usage recorded to `usage.log` on every round-trip.
 - Full pre-compaction history is archived via `archivePreCompactBackup` (conversation-store, untrimmed, newest 5 per label) before any replacement.
 - If `abortController.signal.aborted` is true when `streamFromAPI` is about to push the assistant message, the push is skipped entirely. This prevents an orphan `tool_use` block (no matching `tool_result`) when the API resolves just as the user presses ESC — the race condition that was causing 400 errors on the next turn.
+- The retry loop wraps ONLY `message` acquisition — never the whole generator. Recursive `yield* this.streamFromAPI()` calls (pause_turn, image-strip) each get their OWN retry budget; the loop never re-enters itself.
+- Abort has absolute precedence over any retryable classification: a cancelled request throws to the outer catch (`error: "aborted"`) and is never retried, even if it also looks like a network error.
+- Deterministic 4xx (400/401/403/404/422) are NEVER retried — `classifyRetryError` returns null. A 400 is a payload problem, not a transport one; retrying only delays the error.
+- `retry` is a field-explicit entry in `deepMerge` (settings.ts) — omitting it would silently drop user overrides (same trap that once dropped `delegate`).
