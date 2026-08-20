@@ -492,10 +492,9 @@ export function DiffViewerRenderer({ state }: { state: HudComponentState }) {
     })
 
     if (data.viewMode) setViewMode(data.viewMode)
-    // Auto-enable preview when opening a markdown file
+    // Auto-enable preview when opening a markdown file (theme is preserved from localStorage)
     if (data.mode === 'file' && data.file?.language === 'markdown') {
       setMdPreviewMode(true)
-      setMdTheme('muted')
     }
   }, [data])
 
