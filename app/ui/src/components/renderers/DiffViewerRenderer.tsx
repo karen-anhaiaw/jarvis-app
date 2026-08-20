@@ -604,8 +604,8 @@ export function DiffViewerRenderer({ state }: { state: HudComponentState }) {
     fetch('/hud/md-theme', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mdTheme: next }) }).catch(() => {})
     return next
   })
-  const themeLabel: Record<typeof mdTheme, string> = { muted: '☀ Muted', sepia: '🌿 Sepia', dark: '🌙 Dark' }
-  const nextLabel:  Record<typeof mdTheme, string> = { muted: 'Sepia', sepia: 'Dark', dark: 'Muted' }
+  const themeLabel: Record<typeof mdTheme, string> = { muted: '☀ Light', sepia: '🌿 Sepia', dark: '🌙 Dark' }
+  const nextLabel:  Record<typeof mdTheme, string> = { muted: 'Sepia', sepia: 'Dark', dark: 'Light' }
 
   // Button style factory for md toolbar buttons
   const mdBtn = (active: boolean) => ({
