@@ -16,6 +16,7 @@ import 'prismjs/components/prism-java'
 import 'prismjs/components/prism-go'
 import 'prismjs/components/prism-rust'
 import 'prismjs/components/prism-toml'
+import { marked } from 'marked'
 
 // ─── Types mirrored from diff-viewer piece ───
 
@@ -310,6 +311,39 @@ function highlightSyntax(str: string, language: string): any {
   return <span dangerouslySetInnerHTML={{ __html: html }} />
 }
 
+// ─── Markdown Preview Component ───
+
+// Custom marked renderer: syntax-highlight fenced code blocks via Prism
+const mdRenderer = new marked.Renderer()
+mdRenderer.code = ({ text, lang }: { text: string; lang?: string }) => {
+  const language = lang ?? 'text'
+  const prismLang = prismLangMap[language]
+  let highlighted = text
+  if (prismLang && Prism.languages[prismLang]) {
+    try {
+      highlighted = Prism.highlight(text, Prism.languages[prismLang], prismLang)
+    } catch { /* fallback to plain */ }
+  }
+  return `<pre class="md-pre-code"><code class="language-${language}">${highlighted}</code></pre>`
+}
+mdRenderer.link = ({ href, text }: { href?: string | null; text: string }) => {
+  return `<a href="${String(href ?? '')}" target="_blank" rel="noopener noreferrer">${text}</a>`
+}
+
+function MarkdownPreviewView({ file, theme }: { file: FileEntry; theme: 'muted' | 'sepia' | 'dark' }) {
+  const html = useMemo(() => {
+    return marked.parse(file.content, { renderer: mdRenderer, async: false, gfm: true, breaks: false }) as string
+  }, [file.content])
+
+  return (
+    <div className={`md-book-scroll md-theme-${theme}`}>
+      <div className="md-book-page">
+        <div className="md-book-content" dangerouslySetInnerHTML={{ __html: html }} />
+      </div>
+    </div>
+  )
+}
+
 // ─── File View Component ───
 
 function FileView({ file }: { file: FileEntry }) {
@@ -417,6 +451,11 @@ export function DiffViewerRenderer({ state }: { state: HudComponentState }) {
   const [tabs, setTabs] = useState<ViewerTab[]>([])
   const [activeTabIdx, setActiveTabIdx] = useState(0)
   const [viewMode, setViewMode] = useState<'inline' | 'side-by-side'>('side-by-side')
+  const [mdPreviewMode, setMdPreviewMode] = useState(true) // preview vs raw for .md files
+  const [mdTheme, setMdTheme] = useState<'muted' | 'sepia' | 'dark'>(() => {
+    try { return (localStorage.getItem('jarvis.md.theme') as 'muted' | 'sepia' | 'dark') || 'muted' }
+    catch { return 'muted' }
+  })
 
   // Session that opened each tab — used to route Accept/Reject/Dismiss replies
   // back to the correct chat. Piece publishes data.sessionId per tab.
@@ -453,6 +492,11 @@ export function DiffViewerRenderer({ state }: { state: HudComponentState }) {
     })
 
     if (data.viewMode) setViewMode(data.viewMode)
+    // Auto-enable preview when opening a markdown file
+    if (data.mode === 'file' && data.file?.language === 'markdown') {
+      setMdPreviewMode(true)
+      setMdTheme('muted')
+    }
   }, [data])
 
   const toggleView = useCallback(() => {
@@ -532,12 +576,74 @@ export function DiffViewerRenderer({ state }: { state: HudComponentState }) {
   const activeTab = tabs[activeTabIdx] ?? tabs[0]
   const tabData = activeTab.data
   const isDiff = tabData.mode === 'diff' || tabData.mode === 'compare'
+  const isMarkdownFile = tabData.mode === 'file' && tabData.file?.language === 'markdown'
+  const inMdPreview    = isMarkdownFile && mdPreviewMode
+
+  // Per-theme palette for toolbar/container (CSS handles page content)
+  const themeTokens = {
+    muted: { bg: '#EAEAEC', border: '#D0D2D8', title: '#4A5568', containerBg: '#F4F4F6', color: '#2D3748', isDark: false },
+    sepia: { bg: '#E2DFD9', border: '#CCC8C0', title: '#4A4440', containerBg: '#ECEAE5', color: '#3D312A', isDark: false },
+    dark:  { bg: '#1a1d23', border: '#2e3440', title: '#7a8896', containerBg: '#1a1d23', color: '#cdd5e0', isDark: true  },
+  }
+  const tok = themeTokens[mdTheme]
+
+  // Effective toolbar colors — use theme palette in preview, default dark otherwise
+  const tbBg     = inMdPreview ? tok.bg     : '#0d1218'
+  const tbBorder = inMdPreview ? tok.border : '#1a2030'
+  const titleCol = inMdPreview ? tok.title  : undefined
+
+  // Cycle: muted → sepia → dark → muted
+  const cycleTheme = () => setMdTheme(t => {
+    const next = t === 'muted' ? 'sepia' : t === 'sepia' ? 'dark' : 'muted'
+    try { localStorage.setItem('jarvis.md.theme', next) } catch {}
+    return next
+  })
+  const themeLabel: Record<typeof mdTheme, string> = { muted: '☀ Muted', sepia: '🌿 Sepia', dark: '🌙 Dark' }
+  const nextLabel:  Record<typeof mdTheme, string> = { muted: 'Sepia', sepia: 'Dark', dark: 'Muted' }
+
+  // Button style factory for md toolbar buttons
+  const mdBtn = (active: boolean) => ({
+    padding: '2px 8px', fontSize: '10px', borderRadius: '3px', cursor: 'pointer',
+    border: `1px solid ${active
+      ? (tok.isDark ? '#4a6a9a' : '#5a8ad0')
+      : (tok.isDark ? '#3a4450' : '#c8d0da')}`,
+    background: active
+      ? (tok.isDark ? 'rgba(74,106,154,0.2)' : 'rgba(45,95,166,0.1)')
+      : 'transparent',
+    color: active
+      ? (tok.isDark ? '#7ab0e8' : '#2d5fa6')
+      : (tok.isDark ? '#5a6878' : '#7a8898'),
+    transition: 'all 0.15s',
+  })
 
   return (
-    <div style={styles.container}>
+    <div style={inMdPreview
+      ? { ...styles.container, background: tok.containerBg, color: tok.color }
+      : styles.container}>
       {/* Toolbar */}
-      <div style={styles.toolbar}>
-        <div style={styles.title}>{activeTab.title}</div>
+      <div style={{ ...styles.toolbar, background: tbBg, borderBottom: `1px solid ${tbBorder}` }}>
+        <div style={titleCol ? { ...styles.title, color: titleCol } : styles.title}>
+          {activeTab.title}
+        </div>
+        {isMarkdownFile && (
+          <>
+            <button style={mdBtn(!mdPreviewMode)} onClick={() => setMdPreviewMode(false)} title="Show raw source">⌨ Raw</button>
+            <button style={mdBtn(mdPreviewMode)}  onClick={() => setMdPreviewMode(true)}  title="Rendered markdown preview">📖 Preview</button>
+            {mdPreviewMode && (
+              <button
+                style={{
+                  padding: '2px 8px', fontSize: '10px', borderRadius: '3px', cursor: 'pointer',
+                  border: `1px solid ${tok.isDark ? '#3a4450' : '#c8d0da'}`,
+                  background: 'transparent',
+                  color: tok.isDark ? '#7a9ab8' : '#6a7a8a',
+                  transition: 'all 0.15s',
+                }}
+                onClick={cycleTheme}
+                title={`Current theme: ${themeLabel[mdTheme]} — click for ${nextLabel[mdTheme]}`}
+              >{themeLabel[mdTheme]}</button>
+            )}
+          </>
+        )}
         {isDiff && (
           <button style={styles.toggleBtn(viewMode === 'inline')} onClick={toggleView}>
             {viewMode === 'inline' ? '≡ Inline' : '⇔ Side-by-Side'}
@@ -568,7 +674,11 @@ export function DiffViewerRenderer({ state }: { state: HudComponentState }) {
       </div>
 
       {/* Content */}
-      {tabData.mode === 'file' && tabData.file ? (
+      {tabData.mode === 'file' && tabData.file && isMarkdownFile && mdPreviewMode ? (
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <MarkdownPreviewView file={tabData.file} theme={mdTheme} />
+        </div>
+      ) : tabData.mode === 'file' && tabData.file ? (
         <div style={styles.content}>
           <FileView file={tabData.file} />
         </div>
@@ -579,7 +689,9 @@ export function DiffViewerRenderer({ state }: { state: HudComponentState }) {
       )}
 
       {/* Footer with stats + accept/reject */}
-      <div style={styles.stats}>
+      <div style={inMdPreview
+        ? { ...styles.stats, background: tbBg, borderTop: `1px solid ${tbBorder}`, color: tok.isDark ? '#5a6878' : '#8a9aaa' }
+        : styles.stats}>
         {tabData.mode === 'file' && tabData.file && (
           <>
             <span>{tabData.file.content.split('\n').length} lines</span>
