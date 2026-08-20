@@ -452,10 +452,17 @@ export function DiffViewerRenderer({ state }: { state: HudComponentState }) {
   const [activeTabIdx, setActiveTabIdx] = useState(0)
   const [viewMode, setViewMode] = useState<'inline' | 'side-by-side'>('side-by-side')
   const [mdPreviewMode, setMdPreviewMode] = useState(true) // preview vs raw for .md files
-  const [mdTheme, setMdTheme] = useState<'muted' | 'sepia' | 'dark'>(() => {
-    try { return (localStorage.getItem('jarvis.md.theme') as 'muted' | 'sepia' | 'dark') || 'muted' }
-    catch { return 'muted' }
-  })
+  const [mdTheme, setMdTheme] = useState<'muted' | 'sepia' | 'dark'>('muted')
+
+  // Load persisted theme from server settings on mount
+  useEffect(() => {
+    fetch('/hud/md-theme')
+      .then(r => r.json())
+      .then(({ mdTheme: saved }) => {
+        if (saved === 'muted' || saved === 'sepia' || saved === 'dark') setMdTheme(saved)
+      })
+      .catch(() => {})
+  }, [])
 
   // Session that opened each tab — used to route Accept/Reject/Dismiss replies
   // back to the correct chat. Piece publishes data.sessionId per tab.
@@ -594,7 +601,7 @@ export function DiffViewerRenderer({ state }: { state: HudComponentState }) {
   // Cycle: muted → sepia → dark → muted
   const cycleTheme = () => setMdTheme(t => {
     const next = t === 'muted' ? 'sepia' : t === 'sepia' ? 'dark' : 'muted'
-    try { localStorage.setItem('jarvis.md.theme', next) } catch {}
+    fetch('/hud/md-theme', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mdTheme: next }) }).catch(() => {})
     return next
   })
   const themeLabel: Record<typeof mdTheme, string> = { muted: '☀ Muted', sepia: '🌿 Sepia', dark: '🌙 Dark' }

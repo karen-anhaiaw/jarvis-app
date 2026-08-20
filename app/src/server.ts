@@ -236,6 +236,36 @@ export class HttpServer {
       return;
     }
 
+    // GET /hud/md-theme — returns the user's persisted markdown preview theme
+    if (req.url === "/hud/md-theme" && req.method === "GET") {
+      const settings = loadSettings();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ mdTheme: settings.mdTheme ?? 'muted' }));
+      return;
+    }
+
+    // POST /hud/md-theme — { mdTheme: 'muted' | 'sepia' | 'dark' } — persist preference
+    if (req.url === "/hud/md-theme" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        try {
+          const { mdTheme } = JSON.parse(body);
+          if (!['muted', 'sepia', 'dark'].includes(mdTheme)) {
+            res.writeHead(400); res.end(JSON.stringify({ error: 'invalid theme' })); return;
+          }
+          const settings = loadSettings();
+          settings.mdTheme = mdTheme;
+          saveSettings(settings);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, mdTheme }));
+        } catch {
+          res.writeHead(400); res.end();
+        }
+      });
+      return;
+    }
+
     // POST /hud/window-bounds — save main Electron window position/size.
     // Called by the Electron main process on 'moved'/'resized' (debounced).
     // Persisted under settings.window so it survives restarts.

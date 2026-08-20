@@ -99,6 +99,7 @@ export interface Settings {
   compaction?: CompactionSettings;
   retry?: RetrySettings;
   theme?: string; // active theme name (maps to ~/.jarvis/themes/<name>/theme.json)
+  mdTheme?: 'muted' | 'sepia' | 'dark'; // user's preferred markdown preview theme
   cron?: CronSettings;
   /** Delegate worker defaults (delegate_read_task, cron delegate mode).
    *  defaultRole: role id from ~/.jarvis/roles/ used when the caller omits
@@ -228,6 +229,7 @@ export function deepMerge(base: Settings, override: Settings): Settings {
       ? { ...DEFAULT_RETRY, ...base.retry, ...override.retry }
       : base.retry,
     theme: override.theme ?? base.theme,
+    mdTheme: override.mdTheme ?? base.mdTheme,
     cron: {
       jobs: { ...base.cron?.jobs, ...override.cron?.jobs },
     },
